@@ -37,3 +37,14 @@ test('missing task is nonzero; aliases -k/-t/-e parse correctly; independent hos
   assert.equal(runCli(['task-verify',task.id,'--version',String(task.version),'--pass'],{...deps,context:f.reviewer}),0);
   assert.equal(f.store.getTask(task.id)!.status,'SUCCEEDED');
 });
+
+test('CLI main entry works through a filesystem alias and never silently succeeds',async t=>{
+ const {mkdtempSync,cpSync,symlinkSync,rmSync}=await import('node:fs');
+ const {tmpdir}=await import('node:os');const {join}=await import('node:path');const {fileURLToPath}=await import('node:url');const {spawnSync}=await import('node:child_process');
+ const root=mkdtempSync(join(tmpdir(),'acb-cli-alias-')),real=join(root,'real'),alias=join(root,'alias');
+ cpSync(fileURLToPath(new URL('../src',import.meta.url)),join(real,'src'),{recursive:true});
+ symlinkSync(real,alias,process.platform==='win32'?'junction':'dir');
+ t.after(()=>{rmSync(alias,{force:true});rmSync(root,{recursive:true,force:true});});
+ const result=spawnSync(process.execPath,[join(alias,'src','cli.ts'),'help'],{encoding:'utf8',timeout:10000,windowsHide:true});
+ assert.equal(result.status,0,result.stderr);assert.match(result.stdout,/Agent Control Bridge CLI/);assert.equal(result.stderr,'');
+});

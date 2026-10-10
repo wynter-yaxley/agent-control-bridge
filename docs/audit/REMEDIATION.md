@@ -39,7 +39,7 @@
 - 应用恢复：已退出/未知区分，报备、事件授权、指定 CDP 参数重启、Windows Python 校验、恢复映射后继续。Mock 验证顺序；真实安装启动能力尚未验证；本轮未启动/重启真实 Agent。
 - 桌面安全：原写工具可能改变编辑焦点，默认阻塞；保留算法但受可信宿主单次授权和来源证明保护。旧 raw prompt continue/relay 不再直通执行。没有未经授权的 OS 物理键鼠/窗口激活路径。
 - GitHub：非交互进程包装层不提取凭据；已有 GitHub 集成缺可见性修改接口、本机无已授权 gh。旧建仓脚本需要 credential fill 提取 Token，违反本轮凭据铁律，因此未调用。私有推送和公开状态必须分别报告。
-- 迁移清理：12/12 原文件已迁入，原创 MIT 权利已获用户明确确认。新路径独立执行 help、16 项 Mock/发送算法/异常关闭测试；原始 12 文件的外部持久备份与基线 hash 逐一一致。源目录清理须待当前源码远端副本及最终核查通过；真实写链路仍单列未验证，不删除无关目录。
+- 迁移清理：12/12 原文件已迁入，原创 MIT 权利已获用户明确确认。新路径独立执行 help、16 项 Mock/发送算法/异常关闭测试；原始 12 文件的外部持久备份与基线 hash 逐一一致。远端 104 文件与本地 Git 树逐项一致，12/12 原备份和迁移 hash 核验后已清理旧工具目录，删除后 16 项 Mock 回归再次通过；真实写链路单列未验证，不删除无关目录。
 
 ## 后续优先顺序
 
@@ -53,3 +53,5 @@
 公开状态复核：2026-10-10 通过 GitHub 集成和匿名网页独立确认目标仓库为 public。此前观察到 private 与当前 public 不矛盾；本轮未获取凭据或调用可见性修改接口。
 
 通用规范补齐：SemVer/CHANGELOG/验收后版本 tag、隔离探针卫生、结论/证据/遗留验收模板、多项目优先级与会话隔离、可配置阻塞上报。failureReporting.blockedAfterMs 默认 600000ms；Watcher 以本次 BLOCKED 状态事件为起点，续租不会推迟报备，重复检查和重启不重复记录。实际用户消息仍由 Hermes 适配器发送。README 中英双版仅保留使用者内容，过程事项移至 CONTRIBUTING、DEVELOPMENT 与 audit。
+
+CLI 别名补充证据：目录别名启动旧入口 exit=0/helpPresent=false，新 import.meta.main 入口 exit=0/helpPresent=true；test/cli.test.ts 新增实际子进程契约，不降低旧断言。scripts/test.mjs 流式输出且零测试拒绝，clean-install 在规范临时路径运行并报告 pass/fail/skipped，超时仅清理自己启动的测试子树。初次 Windows CI 安装探针失败记录保留，须核验修订后 CI。SQLite3 及其 sidecar 同时纳入忽略/检查。

@@ -18,7 +18,7 @@ function scan(path,text,scope){
  for(const [kind,pattern]of Object.entries(patterns))if(pattern.test(text))violations.push({path,kind,scope});
  const userPath=username?.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
  if(userPath && new RegExp(`(?:[\\\\/]Users[\\\\/]|[\\\\/]home[\\\\/])${userPath}(?:[\\\\/]|["'])`,'i').test(text))violations.push({path,kind:'localUserPath',scope});
- if(/^(data|node_modules|dist|coverage|exports?|tmp|temp|profiles|browser-profile)\//.test(path)||/\.(db|sqlite)(-wal|-shm)?$|\.log$|(?:^|\/)\.env(?:$|\.(?!example$))|(?:^|\/)caller-policy\.json$|(?:^|\/)\.bridge\.config\.json$/.test(path))violations.push({path,kind:'privatePath',scope});
+ if(/^(data|node_modules|dist|coverage|exports?|tmp|temp|profiles|browser-profile)\//.test(path)||/\.(db|sqlite3?)(-wal|-shm)?$|\.log$|(?:^|\/)\.env(?:$|\.(?!example$))|(?:^|\/)caller-policy\.json$|(?:^|\/)\.bridge\.config\.json$/.test(path))violations.push({path,kind:'privatePath',scope});
 }
 for(const file of files){if(!existsSync(file))continue;const data=readFileSync(file);if(data.includes(0))throw Error('Unexpected binary source file');scan(file,data.toString('utf8'),'working-tree');}
 let historyBlobs=0;const seen=new Set();
@@ -26,7 +26,7 @@ for(const commit of git('rev-list','--all').trim().split('\n').filter(Boolean)){
  for(const row of split(git('ls-tree','-r','-z',commit))){const match=/^\d+ blob ([a-f0-9]+)\t(.*)$/s.exec(row);if(!match||seen.has(match[1]))continue;seen.add(match[1]);historyBlobs++;scan(match[2],git('show',match[1]),'history');}
 }
 if(violations.length){console.error(JSON.stringify({ok:false,violations}));process.exit(1);}
-for(const file of ['data/check.db','data/check.db-wal','data/check.db-shm','.env','.env.local','.bridge.config.json','node_modules/x','dist/x','coverage/x','tools/desktop/__pycache__/x.pyc','tools/desktop/.venv/x','profiles/x','exports/x','x.log'])if(!git('check-ignore','--no-index',file).trim())throw Error('Ignore protection missing');
+for(const file of ['data/check.db','data/check.db-wal','data/check.db-shm','local.sqlite3','local.sqlite3-wal','local.sqlite3-shm','.env','.env.local','.bridge.config.json','node_modules/x','dist/x','coverage/x','tools/desktop/__pycache__/x.pyc','tools/desktop/.venv/x','profiles/x','exports/x','x.log'])if(!git('check-ignore','--no-index',file).trim())throw Error('Ignore protection missing');
 for(const file of ['config.example.json','.env.example','LICENSE','test/fixtures/legacy-schema.sql']){
  const r=spawnSync('git',['check-ignore','--no-index',file],{encoding:'utf8',windowsHide:true});if(r.status===0)throw Error('Required example/fixture ignored');
 }
