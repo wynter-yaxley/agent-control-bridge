@@ -4,6 +4,9 @@ Versions follow Semantic Versioning. A GitHub Release requires an accepted versi
 
 ## Unreleased
 
+- Windows ACL verification uses SID rules and .NET file APIs, avoiding module auto-loading and account-name resolution in controlled environments; failures expose fixed stages only.
+- Desktop sends verify prompt content exactly, including whitespace, and refuse to create an unregistered GPT conversation when its editor is missing; three Mock regressions added.
+
 - Validated portable configuration, event-driven watcher with polling fallback and overdue blocked-work notifications.
 - Trusted prompt provenance, project/workspace/conversation identity and GPT conversation naming checks.
 - Controlled SQLite migration, independent review boundary, CLI contracts and bounded inputs.

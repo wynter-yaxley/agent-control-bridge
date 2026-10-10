@@ -60,6 +60,37 @@ class SenderContracts(unittest.TestCase):
     def test_codex_mismatch_never_submits(self):
         fake,_=self.codex_run(True);self.assertEqual([x[0] for x in fake.calls],['Input.insertText'])
 
+    def test_gpt_whitespace_mutation_does_not_submit(self):
+        authority=common.DesktopAuthority();approval=authority.approve('gpt_send_cdp.py');fake=FakeGpt()
+        original=fake.evaluate
+        def altered(expression):
+            value=original(expression)
+            return value+' ' if isinstance(value,str) and value.startswith('ok:') else value
+        fake.evaluate=altered
+        with patch.object(common,'config',return_value={'enabled':True,'allowForegroundAutomation':True}),patch.object(gpt,'find_target_compat',return_value='mock'),patch.object(gpt,'Cdp',return_value=fake),patch.object(sys,'argv',['gpt-send','[TEST] generated requirement']),redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit) as failure:gpt.main(authority,approval)
+        self.assertEqual(failure.exception.code,4);self.assertEqual(fake.closed,1);self.assertFalse(any('send-button' in call for call in fake.calls))
+
+    def test_codex_whitespace_mutation_does_not_submit(self):
+        prompt='[TEST] trusted generated engineering prompt';digest=hashlib.sha256(prompt.encode()).hexdigest();authority=common.DesktopAuthority();fake=FakeCodex()
+        original=fake.call
+        def altered(method,params):
+            result=original(method,params)
+            if method=='Input.insertText':fake.text=' '+fake.text+' '
+            return result
+        fake.call=altered
+        with patch.object(common,'config',return_value={'enabled':True,'allowForegroundAutomation':True}),patch.object(codex,'find_codex_shell_compat',return_value='mock'),patch.object(codex,'Cdp',return_value=fake),patch.object(sys,'argv',['codex-send',prompt]),redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit) as failure:codex.main(authority,authority.approve('codex_send_cdp.py',digest),authority.approve('verified-chatgpt-prompt',digest))
+        self.assertEqual(failure.exception.code,4);self.assertEqual(fake.closed,1);self.assertEqual([x[0] for x in fake.calls],['Input.insertText'])
+
+    def test_missing_gpt_editor_never_creates_an_unregistered_conversation(self):
+        authority=common.DesktopAuthority();approval=authority.approve('gpt_send_cdp.py');fake=FakeGpt()
+        def absent(expression):fake.calls.append(expression);return 'none'
+        fake.evaluate=absent
+        with patch.object(common,'config',return_value={'enabled':True,'allowForegroundAutomation':True}),patch.object(gpt,'find_target_compat',return_value='mock'),patch.object(gpt,'Cdp',return_value=fake),patch.object(sys,'argv',['gpt-send','[TEST] generated requirement']),redirect_stdout(io.StringIO()):
+            with self.assertRaises(common.ToolError) as failure:gpt.main(authority,approval)
+        self.assertEqual(failure.exception.code,'PROVENANCE');self.assertEqual(fake.closed,1);self.assertEqual(fake.calls,[gpt.CHECK_EDITOR])
+
     def test_python_configuration_rejects_invalid_origin_flags_and_unknown_fields(self):
         with tempfile.TemporaryDirectory(prefix='acb-python-config-') as folder:
             path=Path(folder)/'config.json'

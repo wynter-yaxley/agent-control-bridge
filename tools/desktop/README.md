@@ -52,3 +52,5 @@ python tools/desktop/gpt-read --help
 - `codex-status`：历史 SQLite 表可能因应用版本不同而不存在；错误不是任务成功证据。
 
 Mock 自动化覆盖默认拒绝、单次权限、目标限制、兼容 help、CDP 异常、退出码及恢复序列。真实登录桌面、实际发送、模型能力、MSIX 启动与焦点影响尚未验证。详见 [工作拓扑与恢复](../../docs/WORKSPACE_AND_RECOVERY.md)。后续可以把状态读取逐步封装到 TypeScript，保留经过验证的 Python 接口，不以全量重写作为迁移前提。
+
+发送后的 composer 内容必须与原 Prompt 完全相等，包含首尾空白；不能用 strip 掩盖哈希链中的内容变化。GPT 输入框缺失时拒绝，不自动创建未登记对话；先恢复登记的同名 GPT 会话再继续。Mock 额外覆盖空白篡改不提交和不新建错配会话。

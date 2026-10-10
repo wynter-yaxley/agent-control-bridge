@@ -68,7 +68,7 @@ test('isolated subprocess retains OS ACL runtime while excluding arbitrary envir
  const {silentProcess}=await import('../src/silent-process.ts');const {randomUUID}=await import('node:crypto');
  const root=temporary(t),path=join(root,'isolated.db'),script=join(root,'probe.mjs'),key='ACB_TEST_ONLY_'+randomUUID().replaceAll('-','');
  process.env[key]='synthetic-only';t.after(()=>{delete process.env[key];});
- writeFileSync(script,`import {createDb} from ${JSON.stringify(new URL('../src/db.ts',import.meta.url).href)};const db=createDb({dbPath:process.argv[2]});try{console.log(JSON.stringify({schema:db.prepare('PRAGMA user_version').get().user_version,extraEnvironmentAbsent:process.env[process.argv[3]]===undefined}));}finally{db.close();}`);
+ writeFileSync(script,`import {createDb} from ${JSON.stringify(new URL('../src/db.ts',import.meta.url).href)};try{const db=createDb({dbPath:process.argv[2]});try{console.log(JSON.stringify({schema:db.prepare('PRAGMA user_version').get().user_version,extraEnvironmentAbsent:process.env[process.argv[3]]===undefined}));}finally{db.close();}}catch(error){console.log(JSON.stringify({aclError:/^Cannot restrict NTFS ACL; database access refused \\(phase=(startup|entered|read|rules|apply|verify|done)\\)$/.test(error.message)?error.message:'Isolated database probe failed'}));}`);
  const result=await silentProcess('isolated-acl',process.execPath,[script,path,key],{timeoutMs:30000});
  assert.ok(result.ok,result.summary);assert.deepEqual(JSON.parse(result.stdout!),{schema:2,extraEnvironmentAbsent:true});
 });

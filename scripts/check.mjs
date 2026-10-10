@@ -38,7 +38,7 @@ for(const file of files.filter(f=>f.endsWith('.md'))){
   let link=match[1].replace(/^<|>$/g,'');if(/^[a-z]+:|^#|^\//i.test(link))continue;link=link.split('#')[0];if(link&&!existsSync(resolve(dirname(file),decodeURIComponent(link))))throw Error('Broken local Markdown link: '+file+' -> '+link);
  }
 }
-const python=process.env.ACB_CHECK_PYTHON??'python';const xml=spawnSync(python,['scripts/check_svg.py'],{encoding:'utf8',windowsHide:true});if(xml.status!==0)throw Error('SVG XML validation failed; Python 3.11+ required');
+const python=process.env.ACB_CHECK_PYTHON??'python';const xml=spawnSync(python,['scripts/check_svg.py'],{encoding:'utf8',windowsHide:true});if(xml.status!==0)throw Error('SVG XML validation failed; Python 3.10+ required on PATH or via ACB_CHECK_PYTHON');
 console.log(JSON.stringify({ok:true,sourceFiles:files.length,historyBlobs,secretCandidates:0,cliHelpCommands:commands.length,markdownLinks:'PASS',svgXml:'PASS',ignore:'PASS',configurationExample:'PASS',limits:'Pattern scan does not prove absence of unknown credentials'}));
 if(process.env.npm_execpath) {
  const result=spawnSync(process.execPath,[process.env.npm_execpath,'pack','--dry-run','--json','--ignore-scripts'],{encoding:'utf8',maxBuffer:4*1024*1024,windowsHide:true});

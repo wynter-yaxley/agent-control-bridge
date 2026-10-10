@@ -27,7 +27,7 @@
     "THIRD_PARTY_NOTICES.md"
   ],
   "type": "module",
-  "description": "Hermes Ã— Codex Ã— ChatGPT Ã— Pi ç»Ÿä¸€æŽ§åˆ¶æ¡¥",
+  "description": "A local task-control and state-management bridge for Hermes, ChatGPT and Codex",
   "scripts": {
     "start": "node dist/cli.js",
     "cli": "node src/cli.ts",

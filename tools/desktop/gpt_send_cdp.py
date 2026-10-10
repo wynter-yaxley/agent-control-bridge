@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # gpt_send_cdp.py — Windows 侧执行，CDP 向 ChatGPT 输入框注入提示词并提交
-# 流程：找输入框 → 若无则点"新聊天"并等输入框出现 → 注入 → 发送
+# 流程：已登记对话的输入框 → 精确注入校验 → 提交；不自动新建对话
 import sys
 import json
 import time
@@ -8,14 +8,6 @@ import urllib.request
 from desktop_common import Cdp, find_target, guard_write, entry, ToolError, validate_prompt
 
 
-
-CLICK_NEW_CHAT = """
-(() => {
-  const btn = [...document.querySelectorAll('a,button')].find(e => /新聊天|新对话|New chat/i.test(e.textContent||''));
-  if (btn) { btn.click(); return 'clicked'; }
-  return 'no-btn';
-})()
-"""
 
 CHECK_EDITOR = """
 (() => {
@@ -60,16 +52,9 @@ def main(authority=None, approval=None, bridge_receipt=None):
         def recv(): return connection.call(*pending[0])
         def evaljs(js): return connection.evaluate(js)
 
-        # 1. 确保有输入框：若无则点新聊天，轮询等输入框
+        # Recovery must restore the registered conversation, never open an untracked one.
         if evaljs(CHECK_EDITOR) != "found":
-            clicked = evaljs(CLICK_NEW_CHAT)
-            for _ in range(20):  # 最多 ~20 秒
-                time.sleep(1)
-                if evaljs(CHECK_EDITOR) == "found":
-                    break
-        if evaljs(CHECK_EDITOR) != "found":
-            print(json.dumps({"error": "等待后仍无输入框（新对话未加载）"}, ensure_ascii=False))
-            sys.exit(3)
+            raise ToolError('PROVENANCE','Restore the registered GPT conversation; automatic new-chat fallback is disabled')
 
         # 2. 检查输入框是否非空（含未发送草稿）；非空且无 force-clear 则拒绝
         read_editor = """
@@ -113,7 +98,7 @@ def main(authority=None, approval=None, bridge_receipt=None):
         if val == "no-editor":
             sys.exit(3)
         # 严格相等验证：注入后 editor 文本须 == prompt，否则 abort 不发送
-        if not val.startswith("ok:") or val[3:].strip() != prompt.strip():
+        if not val.startswith("ok:") or val[3:] != prompt:
             print(json.dumps({"error": "注入 mismatch，中止发送"}, ensure_ascii=False))
             sys.exit(4)
 

@@ -29,7 +29,7 @@
     {
       "file": "codex_send_cdp.py",
       "sourceSha256": "a6645c4030a39fe5b15dd1cb99a0a356da7d427cf731b7c7c2c3b907d482611d",
-      "migratedSha256": "5464a7d583f5f3d2940a422cba4dccefc2b6bf3663226b050ec7f91f192e8426",
+      "migratedSha256": "34b2e4b8ed0a41f3d0f0b79fd57e1921e4128611cd5a67296dbbee1d5faa835e",
       "transformed": true
     },
     {
@@ -53,7 +53,7 @@
     {
       "file": "gpt_send_cdp.py",
       "sourceSha256": "83f01f7f08d04496621e504a3853443a61f0e84ba5046bfdb727bde4dbe746a0",
-      "migratedSha256": "ddb6fa8829ade46d81f1d907288a8c8a4c7aba980954dc7fa87618a7ae496f20",
+      "migratedSha256": "1d212c8269dc3d59444eaba4c5a442170a4a6d78d59fdfe9c1601b54bce7e9c7",
       "transformed": true
     },
     {

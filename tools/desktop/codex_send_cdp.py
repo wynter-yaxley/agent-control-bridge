@@ -101,7 +101,7 @@ def main(authority=None, approval=None, bridge_receipt=None):
 
         # 4. 严格相等验证；mismatch 则 abort，不提交
         txt = evaljs(READ_COMPOSER)
-        if txt.strip() != prompt.strip():
+        if txt != prompt:
             print(json.dumps({"error": "注入 mismatch，中止提交（未按 Enter）"}, ensure_ascii=False))
             sys.exit(4)
         print(json.dumps({"inject": "ok"}, ensure_ascii=False))

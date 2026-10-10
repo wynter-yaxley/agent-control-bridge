@@ -26,6 +26,8 @@ npm run test:install
 
 `test` 真实发现 test 文件，零测试失败；`test:e2e` 隔离 CLI 和 Mock 生命周期；`test:desktop` Python Mock/安全/恢复合约，不访问真实桌面；`test:install` 在全新临时路径复制公开源文件，npm ci、编译、测试、Demo，结束清理。Windows/Linux CI 不需要本机盘符、账号、真实 API 或已登录应用。
 
+开发检查及桌面 Mock 需要 Python >=3.10。`check` 默认从 PATH 查找 `python`，也可通过 `ACB_CHECK_PYTHON` 指定解释器；不依赖个人安装路径。缺少解释器的检查记为失败，配置后重新运行并分别保留结果。
+
 测试类型与结果分别列 Unit、Integration、Desktop Mock、External Agent。真实桌面、模型、飞书通知、前台效果和 MSIX 恢复未覆盖；不能因为 npm test 通过把它们标为 PASS。Windows 专属系统路径防影子测试在 Linux 显式跳过，跳过不计通过。未配置 Lint，不编造 lint 成功。
 
 ## 回归重点
@@ -56,3 +58,5 @@ package.json 使用 SemVer；行为变化写 [CHANGELOG](../CHANGELOG.md) Unrele
 控制者发现任务持续阻塞超过配置阈值必须如实报备，不能静默无限重试。Watcher 提供本地持久观察；真正用户消息与送达证据由外部控制者负责。默认值及具体部署步骤集中在 [DEPLOYMENT](DEPLOYMENT.md) 和配置样例。
 
 隔离子进程只继承 OS 必要环境元数据；Windows 内置 cmdlet 模块解析固定到受信任系统目录，不继承任意认证字段或用户模块路径。干净安装探针会真正建库并验证受限权限，不能通过跳过 ACL 测试制造绿色结果。
+
+ACL 助手通过 .NET 读取文件及 SID 规则，不依赖模块自动加载或 SID 到账户名转换。失败只附固定阶段标识，保留超时/权限错误分类；不输出原始 PowerShell 异常、路径、身份或命令数据。
