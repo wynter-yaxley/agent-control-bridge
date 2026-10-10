@@ -119,7 +119,7 @@ UNKNOWN → reviewer requeue → QUEUED
 eligible active state → owner cancel → CANCELLED
 ```
 
-`--by`, executor names, role strings and environment variables grant no authority. Caller identity comes from the OS principal and protected policy; updates check version, holder, instance and attempt. Executors cannot review themselves, and ordinary SQL final-success writes also have a review gate. Owners who can edit host code, policy or data belong to the trusted boundary; this ledger cannot isolate arbitrary malicious code sharing the same OS account. See [identity and security](docs/DEPLOYMENT.md).
+`--by`, executor names, role strings and environment variables grant no authority. Caller identity comes from the OS principal and protected policy; updates check version, holder, instance and attempt. Executors cannot review themselves, and ordinary SQL final-success writes also have a review gate. Owners who can edit host code, policy or data belong to the trusted boundary; this ledger cannot isolate arbitrary malicious code sharing the same OS account. Linux currently supports the single-user core CLI and Demo; shared writable review across UIDs is not provided. See [identity and security](docs/DEPLOYMENT.md).
 
 The project does not obtain, copy, display, persist or modify credentials, Cookies or session Tokens. Business databases, personal configuration, logs, Profiles and caches are ignored. Keep private business content out of messages and logs as well.
 

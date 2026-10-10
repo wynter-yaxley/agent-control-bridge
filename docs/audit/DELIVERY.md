@@ -26,7 +26,7 @@
 
 | 检查 | 结果 | 实际证据 |
 |---|---|---|
-| npm test | PASS | 17 文件，107 tests/pass，0 fail/skipped |
+| npm test | PASS | 17 文件，111 tests/pass，0 fail/skipped |
 | npm run build / typecheck | PASS | 实际退出 0；编译输出带 Schema 与权限脚本 |
 | CLI Contract | PASS | cli/e2e 负例；37 子命令 help；stderr/非零 |
 | SQLite Migration | PASS | v0/v1→v2、重复、回滚、数据保留、未来版本拒绝 |
@@ -34,7 +34,7 @@
 | Prompt Provenance / topology | PASS | 可信 Mock、伪造/篡改/未知能力/会话名错配/重复投递拒绝 |
 | Desktop Safety / recovery / sender Mock | PASS | 16 tests；无网络/真实输入，默认拒绝、单次授权、来源、submit mismatch、finally close |
 | E2E Workflow | PASS | 单独运行 4 tests，0 fail/skipped |
-| Clean install | PASS | 全新临时目录 npm ci、编译、107 tests、4 E2E、配置、compiled Demo，无真实 Agent |
+| Clean install | PASS | 全新临时目录 npm ci、编译、111 tests、4 E2E、配置、compiled Demo，无真实 Agent |
 | 基础安全/规范 | PASS | 当前+全 refs 模式扫描、忽略、链接、XML、package 79 文件且私密路径 0 |
 | npm audit | PASS | 已声明 3 个开发依赖，0 已知漏洞；不代表穷尽供应链风险 |
 | CI 实际运行 | NOT_VERIFIED | [运行 38035627311](https://github.com/wynter-yaxley/agent-control-bridge/actions/runs/38035627311)；Ubuntu success；Windows None。Linux 的 3 项 Windows 专属身份/ACL 探针显式 SKIPPED，不计 PASS |
@@ -73,4 +73,6 @@
 
 PARTIALLY_DELIVERED。已实现内容待 Hermes 独立验收；Codex 不设置 SUCCEEDED。
 
-初次远端 CI 38035627311 的 Windows 干净安装步骤超时，随后临时目录清理 EPERM，保留此失败记录；其余 Windows 步骤及 Linux 全流程通过。补充复现确认目录别名下 CLI 退出 0 但输出为空，已改为 Node import.meta.main 并新增回归；安装测试改规范临时路径、流式诊断、失败摘要、有限测试预算、只清理本次自建进程树和有界文件清理。107 项本地回归及干净安装重跑通过，新远端 CI 尚待复核，不将首次失败抹掉或算通过。
+初次远端 CI 38035627311 的 Windows 干净安装步骤超时，随后临时目录清理 EPERM，保留此失败记录；其余 Windows 步骤及 Linux 全流程通过。补充复现确认目录别名下 CLI 退出 0 但输出为空，已改为 Node import.meta.main 并新增回归；安装测试改规范临时路径、流式诊断、失败摘要、有限测试预算、只清理本次自建进程树和有界文件清理。111 项本地回归及干净安装重跑通过，新远端 CI 尚待复核，不将首次失败抹掉或算通过。
+
+第二次 CI 38036563133 的流式诊断确认受限 Windows 环境中 NTFS ACL helper 超时；未跳过权限测试。统一 controlledProcessEnv 仅传必要 OS 元数据，并固定系统模块路径；新增实际隔离子进程建库/秘密环境排除回归。本地 111 测试及干净安装通过，远端重跑待核验。另补 init 拒绝旧库、陌生/缺表 Schema 在写入前拒绝，旧文件字节和版本均不变。

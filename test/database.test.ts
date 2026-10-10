@@ -56,3 +56,19 @@ test('broad authorization SID fails closed before database creation', {skip:proc
   const root=temporary(t), path=join(root,'not-created.db');
   assert.throws(()=>createDb({dbPath:path,authorizedSids:['S-1-5-11']}),/ACL/); assert.equal(existsSync(path),false);
 });
+
+for(const version of [0,2])test(`foreign or incomplete schema ${version} is refused without changing data`,t=>{
+ const root=temporary(t),path=join(root,'foreign.db'),original=new DatabaseSync(path);
+ original.exec(`CREATE TABLE unrelated(id INTEGER); INSERT INTO unrelated VALUES(17); PRAGMA user_version=${version}`);original.close();
+ const before=readFileSync(path);assert.throws(()=>createDb({dbPath:path,allowMigrations:true}),/structure/);assert.deepEqual(readFileSync(path),before);
+ const check=new DatabaseSync(path,{readOnly:true});try{assert.equal(check.prepare('SELECT id FROM unrelated').get()!.id,17);}finally{check.close();}
+});
+
+test('isolated subprocess retains OS ACL runtime while excluding arbitrary environment data',async t=>{
+ const {silentProcess}=await import('../src/silent-process.ts');const {randomUUID}=await import('node:crypto');
+ const root=temporary(t),path=join(root,'isolated.db'),script=join(root,'probe.mjs'),key='ACB_TEST_ONLY_'+randomUUID().replaceAll('-','');
+ process.env[key]='synthetic-only';t.after(()=>{delete process.env[key];});
+ writeFileSync(script,`import {createDb} from ${JSON.stringify(new URL('../src/db.ts',import.meta.url).href)};const db=createDb({dbPath:process.argv[2]});try{console.log(JSON.stringify({schema:db.prepare('PRAGMA user_version').get().user_version,extraEnvironmentAbsent:process.env[process.argv[3]]===undefined}));}finally{db.close();}`);
+ const result=await silentProcess('isolated-acl',process.execPath,[script,path,key],{timeoutMs:30000});
+ assert.ok(result.ok,result.summary);assert.deepEqual(JSON.parse(result.stdout!),{schema:2,extraEnvironmentAbsent:true});
+});

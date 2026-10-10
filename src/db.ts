@@ -43,7 +43,9 @@ export function createDb(options: DbOptions = {}): DatabaseSync {
   try {
     const current = schemaVersion(db);
     if (current > SCHEMA_VERSION) throw new BridgeError('SCHEMA', 'Unsupported newer database schema');
-    const hasTables = Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='tasks'").get());
+    const tableNames = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all().map(row=>String(row.name)));
+    const hasTables = tableNames.has('tasks');
+    if ((!hasTables && tableNames.size>0) || (current===SCHEMA_VERSION && ['projects','sessions','tasks','events','approvals','deliverables','audit_log','alerts','prompts','watcher_notifications','conversation_workspaces','codex_conversations'].some(name=>!tableNames.has(name)))) throw new BridgeError('SCHEMA','Database structure does not match the bridge schema; no upgrade attempted');
     if (hasTables && current < SCHEMA_VERSION && !options.allowMigrations) throw new BridgeError('SCHEMA', 'Schema upgrade required; back up and explicitly run migrate');
     const budget = options.busyTimeoutMs ?? 5000;
     if (!Number.isInteger(budget) || budget < 0 || budget > 30000) throw new BridgeError('CONFIG', 'Invalid database busy timeout');

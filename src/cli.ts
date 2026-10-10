@@ -147,7 +147,7 @@ export function runCli(argv: string[], dependencies: CliDependencies = {}): numb
       if (dependencies.db) db = dependencies.db;
       else {
         ownsDb = true;
-        if (definition.write) db = createDb({ authorizedSids, dbPath: config.database.path, busyTimeoutMs: config.database.busyTimeoutMs, allowMigrations: ['init','migrate'].includes(command) });
+        if (definition.write) db = createDb({ authorizedSids, dbPath: config.database.path, busyTimeoutMs: config.database.busyTimeoutMs, allowMigrations: command === 'migrate' });
         else {
           if (!existsSync(config.database.path)) throw new CliError('IO: database absent; run init', 1);
           db = new DatabaseSync(config.database.path, { readOnly: true });

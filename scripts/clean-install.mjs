@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve, dirname, basename } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { redact } from '../src/security.ts';
+import { controlledProcessEnv } from '../src/silent-process.ts';
 // Canonical paths avoid Windows short-name aliases changing module entry identity.
 const temporaryRoot=realpathSync.native(tmpdir());
 const directory=mkdtempSync(join(temporaryRoot,'acb-clean-install-'));
@@ -34,8 +35,7 @@ try {
  mkdirSync(join(directory,'config'));
  writeFileSync(join(directory,'empty-user.npmrc'),'');writeFileSync(join(directory,'empty-global.npmrc'),'');
  const npm=process.env.npm_execpath;if(!npm)throw Error('Run through npm run test:install');
- const env={};
- for(const key of ['PATH','Path','SystemRoot','WINDIR','ComSpec','HOME','USERPROFILE','HOMEDRIVE','HOMEPATH','APPDATA','LOCALAPPDATA','CI','NO_COLOR'])if(process.env[key]!==undefined)env[key]=process.env[key];
+ const env=controlledProcessEnv();
  Object.assign(env,{TEMP:temporaryRoot,TMP:temporaryRoot,npm_config_userconfig:join(directory,'empty-user.npmrc'),npm_config_globalconfig:join(directory,'empty-global.npmrc'),npm_config_registry:'https://registry.npmjs.org/'});
  for(const args of [['ci','--ignore-scripts','--no-audit','--fund=false'],['run','typecheck'],['run','build'],['test'],['run','test:e2e']]){
   const result=await run(process.execPath,[npm,...args],env);

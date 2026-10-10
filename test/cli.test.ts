@@ -48,3 +48,12 @@ test('CLI main entry works through a filesystem alias and never silently succeed
  const result=spawnSync(process.execPath,[join(alias,'src','cli.ts'),'help'],{encoding:'utf8',timeout:10000,windowsHide:true});
  assert.equal(result.status,0,result.stderr);assert.match(result.stdout,/Agent Control Bridge CLI/);assert.equal(result.stderr,'');
 });
+
+test('CLI init refuses legacy business schema; only explicit migrate can upgrade',async t=>{
+ const {DatabaseSync}=await import('node:sqlite');const {mkdtempSync,mkdirSync,readFileSync,rmSync}=await import('node:fs');const {tmpdir}=await import('node:os');const {join}=await import('node:path');const {fileURLToPath}=await import('node:url');const {spawnSync}=await import('node:child_process');
+ const root=mkdtempSync(join(tmpdir(),'acb-init-legacy-'));t.after(()=>rmSync(root,{recursive:true,force:true}));mkdirSync(join(root,'data'));
+ const path=join(root,'data','legacy.db'),legacy=new DatabaseSync(path);legacy.exec(readFileSync(new URL('./fixtures/schema-v0.sql',import.meta.url),'utf8'));legacy.prepare("INSERT INTO tasks(id,kind,title,status,created_at,updated_at) VALUES('kept','test','kept','QUEUED','2000-01-01','2000-01-01')").run();legacy.close();
+ const before=readFileSync(path);const result=spawnSync(process.execPath,[fileURLToPath(new URL('../src/cli.ts',import.meta.url)),'init','--db',path],{cwd:root,encoding:'utf8',timeout:30000,windowsHide:true});
+ assert.equal(result.status,5,result.stderr);assert.equal(result.stdout,'');assert.match(result.stderr,/SCHEMA/);assert.deepEqual(readFileSync(path),before);
+ const check=new DatabaseSync(path,{readOnly:true});try{assert.equal(check.prepare('PRAGMA user_version').get()!.user_version,0);assert.equal(check.prepare('SELECT id FROM tasks').get()!.id,'kept');}finally{check.close();}
+});

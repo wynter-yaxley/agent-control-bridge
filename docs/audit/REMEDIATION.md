@@ -55,3 +55,5 @@
 通用规范补齐：SemVer/CHANGELOG/验收后版本 tag、隔离探针卫生、结论/证据/遗留验收模板、多项目优先级与会话隔离、可配置阻塞上报。failureReporting.blockedAfterMs 默认 600000ms；Watcher 以本次 BLOCKED 状态事件为起点，续租不会推迟报备，重复检查和重启不重复记录。实际用户消息仍由 Hermes 适配器发送。README 中英双版仅保留使用者内容，过程事项移至 CONTRIBUTING、DEVELOPMENT 与 audit。
 
 CLI 别名补充证据：目录别名启动旧入口 exit=0/helpPresent=false，新 import.meta.main 入口 exit=0/helpPresent=true；test/cli.test.ts 新增实际子进程契约，不降低旧断言。scripts/test.mjs 流式输出且零测试拒绝，clean-install 在规范临时路径运行并报告 pass/fail/skipped，超时仅清理自己启动的测试子树。初次 Windows CI 安装探针失败记录保留，须核验修订后 CI。SQLite3 及其 sidecar 同时纳入忽略/检查。
+
+受控迁移补充：init 只初始化空库，旧库明确要求 migrate；陌生及缺表当前版本数据库先拒绝，回归证明原始 bytes/version/业务记录不变。Windows 安装 CI 的 ACL 超时不算通过，恢复必要非秘密 OS 元数据并固定受信任系统模块路径，新增真实临时库权限子进程测试；111 项本地回归通过，待远端复核。

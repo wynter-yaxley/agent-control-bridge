@@ -119,7 +119,7 @@ UNKNOWN → reviewer requeue → QUEUED
 合法活动状态 → owner cancel → CANCELLED
 ```
 
-`--by`、执行者名称、role 字符串与环境变量不能授予权限。调用身份来自 OS 主体和受保护策略；状态更新校验版本、holder、instance 与 attempt。执行者不能验收自己，普通 SQL 最终成功写入也有验收门禁。直接修改宿主代码、策略或数据库的所有者属于可信边界；同一 OS 账户的任意恶意代码不受这套台账权限隔离。部署配置见 [身份和安全模型](docs/DEPLOYMENT.md)。
+`--by`、执行者名称、role 字符串与环境变量不能授予权限。调用身份来自 OS 主体和受保护策略；状态更新校验版本、holder、instance 与 attempt。执行者不能验收自己，普通 SQL 最终成功写入也有验收门禁。直接修改宿主代码、策略或数据库的所有者属于可信边界；同一 OS 账户的任意恶意代码不受这套台账权限隔离。Linux 当前支持单用户核心 CLI 与 Demo；跨 uid 共享写入验收尚未提供。部署配置见 [身份和安全模型](docs/DEPLOYMENT.md)。
 
 项目不获取、复制、展示、保存或修改认证凭据，不导出 Cookie 或会话 Token。运行库、个人配置、日志、Profile 与缓存默认不入库；消息和日志仍应避免含私密业务内容。
 

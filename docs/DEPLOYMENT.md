@@ -56,3 +56,5 @@ node dist/cli.js mapping-show demo-project
 CLI 输出可诊断的 code 与非零退出码，不输出原始认证/SQL异常。INPUT/CONFIG 检查样例字段；AUTH/OWNER 检查宿主身份；PROVENANCE/UNSUPPORTED 检查来源及实际能力；CONFLICT 先查最新版本；DB/SCHEMA 先备份、副本演练；TIMEOUT 检查检测是否合作取消。取消和恢复仅改台账，不证明外部执行已停止。
 
 业务保留周期、备份 RPO/RTO 和恢复演练由部署者按实际数据要求确定；当前不自动清理业务记录。只清理有归属证据的隔离测试残留。
+
+Unix 默认数据权限为目录 0700/文件 0600，因此当前 Linux 范围是单用户核心 CLI 与隔离 Demo，不提供跨 uid 的共享可写验收 CLI。Windows 可按受保护 SID 策略部署独立主体；跨用户宿主服务的认证/IPC 和 Unix ACL 部署仍须另行实现，不能为运行验收而放宽业务库给所有用户。

@@ -54,3 +54,5 @@ package.json 使用 SemVer；行为变化写 [CHANGELOG](../CHANGELOG.md) Unrele
 原始 [审查](audit/CODE_AUDIT_REPORT.md) 保留，逐项 [整改](audit/REMEDIATION.md) 记录文件、方法、回归和未完成原因。[交付记录](audit/DELIVERY.md) 区分 PASS/FAIL/SKIPPED/NOT_VERIFIED。独立验收固定 [结论 / 证据 / 遗留](ACCEPTANCE_TEMPLATE.md)；最终任务状态由 Hermes 控制。
 
 控制者发现任务持续阻塞超过配置阈值必须如实报备，不能静默无限重试。Watcher 提供本地持久观察；真正用户消息与送达证据由外部控制者负责。默认值及具体部署步骤集中在 [DEPLOYMENT](DEPLOYMENT.md) 和配置样例。
+
+隔离子进程只继承 OS 必要环境元数据；Windows 内置 cmdlet 模块解析固定到受信任系统目录，不继承任意认证字段或用户模块路径。干净安装探针会真正建库并验证受限权限，不能通过跳过 ACL 测试制造绿色结果。

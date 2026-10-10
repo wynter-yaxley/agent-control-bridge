@@ -3,8 +3,8 @@
   "baselineCommit": "75db1e443c1853f99d642ee0e0f56f6ce5fdce61",
   "node": "24.19.0",
   "nodeTest": {
-    "tests": 107,
-    "pass": 107,
+    "tests": 111,
+    "pass": 111,
     "fail": 0,
     "skipped": 0,
     "files": 17
@@ -27,10 +27,13 @@
     "npmCi": "PASS",
     "typecheck": "PASS",
     "build": "PASS",
-    "tests": 107,
+    "tests": 111,
     "e2eTests": 4,
     "compiledDemo": "PASS",
-    "realAgentInvoked": false
+    "realAgentInvoked": false,
+    "pass": 111,
+    "fail": 0,
+    "skipped": 0
   },
   "npmAuditKnownVulnerabilities": 0,
   "securityPatternScan": {
@@ -99,5 +102,17 @@
       }
     },
     "rerunStatus": "PENDING"
+  },
+  "secondCiFailure": {
+    "runId": 38036563133,
+    "windows": "Sanitized Windows install probe timed out in NTFS ACL helper; diagnostics retained",
+    "linux": "PASS",
+    "action": "Controlled OS runtime metadata and OS-owned PowerShell modules restored; real isolated ACL probe added",
+    "rerun": "PENDING"
+  },
+  "controlledMigrations": {
+    "initLegacyRejected": "PASS; original bytes and version unchanged",
+    "foreignAndIncompleteSchemaRejected": "PASS",
+    "realBusinessDatabaseChanged": false
   }
 }

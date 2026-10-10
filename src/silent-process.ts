@@ -1,9 +1,16 @@
 import { spawn } from 'node:child_process';
 import { redact } from './security.ts';
 export interface OperationResult { operation: string; ok: boolean; code: string; exitCode: number | null; needsUserAction: boolean; partialChanges: boolean; summary: string; stdout?: string }
-export async function silentProcess(operation: string, executable: string, args: readonly string[], options: { timeoutMs?: number; mutation?: boolean; cwd?: string } = {}): Promise<OperationResult> {
+export function controlledProcessEnv(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
-  for (const key of ['PATH','Path','SystemRoot','WINDIR','ComSpec','TEMP','TMP','HOME','USERPROFILE','HOMEDRIVE','HOMEPATH','APPDATA','LOCALAPPDATA','XDG_CONFIG_HOME']) if (process.env[key] !== undefined) env[key] = process.env[key];
+  // OS runtime metadata only; no model, npm authentication or arbitrary user variables.
+  for (const key of ['PATH','Path','SystemRoot','WINDIR','ComSpec','TEMP','TMP','HOME','USERPROFILE','HOMEDRIVE','HOMEPATH','APPDATA','LOCALAPPDATA','XDG_CONFIG_HOME','ProgramFiles','ProgramFiles(x86)','ProgramW6432','ProgramData','ALLUSERSPROFILE','USERNAME','USERDOMAIN']) if (process.env[key] !== undefined) env[key] = process.env[key];
+  // Built-in cmdlets must resolve from OS-owned modules, even in a sanitized runner.
+  if(process.platform==='win32')env.PSModulePath='C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\Modules';
+  return env;
+}
+export async function silentProcess(operation: string, executable: string, args: readonly string[], options: { timeoutMs?: number; mutation?: boolean; cwd?: string } = {}): Promise<OperationResult> {
+  const env=controlledProcessEnv();
   Object.assign(env, { GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', GCM_GUI_PROMPT: '0', GH_PROMPT_DISABLED: '1', NO_COLOR: '1', CI: '1' });
   return new Promise(resolve => {
     const child = spawn(executable, [...args], { cwd: options.cwd, env, shell: false, windowsHide: true, stdio: ['ignore','pipe','pipe'] });
