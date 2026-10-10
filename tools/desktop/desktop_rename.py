@@ -1,33 +1,19 @@
-"""One-shot, verified rename operation over the existing authorized CDP target."""
-import json
+"""Prepare and verify ChatGPT renames; a human must commit with physical Enter."""
 import hashlib
+import json
 import sys
 import time
 
-from clipboard_paste import paste_text
 from desktop_common import Cdp, ToolError, entry, find_target, guard_write, redact
 
 
-def _js(target_id, operation):
+def _js(target_id, operation, new_title=None):
+    """Build a target-ID-bound UI read, open, or native React value update."""
     value=json.dumps(target_id,separators=(',',':'))
-    return r"""/* ACB_RENAME_%s */
-(() => {
- const id=%s;
- const visible=e=>{if(!e)return false;const r=e.getBoundingClientRect();return e.offsetParent!==null&&r.width>0&&r.height>0;};
- const rows=[...document.querySelectorAll('[data-conversation-id]')].filter(e=>e.dataset.conversationId===id&&visible(e));
- if(rows.length!==1)return JSON.stringify({conversationId:id,found:false,ambiguous:rows.length>1});
- const row=rows[0];
- const input=[...row.querySelectorAll('input[aria-label="Rename"],input[aria-label="重命名"],input[data-rename-input]')].filter(visible);
- const titleNode=row.querySelector('[data-conversation-title], [data-testid="conversation-title"]');
- const title=(titleNode&&(titleNode.dataset.conversationTitle||titleNode.textContent)||row.dataset.title||'').trim();
- %s
- const save=[...row.querySelectorAll('button,[role="button"]')].filter(visible).filter(e=>/^(save|rename|done|保存|重命名|完成)$/i.test((e.getAttribute('aria-label')||e.textContent||'').trim()));
- return JSON.stringify({conversationId:id,found:true,oldTitle:title,editing:input.length===1,
-   editorValue:input.length===1?input[0].value:null,rowTitle:title,
-   capabilities:{enter:true,blur:input.length===1,saveButton:save.length===1}});
-})()
-""" % (operation, value, {
-        'OPEN': r"""if(input.length===0){
+    title=json.dumps(new_title,separators=(',',':'),ensure_ascii=False)
+    body={
+      'READ': '',
+      'OPEN': r"""if(input.length===0){
  const menus=[...row.querySelectorAll('button[aria-haspopup="menu"],button[data-action="conversation-menu"]')].filter(visible);
  if(menus.length!==1)return JSON.stringify({conversationId:id,found:true,oldTitle:title,editing:false,openResult:'menu-unsupported'});
  menus[0].click();
@@ -35,38 +21,67 @@ def _js(target_id, operation):
  if(items.length!==1)return JSON.stringify({conversationId:id,found:true,oldTitle:title,editing:false,openResult:'rename-action-unsupported'});
  items[0].click();
  }""",
-        'READ': '',
-        'ESCAPE': r"""if(input.length===1){input[0].dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',code:'Escape',bubbles:true}));}""",
-        'ENTER': r"""if(input.length===1){input[0].focus();input[0].dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',code:'Enter',keyCode:13,bubbles:true}));input[0].dispatchEvent(new KeyboardEvent('keyup',{key:'Enter',code:'Enter',keyCode:13,bubbles:true}));}""",
-        'BLUR': r"""if(input.length===1)input[0].blur();""",
-        'SAVE': r"""if(input.length===1&&save.length===1)save[0].click();""",
-    }[operation])
+      'SET': r"""if(input.length!==1||!(input[0] instanceof HTMLInputElement||input[0] instanceof HTMLTextAreaElement))
+   return JSON.stringify({conversationId:id,found:true,oldTitle:title,editing:input.length===1,writeError:'editable-control-unsupported'});
+ const control=input[0];
+ const setter=control instanceof HTMLInputElement
+   ? Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
+   : Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+ if(typeof setter!=='function')return JSON.stringify({conversationId:id,found:true,oldTitle:title,editing:true,writeError:'native-value-setter-unavailable'});
+ control.focus();
+ if(document.activeElement!==control)return JSON.stringify({conversationId:id,found:true,oldTitle:title,editing:true,writeError:'rename-input-focus-failed'});
+ setter.call(control,requestedTitle);
+ control.dispatchEvent(new Event('input', { bubbles: true }));
+ return JSON.stringify({conversationId:id,found:true,oldTitle:title,editing:true,editorValue:control.value,inputEventDispatched:true,focused:document.activeElement===control});""",
+    }.get(operation)
+    if body is None:
+        raise ToolError('INPUT','Unsupported rename UI operation',2)
+    return r"""/* ACB_RENAME_%s */
+(() => {
+ const id=%s;
+ const requestedTitle=%s;
+ const visible=e=>{if(!e)return false;const r=e.getBoundingClientRect();return e.offsetParent!==null&&r.width>0&&r.height>0;};
+ const rows=[...document.querySelectorAll('[data-conversation-id]')].filter(e=>e.dataset.conversationId===id&&visible(e));
+ if(rows.length!==1)return JSON.stringify({conversationId:id,found:false,ambiguous:rows.length>1});
+ const row=rows[0];
+ const input=[...row.querySelectorAll('input[aria-label="Rename"],input[aria-label="重命名"],input[data-rename-input],textarea[aria-label="Rename"],textarea[aria-label="重命名"],textarea[data-rename-input]')].filter(visible);
+ const titleNode=row.querySelector('[data-conversation-title], [data-testid="conversation-title"]');
+ const title=(titleNode&&(titleNode.dataset.conversationTitle||titleNode.textContent)||row.dataset.title||'').trim();
+ %s
+ return JSON.stringify({conversationId:id,found:true,oldTitle:title,editing:input.length===1,
+   editorValue:input.length===1?input[0].value:null,rowTitle:title,focused:input.length===1&&document.activeElement===input[0]});
+})()
+""" % (operation, value, title, body)
+
+
+def _read_state(connection, conversation_id, state_reader=None):
+    try:
+        value=state_reader() if state_reader is not None else connection.evaluate(_js(conversation_id,'READ'))
+        if isinstance(value,str): value=json.loads(value)
+        return value if isinstance(value,dict) else {}
+    except Exception:
+        return {}
+
+
+def _valid_title(title):
+    return isinstance(title,str) and bool(title.strip()) and len(title)<=200 and '\x00' not in title and redact(title)==title
 
 
 def rename_session(connection, conversation_id, new_title, clipboard=None,
-                   state_reader=None, paste_operation=None, action=None, pre_submit=None,
+                   state_reader=None, write_operation=None, action=None,
                    max_wait_seconds=0.75):
-    """Rename a conversation; success requires two fresh row-title observations."""
+    """Prepare a rename and hand off its final physical-Enter commit to a human."""
     if not isinstance(conversation_id,str) or not conversation_id.strip():
-        return {'status':'blocked','code':'TARGET_MISSING','error':'Target conversation identity is required'}
-    if not isinstance(new_title,str) or not new_title.strip() or len(new_title)>200 or '\x00' in new_title:
-        return {'status':'blocked','code':'TITLE_INVALID','error':'New title must contain 1..200 non-whitespace characters'}
-    if redact(new_title)!=new_title:
-        return {'status':'blocked','code':'TITLE_UNSAFE','error':'New title contains a control character or authentication material'}
-    reader=state_reader or (lambda: connection.evaluate(_js(conversation_id,'READ')))
-    paste=paste_operation or paste_text
-    def read_state():
-        try:
-            value=reader()
-            if isinstance(value,str): value=json.loads(value)
-            return value if isinstance(value,dict) else {}
-        except Exception: return {}
-    initial=read_state()
+        return {'status':'blocked','code':'TARGET_MISSING','renameState':'rename failed','error':'Target conversation identity is required'}
+    if not _valid_title(new_title):
+        return {'status':'blocked','code':'TITLE_INVALID','renameState':'rename failed','error':'New title must contain 1..200 safe, non-whitespace characters'}
+
+    initial=_read_state(connection,conversation_id,state_reader)
     if initial.get('conversationId')!=conversation_id:
-        return {'status':'blocked','code':'TARGET_MISMATCH','error':'Target conversation row could not be uniquely verified'}
+        return {'status':'blocked','code':'TARGET_MISMATCH','renameState':'rename failed','error':'Target conversation row could not be uniquely verified'}
     old_title=initial.get('oldTitle')
     if not isinstance(old_title,str) or not old_title:
-        return {'status':'verification_failed','code':'ORIGINAL_TITLE_UNKNOWN','error':'Original title could not be read safely'}
+        return {'status':'verification_failed','code':'ORIGINAL_TITLE_UNKNOWN','renameState':'rename failed','error':'Original title could not be read safely'}
     if initial.get('editing') is not True:
         try:
             opened=action('OPEN') if action else connection.evaluate(_js(conversation_id,'OPEN'))
@@ -75,116 +90,99 @@ def rename_session(connection, conversation_id, new_title, clipboard=None,
             opened={}
         deadline=time.monotonic()+max(0.05,min(float(max_wait_seconds),2.0))
         while True:
-            initial=read_state()
+            initial=_read_state(connection,conversation_id,state_reader)
             if initial.get('conversationId')!=conversation_id or initial.get('oldTitle')!=old_title:
-                return {'status':'blocked','code':'UI_CHANGED','error':'Target changed while opening rename controls','oldTitle':old_title}
+                return {'status':'blocked','code':'UI_CHANGED','renameState':'rename failed','error':'Target changed while opening rename controls','oldTitle':old_title}
             if initial.get('editing') is True or time.monotonic()>=deadline: break
             time.sleep(0.05)
         if initial.get('editing') is not True:
-            return {'status':'unsupported','code':'RENAME_UI_UNSUPPORTED',
-                    'error':(opened or {}).get('openResult','No supported rename control is available'),
-                    'oldTitle':old_title,'attemptedStrategies':[],'lastState':initial}
-    try:
-        paste(connection,{'kind':'rename','conversationId':conversation_id},new_title,clipboard=clipboard)
-    except ToolError as error:
-        try:
-            if action: action('ESCAPE')
-            else: connection.evaluate(_js(conversation_id,'ESCAPE'))
-        except Exception: pass
-        return {'status':error.status if error.status in ('blocked','unsupported','verification_failed') else 'verification_failed',
-                'code':error.code,'error':str(error),'oldTitle':old_title,'attemptedStrategies':[],
-                'lastState':read_state(),'details':error.details}
-    typed=read_state()
-    if typed.get('conversationId')!=conversation_id or typed.get('editing') is not True or typed.get('editorValue')!=new_title:
-        try:
-            if typed.get('conversationId')==conversation_id:
-                if action: action('ESCAPE')
-                else: connection.evaluate(_js(conversation_id,'ESCAPE'))
-        except Exception: pass
-        return {'status':'verification_failed','code':'RENAME_INPUT_MISMATCH',
-                'error':'Renaming editor did not contain the exact requested title; submission was stopped',
-                'oldTitle':old_title,'attemptedStrategies':[],'lastState':typed}
+            return {'status':'unsupported','code':'RENAME_UI_UNSUPPORTED','renameState':'rename failed',
+                    'error':(opened or {}).get('openResult','No supported rename control is available'),'oldTitle':old_title}
 
-    capabilities=typed.get('capabilities') if isinstance(typed.get('capabilities'),dict) else {}
-    strategies=[]
-    if capabilities.get('saveButton') is True: strategies.append(('save-button','SAVE'))
-    if capabilities.get('enter') is True: strategies.append(('enter','ENTER'))
-    if capabilities.get('blur') is True: strategies.append(('blur','BLUR'))
-    attempted=[]; last=typed; deadline=time.monotonic()+max(0.05,min(float(max_wait_seconds),2.0))
-    for name, operation in strategies[:3]:
-        if pre_submit is not None:
-            try: route=pre_submit()
-            except Exception: route=None
-            if not isinstance(route,dict) or route.get('status')!='success':
-                try:
-                    if action: action('ESCAPE')
-                    else: connection.evaluate(_js(conversation_id,'ESCAPE'))
-                except Exception: pass
-                return {'status':'blocked','code':'PROJECT_ROUTE_CHANGED',
-                        'error':'Conversation route changed before rename submission',
-                        'oldTitle':old_title,'attemptedStrategies':attempted,'lastState':read_state()}
-        attempted.append(name)
-        try:
-            if action: action(operation)
-            else: connection.evaluate(_js(conversation_id,operation))
-        except Exception: pass
-        # A small state-driven poll budget; no repeated click/key submission.
-        while True:
-            last=read_state()
-            if last.get('conversationId')!=conversation_id:
-                return {'status':'verification_failed','code':'TARGET_CHANGED',
-                        'error':'Conversation identity changed during rename','oldTitle':old_title,
-                        'attemptedStrategies':attempted,'lastState':last}
-            if last.get('editing') is not True and last.get('rowTitle')==new_title: break
-            if time.monotonic()>=deadline: break
-            time.sleep(0.05)
-        if last.get('editing') is not True and last.get('rowTitle')==new_title:
-            confirmed=read_state()
-            if confirmed.get('conversationId')==conversation_id and confirmed.get('editing') is not True and confirmed.get('rowTitle')==new_title:
-                return {'status':'success','code':'RENAME_VERIFIED','conversationId':conversation_id,
-                        'oldTitle':old_title,'newTitle':new_title,'attemptedStrategies':attempted,
-                        'confirmation':'two fresh application row-title reads','persistence':'not independently verified after reload'}
-        # The state did not commit; next method is allowed only if the editor remains active.
-        if last.get('editing') is not True: break
+    before_write=_read_state(connection,conversation_id,state_reader)
+    if before_write.get('conversationId')!=conversation_id or before_write.get('editing') is not True:
+        return {'status':'blocked','code':'RENAME_TARGET_CHANGED','renameState':'rename failed',
+                'error':'Target identity or rename editor changed before writing','oldTitle':old_title,'lastState':before_write}
     try:
-        if action: action('ESCAPE')
-        else: connection.evaluate(_js(conversation_id,'ESCAPE'))
-    except Exception: pass
-    final=read_state()
-    return {'status':'verification_failed','code':'RENAME_NOT_CONFIRMED',
-            'error':'No available submit strategy produced a confirmed title update',
-            'conversationId':conversation_id,'oldTitle':old_title,
-            'attemptedStrategies':attempted,'lastState':final,
-            'originalTitleRestored':final.get('rowTitle')==old_title}
+        write_result=write_operation(connection,conversation_id,new_title) if write_operation else connection.evaluate(_js(conversation_id,'SET',new_title))
+        if isinstance(write_result,str): write_result=json.loads(write_result)
+    except Exception:
+        return {'status':'verification_failed','code':'RENAME_WRITE_FAILED','renameState':'rename failed',
+                'error':'Native value setter operation failed; no commit was attempted','oldTitle':old_title,
+                'lastState':_read_state(connection,conversation_id,state_reader)}
+    if not isinstance(write_result,dict) or write_result.get('conversationId')!=conversation_id or write_result.get('found') is not True or write_result.get('inputEventDispatched') is not True or write_result.get('focused') is not True or write_result.get('editorValue')!=new_title:
+        return {'status':'verification_failed','code':'RENAME_WRITE_UNVERIFIED','renameState':'rename failed',
+                'error':'Native setter or immediate DOM readback did not verify the exact requested title',
+                'oldTitle':old_title,'lastState':write_result if isinstance(write_result,dict) else {}}
+
+    typed=_read_state(connection,conversation_id,state_reader)
+    if typed.get('conversationId')!=conversation_id or typed.get('editing') is not True or typed.get('focused') is not True or typed.get('editorValue')!=new_title:
+        return {'status':'verification_failed','code':'RENAME_INPUT_MISMATCH','renameState':'rename failed',
+                'error':'A fresh DOM read did not show the exact requested value in the target editor; commit was not attempted',
+                'oldTitle':old_title,'lastState':typed}
+    return {'status':'awaiting_human_enter','code':'RENAME_PREPARED','renameState':'awaiting human Enter',
+            'conversationId':conversation_id,'oldTitle':old_title,'preparedTitle':new_title,
+            'inputValueVerified':True,'commit':'User must press physical Enter in the target rename input',
+            'saved':False}
+
+
+def verify_rename_session(connection, conversation_id, expected_title, state_reader=None):
+    """Read-only confirmation to call after the user physically presses Enter."""
+    if not isinstance(conversation_id,str) or not conversation_id.strip() or not _valid_title(expected_title):
+        return {'status':'blocked','code':'VERIFY_INPUT_INVALID','renameState':'rename failed','error':'A verified conversation identity and safe expected title are required'}
+    first=_read_state(connection,conversation_id,state_reader)
+    if first.get('conversationId')!=conversation_id:
+        return {'status':'verification_failed','code':'TARGET_MISMATCH','renameState':'rename failed','error':'Target conversation identity could not be verified','lastState':first}
+    if first.get('editing') is True:
+        if first.get('editorValue')==expected_title:
+            return {'status':'awaiting_human_enter','code':'AWAITING_HUMAN_ENTER','renameState':'awaiting human Enter','saved':False,'lastState':first}
+        return {'status':'verification_failed','code':'EDITOR_VALUE_MISMATCH','renameState':'rename failed','error':'The active editor does not contain the requested title','lastState':first}
+    if first.get('rowTitle')!=expected_title:
+        return {'status':'verification_failed','code':'RENAME_NOT_CONFIRMED','renameState':'rename failed','error':'Application row title has not changed to the requested title','lastState':first}
+    second=_read_state(connection,conversation_id,state_reader)
+    if second.get('conversationId')!=conversation_id or second.get('editing') is True or second.get('rowTitle')!=expected_title:
+        return {'status':'verification_failed','code':'RENAME_CONFIRMATION_UNSTABLE','renameState':'rename failed','error':'A second application read did not confirm the updated title','lastState':second}
+    return {'status':'success','code':'RENAME_CONFIRMED','renameState':'rename confirmed','conversationId':conversation_id,
+            'newTitle':expected_title,'confirmation':'two fresh application row-title reads after human submission'}
 
 
 def main(authority=None, approval=None, target_context=None, clipboard=None):
     if '--help' in sys.argv:
-        print('Trusted host API only; one-time target-bound approval required.'); return 0
+        print('Prepare: gpt-rename <new-title>. Verify after the user presses physical Enter: gpt-rename --verify <expected-title>. The tool never generates Enter.')
+        print('Chat renaming requires a human physical Enter keypress to commit. Automated, synthetic, CDP-generated, or SendKeys Enter events are not reliably accepted by the current ChatGPT desktop application. The tool prepares the rename UI and input value, then hands off the final commit to the user.')
+        return 0
     if not isinstance(target_context,dict) or not target_context.get('conversationId'):
         raise ToolError('AUTH','Trusted host target context required')
-    if len(sys.argv)!=2: raise ToolError('INPUT','Supply exactly one new title',2)
-    title=sys.argv[1]
-    if not title.strip() or len(title)>200 or '\x00' in title: raise ToolError('INPUT','New title must contain 1..200 non-whitespace characters',2)
-    if redact(title)!=title: raise ToolError('INPUT','New title contains a control character or authentication material',2)
+    verify_mode=len(sys.argv)==3 and sys.argv[1]=='--verify'
+    if verify_mode:
+        title=sys.argv[2]
+    elif len(sys.argv)==2:
+        title=sys.argv[1]
+    else:
+        raise ToolError('INPUT','Supply one new title, or --verify and the expected title',2)
+    if not _valid_title(title):
+        raise ToolError('INPUT','New title must contain 1..200 safe, non-whitespace characters',2)
     digest=hashlib.sha256(title.encode('utf-8')).hexdigest()
     from desktop_guards import binding_fingerprint, guard_project_route, read_project_route
-    guard_write('rename_session',authority,approval,digest,binding_fingerprint(target_context))
+    if verify_mode:
+        if authority is None: raise ToolError('AUTH','Trusted host verification handle required')
+        authority.consume(approval,'verify_rename_session',digest,binding_fingerprint(target_context))
+    else:
+        guard_write('rename_session',authority,approval,digest,binding_fingerprint(target_context))
     connection=Cdp(find_target('webview'))
     try:
-        def route_check():
-            return guard_project_route(target_context,read_project_route(connection),provider='gpt')
-        before=route_check()
-        if before.get('status')!='success':
-            result={'status':before.get('status','blocked'),'code':before.get('code','PROJECT_ROUTE_BLOCKED'),
-                    'error':before.get('reason','Target route is not verified'),'oldTitle':None,
-                    'attemptedStrategies':[],'lastState':{'route':before}}
+        route=guard_project_route(target_context,read_project_route(connection),provider='gpt')
+        if route.get('status')!='success':
+            result={'status':route.get('status','blocked'),'code':route.get('code','PROJECT_ROUTE_BLOCKED'),
+                    'renameState':'rename failed','error':route.get('reason','Target route is not verified')}
+        elif verify_mode:
+            result=verify_rename_session(connection,target_context['conversationId'],title)
         else:
-            result=rename_session(connection,target_context['conversationId'],title,clipboard=clipboard,
-                                  pre_submit=route_check)
-    finally: connection.close()
+            result=rename_session(connection,target_context['conversationId'],title,write_operation=None)
+    finally:
+        connection.close()
     print(json.dumps(redact(result),ensure_ascii=False))
-    return 0 if result.get('status')=='success' else 4
+    return 0 if result.get('status') in ('success','awaiting_human_enter') else 4
 
 
 if __name__=='__main__': sys.exit(entry(main))

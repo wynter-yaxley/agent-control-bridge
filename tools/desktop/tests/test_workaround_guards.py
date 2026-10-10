@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import desktop_common as common
+import desktop_rename as rename_module
 from desktop_guards import (ROUTE_SNAPSHOT_JS, binding_fingerprint, classify_execution_target,
                             guard_local_codex_execution, guard_project_route, repair_project_route)
 from clipboard_paste import paste_text
@@ -161,56 +162,81 @@ class WorkaroundGuardContracts(unittest.TestCase):
             paste_text(Connection(),{'kind':'rename','conversationId':'chat-1'},'new title',clipboard=Clipboard())
         self.assertEqual(failure.exception.code,'CLIPBOARD_RESTORE_FAILED')
 
-    def test_rename_success_requires_two_exact_row_title_reads(self):
+    def test_rename_preparation_does_not_auto_submit_even_when_ui_offers_submit_controls(self):
         states=[
             {'conversationId':'chat-1','oldTitle':'Old title','editing':True,'editorValue':'Old title','rowTitle':'Old title','capabilities':{'enter':True,'blur':True}},
-            {'conversationId':'chat-1','oldTitle':'Old title','editing':True,'editorValue':'New title','rowTitle':'Old title','capabilities':{'enter':True,'blur':True}},
+            {'conversationId':'chat-1','oldTitle':'Old title','editing':True,'editorValue':'New title','rowTitle':'Old title','focused':True,'capabilities':{'enter':True,'blur':True}},
         ]
-        reads=[0]
-        def reader():
-            reads[0]+=1
-            if reads[0]<=2:return states[reads[0]-1]
-            return {'conversationId':'chat-1','oldTitle':'New title','editing':False,'editorValue':None,'rowTitle':'New title','capabilities':{'enter':True,'blur':True}}
-        result=rename_session(Mock(), 'chat-1','New title',clipboard=Mock(),paste_operation=lambda *a,**k:{'status':'success'},state_reader=reader,action=lambda _:None,max_wait_seconds=0.05)
-        self.assertEqual(result['status'],'success')
-        self.assertEqual(result['attemptedStrategies'],['enter'])
-        self.assertEqual(result['confirmation'],'two fresh application row-title reads')
-        self.assertEqual(result['persistence'],'not independently verified after reload')
+        writes=[];actions=[]
+        def writer(_connection,conversation_id,title):
+            writes.append((conversation_id,title))
+            return {'conversationId':conversation_id,'found':True,'editorValue':title,'inputEventDispatched':True,'focused':True}
+        result=rename_session(Mock(), 'chat-1','New title',write_operation=writer,
+                              state_reader=lambda:states[min(len(writes),1)],action=actions.append)
+        self.assertEqual(result['status'],'awaiting_human_enter')
+        self.assertEqual(result['renameState'],'awaiting human Enter')
+        self.assertEqual(writes,[('chat-1','New title')])
+        self.assertEqual(actions,[])
+        self.assertFalse(result['saved'])
 
-    def test_rename_needs_observed_title_update_and_reports_failed_strategies(self):
+    def test_rename_readback_mismatch_is_failure_and_never_triggers_key_action(self):
+        state={'conversationId':'chat-1','oldTitle':'Old title','editing':True,'editorValue':'Old title','rowTitle':'Old title'}
+        actions=[]
+        result=rename_session(Mock(),'chat-1','New title',
+            write_operation=lambda *_:{'conversationId':'chat-1','found':True,'editorValue':'New title','inputEventDispatched':True,'focused':True},
+            state_reader=lambda:state.copy(),action=actions.append)
+        self.assertEqual(result['status'],'verification_failed')
+        self.assertEqual(result['code'],'RENAME_INPUT_MISMATCH')
+        self.assertEqual(actions,[])
+
+    def test_rename_does_not_use_clipboard_or_automated_submit_channels(self):
+        source=Path(rename_module.__file__).read_text(encoding='utf-8')
+        for forbidden in ['Input.'+'dispatchKeyEvent','Keyboard'+'Event','Send'+'Keys(','paste_'+'text']:
+            self.assertNotIn(forbidden,source)
+
+    def test_rename_native_setter_uses_prototype_and_bubbling_input_event(self):
+        script=rename_module._js('chat-1','SET','New title')
+        self.assertIn("Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set",script)
+        self.assertIn("Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set",script)
+        self.assertIn("new Event('input', { bubbles: true })",script)
+
+    def test_rename_preparation_returns_awaiting_human_enter_without_key_events(self):
         states=[
-            {'conversationId':'chat-1','oldTitle':'Old title','editing':True,'editorValue':'Old title','rowTitle':'Old title','capabilities':{'enter':True,'blur':True}},
-            {'conversationId':'chat-1','oldTitle':'Old title','editing':True,'editorValue':'New title','rowTitle':'Old title','capabilities':{'enter':True,'blur':True}},
-            {'conversationId':'chat-1','oldTitle':'Old title','editing':True,'editorValue':'New title','rowTitle':'Old title','capabilities':{'enter':True,'blur':True}},
+            {'conversationId':'chat-1','oldTitle':'Old','editing':True,'editorValue':'Old','rowTitle':'Old'},
+            {'conversationId':'chat-1','oldTitle':'Old','editing':True,'editorValue':'New','rowTitle':'Old','focused':True},
         ]
-        def action(op):
-            if op == 'ESCAPE':
-                states[:] = [{'conversationId':'chat-1','oldTitle':'Old title','editing':False,
-                              'editorValue':None,'rowTitle':'Old title','capabilities':{'enter':True,'blur':True}}]
-        result = rename_session(
-            connection=Mock(), conversation_id='chat-1', new_title='New title',
-            clipboard=Mock(), paste_operation=lambda *args,**kwargs: {'status':'success'},
-            state_reader=lambda: states.pop(0) if len(states)>1 else states[0],
-            action=action, max_wait_seconds=0.05,
-        )
-        self.assertIn(result['status'], ('verification_failed', 'blocked'))
-        self.assertEqual(result['oldTitle'], 'Old title')
-        self.assertEqual(result['attemptedStrategies'],['enter','blur'])
-        self.assertTrue(result['originalTitleRestored'])
+        actions=[]
+        result=rename_session(Mock(),'chat-1','New',state_reader=lambda:states[-1],
+                              write_operation=lambda _,conversation_id,title:{'conversationId':conversation_id,'found':True,'editorValue':title,'inputEventDispatched':True,'focused':True},
+                              action=actions.append)
+        self.assertEqual(result['status'],'awaiting_human_enter')
+        self.assertEqual(result['code'],'RENAME_PREPARED')
+        self.assertEqual(result['renameState'],'awaiting human Enter')
+        self.assertEqual(actions,[])
+        self.assertNotEqual(result['code'],'RENAME_VERIFIED')
 
-    def test_rename_uses_observed_save_button_before_enter_and_blur(self):
-        state={'conversationId':'chat-1','oldTitle':'Old','editing':True,'editorValue':'Old','rowTitle':'Old','capabilities':{'saveButton':True,'enter':True,'blur':True}}
-        reads=[0];actions=[]
-        def reader():
-            reads[0]+=1
-            if reads[0]==1:return state.copy()
-            if reads[0]==2:return {**state,'editorValue':'New'}
-            return {**state,'oldTitle':'New','editing':False,'editorValue':None,'rowTitle':'New'}
-        result=rename_session(Mock(),'chat-1','New',clipboard=Mock(),paste_operation=lambda *a,**k:{'status':'success'},
-                              state_reader=reader,action=lambda op:actions.append(op),max_wait_seconds=0.05)
+    def test_rename_write_readback_mismatch_never_reports_prepared_or_success(self):
+        state={'conversationId':'chat-1','oldTitle':'Old','editing':True,'editorValue':'Old','rowTitle':'Old'}
+        result=rename_session(Mock(),'chat-1','New',state_reader=lambda:state.copy(),
+                              write_operation=lambda _,conversation_id,title:{'conversationId':conversation_id,'found':True,'editorValue':title,'inputEventDispatched':True,'focused':True},
+                              action=lambda _:self.fail('unexpected key action'))
+        self.assertEqual(result['status'],'verification_failed')
+        self.assertEqual(result['code'],'RENAME_INPUT_MISMATCH')
+
+    def test_human_submission_verification_requires_closed_editor_and_matching_row_title(self):
+        self.assertTrue(hasattr(rename_module,'verify_rename_session'))
+        pending={'conversationId':'chat-1','oldTitle':'Old','editing':True,'editorValue':'New','rowTitle':'Old'}
+        result=rename_module.verify_rename_session(Mock(),'chat-1','New',state_reader=lambda:pending)
+        self.assertEqual(result['status'],'awaiting_human_enter')
+        confirmed={'conversationId':'chat-1','oldTitle':'New','editing':False,'editorValue':None,'rowTitle':'New'}
+        reads=[]
+        result=rename_module.verify_rename_session(Mock(),'chat-1','New',state_reader=lambda:reads.append(confirmed) or confirmed)
         self.assertEqual(result['status'],'success')
-        self.assertEqual(result['attemptedStrategies'],['save-button'])
-        self.assertEqual(actions,['SAVE'])
+        self.assertEqual(result['code'],'RENAME_CONFIRMED')
+        self.assertEqual(result['confirmation'],'two fresh application row-title reads after human submission')
+        self.assertEqual(len(reads),2)
+        wrong={**confirmed,'conversationId':'another-chat'}
+        self.assertEqual(rename_module.verify_rename_session(Mock(),'chat-1','New',state_reader=lambda:wrong)['status'],'verification_failed')
 
 
 if __name__ == '__main__':

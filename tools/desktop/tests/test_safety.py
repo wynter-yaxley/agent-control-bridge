@@ -3,6 +3,7 @@ from pathlib import Path
 from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 import desktop_common as common
+import desktop_rename
 import gpt_send_cdp, codex_send_cdp
 
 class DesktopSafetyTests(unittest.TestCase):
@@ -21,6 +22,27 @@ class DesktopSafetyTests(unittest.TestCase):
             approval=authority.approve('gpt-send')
             common.guard_write('gpt-send',authority,approval)
             with self.assertRaises(common.ToolError): common.guard_write('gpt-send',authority,approval)
+
+    def test_rename_preparation_keeps_target_bound_desktop_authority(self):
+        target={'mappingSource':'bridge-registry','registered':True,'provider':'gpt','projectId':'p1',
+                'workspacePath':r'D:\work\p1','projectRoot':r'D:\work\p1','conversationId':'chat-123'}
+        authority=common.DesktopAuthority()
+        approval=authority.approve('rename_session',binding='wrong-target')
+        with patch.object(common,'config',return_value={'enabled':True,'allowForegroundAutomation':True}), \
+             patch.object(desktop_rename,'find_target',side_effect=AssertionError('target lookup must follow authority check')), \
+             patch.object(sys,'argv',['gpt-rename','New title']):
+            with self.assertRaises(common.ToolError) as failure:
+                desktop_rename.main(authority,approval,target)
+        self.assertEqual(failure.exception.code,'AUTH')
+
+    def test_rename_help_states_physical_enter_and_separate_verification(self):
+        root=Path(__file__).resolve().parents[1]
+        result=subprocess.run([sys.executable,str(root/'gpt-rename'),'--help'],capture_output=True,text=True,timeout=5,
+                              env={**os.environ,'PYTHONDONTWRITEBYTECODE':'1'})
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertIn('human physical Enter keypress',result.stdout)
+        self.assertIn('gpt-rename --verify <expected-title>',result.stdout)
+        self.assertIn('hands off the final commit to the user',result.stdout)
 
     def test_remote_and_credential_endpoints_rejected(self):
         for endpoint in ['http://example.com:9222','http://user:pass@localhost:9222','https://localhost:9222']:

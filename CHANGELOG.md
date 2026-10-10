@@ -5,7 +5,7 @@ Versions follow Semantic Versioning. A GitHub Release requires an accepted versi
 ## Unreleased
 
 - Desktop CDP delivery now requires bridge-registry session binding, app-observed project ownership, and local Codex execution preflight corroborated by Codex app metadata and workspace path; cloud Work and unknown states fail closed, with a fresh pre-submit check.
-- Added bounded text-only clipboard paste with exact editor readback and clipboard restoration, plus a target-bound ChatGPT rename tool that verifies the updated row title and reports strategies and persistence limits.
+- Added bounded text-only clipboard paste with exact editor readback and clipboard restoration for desktop senders; ChatGPT rename uses native input/textarea setters and bubbling input events, then requires a human physical Enter handoff and separate target-bound title verification.
 - Added read-only desktop guard diagnostics and Mock regressions for route drift, unsupported/verified repair, rename commit failure, clipboard mismatch, cloud routing, and execution-state changes.
 - Windows ACL verification uses SID rules and .NET file APIs, avoiding module auto-loading and account-name resolution in controlled environments; failures expose fixed stages only.
 - Desktop sends verify prompt content exactly, including whitespace, and refuse to create an unregistered GPT conversation when its editor is missing; three Mock regressions added.

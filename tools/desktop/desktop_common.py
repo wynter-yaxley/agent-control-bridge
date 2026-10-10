@@ -141,3 +141,8 @@ def paste_text(*args, **kwargs):
 def rename_session(*args, **kwargs):
     from desktop_rename import rename_session as implementation
     return implementation(*args, **kwargs)
+
+
+def verify_rename_session(*args, **kwargs):
+    from desktop_rename import verify_rename_session as implementation
+    return implementation(*args, **kwargs)
