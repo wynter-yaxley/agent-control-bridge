@@ -1,0 +1,45 @@
+✔ independent review is the only successful completion entrance (7.2817ms)
+✔ missing, JSON-forged, foreign authority, and same-principal reviewer are rejected (2.4108ms)
+✔ finish requires matching holder and instance (2.3179ms)
+✔ cancel requires matching holder and instance (2.0871ms)
+✔ renew requires matching holder and instance (2.0465ms)
+✔ stale version fences duplicate commands and previous-attempt callbacks (1.9074ms)
+✔ claim enforces executor, lease bounds, and merges state+ownership (2.1143ms)
+✔ expired owner cannot finish/renew; sweep deduplicates without success (1.5514ms)
+✔ block/resume, failure/requeue, cancellation and failed review use CAS (2.5706ms)
+✔ all prohibited state pairs are rejected without persistence (42.2332ms)
+✔ approval pending CAS prevents reversal/duplicate decision and self-approval (1.9291ms)
+✔ create: events failure rolls back all persistent steps (1.4324ms)
+✔ claim: events failure rolls back all persistent steps (1.0659ms)
+✔ finish: events failure rolls back all persistent steps (1.2218ms)
+✔ verify: events failure rolls back all persistent steps (1.5071ms)
+✔ cancel: events failure rolls back all persistent steps (1.3352ms)
+✔ renew: events failure rolls back all persistent steps (1.8846ms)
+✔ request: events failure rolls back all persistent steps (1.2291ms)
+✔ decide: events failure rolls back all persistent steps (1.3003ms)
+✔ create-with-approval: events failure rolls back all persistent steps (1.323ms)
+✔ block: events failure rolls back all persistent steps (1.2698ms)
+✔ resume: events failure rolls back all persistent steps (1.3613ms)
+✔ requeue: events failure rolls back all persistent steps (1.3125ms)
+✔ sweep: events failure rolls back all persistent steps (1.242ms)
+✔ create: audit_log failure rolls back all persistent steps (1.218ms)
+✔ claim: audit_log failure rolls back all persistent steps (1.1119ms)
+✔ finish: audit_log failure rolls back all persistent steps (1.1682ms)
+✔ verify: audit_log failure rolls back all persistent steps (1.2862ms)
+✔ cancel: audit_log failure rolls back all persistent steps (1.5799ms)
+✔ renew: audit_log failure rolls back all persistent steps (2.2272ms)
+✔ request: audit_log failure rolls back all persistent steps (1.5658ms)
+✔ decide: audit_log failure rolls back all persistent steps (2.2781ms)
+✔ create-with-approval: audit_log failure rolls back all persistent steps (1.4554ms)
+✔ block: audit_log failure rolls back all persistent steps (1.6051ms)
+✔ resume: audit_log failure rolls back all persistent steps (2.1505ms)
+✔ requeue: audit_log failure rolls back all persistent steps (1.3664ms)
+✔ sweep: audit_log failure rolls back all persistent steps (1.4087ms)
+ℹ tests 37
+ℹ suites 0
+ℹ pass 37
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 252.5369

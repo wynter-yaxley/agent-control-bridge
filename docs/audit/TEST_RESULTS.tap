@@ -1,0 +1,407 @@
+Discovered 8 test files
+TAP version 13
+# Subtest: default OS caller has no reviewer rights; enabled policy binds principal/instance, not business strings
+ok 1 - default OS caller has no reviewer rights; enabled policy binds principal/instance, not business strings
+  ---
+  duration_ms: 949.5766
+  type: 'test'
+  ...
+# Subtest: invalid, unknown-principal, duplicate-principal, or broad SID policy is refused
+ok 2 - invalid, unknown-principal, duplicate-principal, or broad SID policy is refused
+  ---
+  duration_ms: 5983.6534
+  type: 'test'
+  ...
+# Subtest: untrusted PATH cannot replace the OS identity helper
+ok 3 - untrusted PATH cannot replace the OS identity helper
+  ---
+  duration_ms: 1012.9041
+  type: 'test'
+  ...
+# Subtest: help and invalid command/parameters never open a database
+ok 4 - help and invalid command/parameters never open a database
+  ---
+  duration_ms: 3.5142
+  type: 'test'
+  ...
+# Subtest: review decision flags [] reject before mutation
+ok 5 - review decision flags [] reject before mutation
+  ---
+  duration_ms: 11.5945
+  type: 'test'
+  ...
+# Subtest: review decision flags ["--pass","--fail"] reject before mutation
+ok 6 - review decision flags ["--pass","--fail"] reject before mutation
+  ---
+  duration_ms: 4.201
+  type: 'test'
+  ...
+# Subtest: review decision flags ["--pass","--pass"] reject before mutation
+ok 7 - review decision flags ["--pass","--pass"] reject before mutation
+  ---
+  duration_ms: 2.8572
+  type: 'test'
+  ...
+# Subtest: review decision flags ["--pass","--unknown"] reject before mutation
+ok 8 - review decision flags ["--pass","--unknown"] reject before mutation
+  ---
+  duration_ms: 2.1982
+  type: 'test'
+  ...
+# Subtest: pi --by user cannot impersonate reviewer; failure uses stderr/nonzero
+ok 9 - pi --by user cannot impersonate reviewer; failure uses stderr/nonzero
+  ---
+  duration_ms: 2.6546
+  type: 'test'
+  ...
+# Subtest: missing task is nonzero; aliases -k/-t/-e parse correctly; independent host review works
+ok 10 - missing task is nonzero; aliases -k/-t/-e parse correctly; independent host review works
+  ---
+  duration_ms: 2.5813
+  type: 'test'
+  ...
+# Subtest: barrier: independent SQLite connections double-claim, exactly one wins (10 rounds)
+ok 11 - barrier: independent SQLite connections double-claim, exactly one wins (10 rounds)
+  ---
+  duration_ms: 5753.1395
+  type: 'test'
+  ...
+# Subtest: barrier: finish versus cancel with the same version yields one committed outcome
+ok 12 - barrier: finish versus cancel with the same version yields one committed outcome
+  ---
+  duration_ms: 4203.6371
+  type: 'test'
+  ...
+# Subtest: SQLite lock conflict rolls back and retry is possible after release
+ok 13 - SQLite lock conflict rolls back and retry is possible after release
+  ---
+  duration_ms: 4117.275
+  type: 'test'
+  ...
+# Subtest: v0 migration preserves original task data, adds fencing, and legacy ownership fails closed
+ok 14 - v0 migration preserves original task data, adds fencing, and legacy ownership fails closed
+  ---
+  duration_ms: 6187.1216
+  type: 'test'
+  ...
+# Subtest: schema initialization failure rolls back DDL and closes the connection
+ok 15 - schema initialization failure rolls back DDL and closes the connection
+  ---
+  duration_ms: 4139.0693
+  type: 'test'
+  ...
+# Subtest: newer schema is rejected without changing it
+ok 16 - newer schema is rejected without changing it
+  ---
+  duration_ms: 3812.2869
+  type: 'test'
+  ...
+# Subtest: nested transactions roll back their caller when a later operation fails
+ok 17 - nested transactions roll back their caller when a later operation fails
+  ---
+  duration_ms: 2.961
+  type: 'test'
+  ...
+# Subtest: database and WAL/SHM ACL contain only authorized principals
+ok 18 - database and WAL/SHM ACL contain only authorized principals
+  ---
+  duration_ms: 4791.7171
+  type: 'test'
+  ...
+# Subtest: broad authorization SID fails closed before database creation
+ok 19 - broad authorization SID fails closed before database creation
+  ---
+  duration_ms: 1588.0717
+  type: 'test'
+  ...
+# Subtest: e2e: actual CLI lifecycle, spoof denial, stale owner denial and independent host acceptance (synthetic only)
+ok 20 - e2e: actual CLI lifecycle, spoof denial, stale owner denial and independent host acceptance (synthetic only)
+  ---
+  duration_ms: 23753.2561
+  type: 'test'
+  ...
+# Subtest: e2e: export CLI overwrite negatives preserve input/output hashes and emit nonzero stderr
+ok 21 - e2e: export CLI overwrite negatives preserve input/output hashes and emit nonzero stderr
+  ---
+  duration_ms: 11313.9618
+  type: 'test'
+  ...
+# Subtest: export .json: preserves input and never overwrites existing Markdown
+ok 22 - export .json: preserves input and never overwrites existing Markdown
+  ---
+  duration_ms: 1716.6521
+  type: 'test'
+  ...
+# Subtest: export .JSON: preserves input and never overwrites existing Markdown
+ok 23 - export .JSON: preserves input and never overwrites existing Markdown
+  ---
+  duration_ms: 2049.9364
+  type: 'test'
+  ...
+# Subtest: export .JsOn: preserves input and never overwrites existing Markdown
+ok 24 - export .JsOn: preserves input and never overwrites existing Markdown
+  ---
+  duration_ms: 2401.5607
+  type: 'test'
+  ...
+# Subtest: same path, case alias, existing output and hard-link output all preserve original hashes
+ok 25 - same path, case alias, existing output and hard-link output all preserve original hashes
+  ---
+  duration_ms: 19.4819
+  type: 'test'
+  ...
+# Subtest: invalid extension and invalid JSON never leak payload or mutate files/database
+ok 26 - invalid extension and invalid JSON never leak payload or mutate files/database
+  ---
+  duration_ms: 17.2923
+  type: 'test'
+  ...
+# Subtest: import SQL failure rolls back sessions and removes only newly created output
+ok 27 - import SQL failure rolls back sessions and removes only newly created output
+  ---
+  duration_ms: 2139.0578
+  type: 'test'
+  ...
+# Subtest: untrusted prompt stays literal data and is never executed
+ok 28 - untrusted prompt stays literal data and is never executed
+  ---
+  duration_ms: 2001.5977
+  type: 'test'
+  ...
+# Subtest: test discovery refuses an empty fixture suite instead of reporting green
+ok 29 - test discovery refuses an empty fixture suite instead of reporting green
+  ---
+  duration_ms: 111.2576
+  type: 'test'
+  ...
+# Subtest: independent review is the only successful completion entrance
+ok 30 - independent review is the only successful completion entrance
+  ---
+  duration_ms: 8.3032
+  type: 'test'
+  ...
+# Subtest: missing, JSON-forged, foreign authority, and same-principal reviewer are rejected
+ok 31 - missing, JSON-forged, foreign authority, and same-principal reviewer are rejected
+  ---
+  duration_ms: 3.2401
+  type: 'test'
+  ...
+# Subtest: finish requires matching holder and instance
+ok 32 - finish requires matching holder and instance
+  ---
+  duration_ms: 2.0336
+  type: 'test'
+  ...
+# Subtest: cancel requires matching holder and instance
+ok 33 - cancel requires matching holder and instance
+  ---
+  duration_ms: 1.6923
+  type: 'test'
+  ...
+# Subtest: renew requires matching holder and instance
+ok 34 - renew requires matching holder and instance
+  ---
+  duration_ms: 1.9569
+  type: 'test'
+  ...
+# Subtest: stale version fences duplicate commands and previous-attempt callbacks
+ok 35 - stale version fences duplicate commands and previous-attempt callbacks
+  ---
+  duration_ms: 2.3544
+  type: 'test'
+  ...
+# Subtest: claim enforces executor, lease bounds, and merges state+ownership
+ok 36 - claim enforces executor, lease bounds, and merges state+ownership
+  ---
+  duration_ms: 1.9538
+  type: 'test'
+  ...
+# Subtest: expired owner cannot finish/renew; sweep deduplicates without success
+ok 37 - expired owner cannot finish/renew; sweep deduplicates without success
+  ---
+  duration_ms: 1.5907
+  type: 'test'
+  ...
+# Subtest: block/resume, failure/requeue, cancellation and failed review use CAS
+ok 38 - block/resume, failure/requeue, cancellation and failed review use CAS
+  ---
+  duration_ms: 3.9374
+  type: 'test'
+  ...
+# Subtest: all prohibited state pairs are rejected without persistence
+ok 39 - all prohibited state pairs are rejected without persistence
+  ---
+  duration_ms: 49.6009
+  type: 'test'
+  ...
+# Subtest: approval pending CAS prevents reversal/duplicate decision and self-approval
+ok 40 - approval pending CAS prevents reversal/duplicate decision and self-approval
+  ---
+  duration_ms: 2.5188
+  type: 'test'
+  ...
+# Subtest: create: events failure rolls back all persistent steps
+ok 41 - create: events failure rolls back all persistent steps
+  ---
+  duration_ms: 2.4553
+  type: 'test'
+  ...
+# Subtest: claim: events failure rolls back all persistent steps
+ok 42 - claim: events failure rolls back all persistent steps
+  ---
+  duration_ms: 1.3184
+  type: 'test'
+  ...
+# Subtest: finish: events failure rolls back all persistent steps
+ok 43 - finish: events failure rolls back all persistent steps
+  ---
+  duration_ms: 1.3429
+  type: 'test'
+  ...
+# Subtest: verify: events failure rolls back all persistent steps
+ok 44 - verify: events failure rolls back all persistent steps
+  ---
+  duration_ms: 1.7517
+  type: 'test'
+  ...
+# Subtest: cancel: events failure rolls back all persistent steps
+ok 45 - cancel: events failure rolls back all persistent steps
+  ---
+  duration_ms: 1.4289
+  type: 'test'
+  ...
+# Subtest: renew: events failure rolls back all persistent steps
+ok 46 - renew: events failure rolls back all persistent steps
+  ---
+  duration_ms: 1.2935
+  type: 'test'
+  ...
+# Subtest: request: events failure rolls back all persistent steps
+ok 47 - request: events failure rolls back all persistent steps
+  ---
+  duration_ms: 1.1173
+  type: 'test'
+  ...
+# Subtest: decide: events failure rolls back all persistent steps
+ok 48 - decide: events failure rolls back all persistent steps
+  ---
+  duration_ms: 1.71
+  type: 'test'
+  ...
+# Subtest: create-with-approval: events failure rolls back all persistent steps
+ok 49 - create-with-approval: events failure rolls back all persistent steps
+  ---
+  duration_ms: 2.8816
+  type: 'test'
+  ...
+# Subtest: block: events failure rolls back all persistent steps
+ok 50 - block: events failure rolls back all persistent steps
+  ---
+  duration_ms: 2.5383
+  type: 'test'
+  ...
+# Subtest: resume: events failure rolls back all persistent steps
+ok 51 - resume: events failure rolls back all persistent steps
+  ---
+  duration_ms: 1.8886
+  type: 'test'
+  ...
+# Subtest: requeue: events failure rolls back all persistent steps
+ok 52 - requeue: events failure rolls back all persistent steps
+  ---
+  duration_ms: 1.4891
+  type: 'test'
+  ...
+# Subtest: sweep: events failure rolls back all persistent steps
+ok 53 - sweep: events failure rolls back all persistent steps
+  ---
+  duration_ms: 1.4761
+  type: 'test'
+  ...
+# Subtest: create: audit_log failure rolls back all persistent steps
+ok 54 - create: audit_log failure rolls back all persistent steps
+  ---
+  duration_ms: 1.2891
+  type: 'test'
+  ...
+# Subtest: claim: audit_log failure rolls back all persistent steps
+ok 55 - claim: audit_log failure rolls back all persistent steps
+  ---
+  duration_ms: 1.1895
+  type: 'test'
+  ...
+# Subtest: finish: audit_log failure rolls back all persistent steps
+ok 56 - finish: audit_log failure rolls back all persistent steps
+  ---
+  duration_ms: 1.2923
+  type: 'test'
+  ...
+# Subtest: verify: audit_log failure rolls back all persistent steps
+ok 57 - verify: audit_log failure rolls back all persistent steps
+  ---
+  duration_ms: 1.9225
+  type: 'test'
+  ...
+# Subtest: cancel: audit_log failure rolls back all persistent steps
+ok 58 - cancel: audit_log failure rolls back all persistent steps
+  ---
+  duration_ms: 1.6589
+  type: 'test'
+  ...
+# Subtest: renew: audit_log failure rolls back all persistent steps
+ok 59 - renew: audit_log failure rolls back all persistent steps
+  ---
+  duration_ms: 1.722
+  type: 'test'
+  ...
+# Subtest: request: audit_log failure rolls back all persistent steps
+ok 60 - request: audit_log failure rolls back all persistent steps
+  ---
+  duration_ms: 2.4537
+  type: 'test'
+  ...
+# Subtest: decide: audit_log failure rolls back all persistent steps
+ok 61 - decide: audit_log failure rolls back all persistent steps
+  ---
+  duration_ms: 1.7151
+  type: 'test'
+  ...
+# Subtest: create-with-approval: audit_log failure rolls back all persistent steps
+ok 62 - create-with-approval: audit_log failure rolls back all persistent steps
+  ---
+  duration_ms: 1.4422
+  type: 'test'
+  ...
+# Subtest: block: audit_log failure rolls back all persistent steps
+ok 63 - block: audit_log failure rolls back all persistent steps
+  ---
+  duration_ms: 1.517
+  type: 'test'
+  ...
+# Subtest: resume: audit_log failure rolls back all persistent steps
+ok 64 - resume: audit_log failure rolls back all persistent steps
+  ---
+  duration_ms: 2.3567
+  type: 'test'
+  ...
+# Subtest: requeue: audit_log failure rolls back all persistent steps
+ok 65 - requeue: audit_log failure rolls back all persistent steps
+  ---
+  duration_ms: 1.6611
+  type: 'test'
+  ...
+# Subtest: sweep: audit_log failure rolls back all persistent steps
+ok 66 - sweep: audit_log failure rolls back all persistent steps
+  ---
+  duration_ms: 2.0138
+  type: 'test'
+  ...
+1..66
+# tests 66
+# suites 0
+# pass 66
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 35301.3274

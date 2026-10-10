@@ -1,0 +1,16 @@
+{
+  "name": "agent-control-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Hermes × Codex × ChatGPT × Pi 统一控制桥",
+  "scripts": {
+    "start": "node --experimental-strip-types --experimental-sqlite src/index.ts",
+    "cli": "node --experimental-strip-types --experimental-sqlite src/cli.ts",
+    "test": "node scripts/test.mjs",
+    "test:e2e": "node --experimental-strip-types src/e2e.ts"
+  },
+  "engines": {
+    "node": ">=24.19.0"
+  }
+}
