@@ -16,8 +16,8 @@
     "skipped": 0
   },
   "desktopMock": {
-    "tests": 16,
-    "pass": 16,
+    "tests": 19,
+    "pass": 19,
     "fail": 0,
     "liveInput": false
   },
@@ -40,7 +40,9 @@
     "currentFiles": 104,
     "baselineHistoryBlobs": 38,
     "candidates": 0,
-    "limits": "Basic patterns cannot exclude unknown credentials or private business text"
+    "limits": "Basic patterns cannot exclude unknown credentials or private business text",
+    "historyCoverage": "All commits reachable from all local refs; distinct blobs scanned",
+    "historyBlobs": 155
   },
   "cliHelpCommands": 37,
   "packageFiles": 79,
@@ -51,30 +53,201 @@
   "license": "MIT; original 12 desktop files authorized by owner",
   "desktopOriginalBackupVerified": 12,
   "publication": {
-    "implementationCommit": "12e7843b92a0b0c9aa58b37c45a8904b34ec3ad3",
-    "visibility": "public",
+    "repository": "wynter-yaxley/agent-control-bridge",
     "anonymousAccess": true,
-    "filesVerified": 104,
-    "source": "Existing Git/GCM push; connector and anonymous API verification; no credential extraction"
+    "visibility": "public",
+    "mainCommit": "6fd49a6c05b2600d8fcf54d04a4ffdb57d5e7e9f",
+    "remoteFilesVerified": 104,
+    "desktopOriginalsInRepository": 12,
+    "contentMatchesGitTree": true,
+    "ciRuns": [
+      {
+        "id": 38038222861,
+        "status": "in_progress",
+        "conclusion": null,
+        "url": "https://github.com/wynter-yaxley/agent-control-bridge/actions/runs/38038222861"
+      }
+    ]
   },
   "ci": {
-    "result": "FAIL",
-    "runId": 38035627311,
-    "commit": "12e7843b92a0b0c9aa58b37c45a8904b34ec3ad3",
+    "result": "PASS",
+    "runId": 38038222861,
+    "headCommit": "6fd49a6c05b2600d8fcf54d04a4ffdb57d5e7e9f",
     "status": "completed",
-    "conclusion": "failure",
-    "url": "https://github.com/wynter-yaxley/agent-control-bridge/actions/runs/38035627311",
+    "conclusion": "success",
+    "url": "https://github.com/wynter-yaxley/agent-control-bridge/actions/runs/38038222861",
     "jobs": [
       {
-        "name": "core (windows-latest)",
-        "result": null
+        "id": 114173042841,
+        "name": "core (ubuntu-latest)",
+        "status": "completed",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "Set up job",
+            "conclusion": "success"
+          },
+          {
+            "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+            "conclusion": "success"
+          },
+          {
+            "name": "Run actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020",
+            "conclusion": "success"
+          },
+          {
+            "name": "Run actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065",
+            "conclusion": "success"
+          },
+          {
+            "name": "Run npm ci --ignore-scripts",
+            "conclusion": "success"
+          },
+          {
+            "name": "Run npm run typecheck",
+            "conclusion": "success"
+          },
+          {
+            "name": "Run npm run build",
+            "conclusion": "success"
+          },
+          {
+            "name": "Run npm test",
+            "conclusion": "success"
+          },
+          {
+            "name": "Run npm run test:e2e",
+            "conclusion": "success"
+          },
+          {
+            "name": "Run npm run test:desktop",
+            "conclusion": "success"
+          },
+          {
+            "name": "Run npm run check",
+            "conclusion": "success"
+          },
+          {
+            "name": "Run npm audit --audit-level=high",
+            "conclusion": "success"
+          },
+          {
+            "name": "Run npm run test:install",
+            "conclusion": "success"
+          },
+          {
+            "name": "Post Run actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065",
+            "conclusion": "success"
+          },
+          {
+            "name": "Post Run actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020",
+            "conclusion": "success"
+          },
+          {
+            "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+            "conclusion": "success"
+          },
+          {
+            "name": "Complete job",
+            "conclusion": "success"
+          }
+        ]
       },
       {
-        "name": "core (ubuntu-latest)",
-        "result": "success"
+        "id": 114173042966,
+        "name": "core (windows-latest)",
+        "status": "completed",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "Set up job",
+            "conclusion": "success"
+          },
+          {
+            "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+            "conclusion": "success"
+          },
+          {
+            "name": "Run actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020",
+            "conclusion": "success"
+          },
+          {
+            "name": "Run actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065",
+            "conclusion": "success"
+          },
+          {
+            "name": "Run npm ci --ignore-scripts",
+            "conclusion": "success"
+          },
+          {
+            "name": "Run npm run typecheck",
+            "conclusion": "success"
+          },
+          {
+            "name": "Run npm run build",
+            "conclusion": "success"
+          },
+          {
+            "name": "Run npm test",
+            "conclusion": "success"
+          },
+          {
+            "name": "Run npm run test:e2e",
+            "conclusion": "success"
+          },
+          {
+            "name": "Run npm run test:desktop",
+            "conclusion": "success"
+          },
+          {
+            "name": "Run npm run check",
+            "conclusion": "success"
+          },
+          {
+            "name": "Run npm audit --audit-level=high",
+            "conclusion": "success"
+          },
+          {
+            "name": "Run npm run test:install",
+            "conclusion": "success"
+          },
+          {
+            "name": "Post Run actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065",
+            "conclusion": "success"
+          },
+          {
+            "name": "Post Run actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020",
+            "conclusion": "success"
+          },
+          {
+            "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+            "conclusion": "success"
+          },
+          {
+            "name": "Complete job",
+            "conclusion": "success"
+          }
+        ]
       }
     ],
-    "linuxPlatformSpecificSkip": "Three Windows-only identity/ACL probes skipped on Linux; not counted as passes"
+    "linuxPlatformSpecificSkip": "Three Windows-only identity/ACL probes explicitly skipped; not passes",
+    "verifiedCounts": {
+      "windows": {
+        "tests": 111,
+        "pass": 111,
+        "fail": 0,
+        "skipped": 0
+      },
+      "linux": {
+        "tests": 111,
+        "pass": 108,
+        "fail": 0,
+        "skipped": 3
+      },
+      "desktopMockEach": 19,
+      "e2eEach": 4,
+      "cleanInstallBoth": "PASS"
+    }
   },
   "ciYaml": "PASS",
   "svgXmlAndRenderedLayout": "PASS",
@@ -85,7 +258,8 @@
     "postRemovalDesktopMockTests": 16,
     "oldRuntimePathDependencies": 0,
     "privateRootChatExport": "Retained pending ownership confirmation",
-    "unrelatedFoldersRemoved": false
+    "unrelatedFoldersRemoved": false,
+    "latestPostRemovalDesktopMockTests": 19
   },
   "firstCiFailure": {
     "runId": 38035627311,
@@ -101,18 +275,36 @@
         "helpPresent": true
       }
     },
-    "rerunStatus": "PENDING"
+    "rerunStatus": "SUPERSEDED; failure retained, latest result in ci"
   },
   "secondCiFailure": {
     "runId": 38036563133,
     "windows": "Sanitized Windows install probe timed out in NTFS ACL helper; diagnostics retained",
     "linux": "PASS",
     "action": "Controlled OS runtime metadata and OS-owned PowerShell modules restored; real isolated ACL probe added",
-    "rerun": "PENDING"
+    "rerun": "SUPERSEDED; failure retained, latest result in ci"
   },
   "controlledMigrations": {
     "initLegacyRejected": "PASS; original bytes and version unchanged",
     "foreignAndIncompleteSchemaRejected": "PASS",
     "realBusinessDatabaseChanged": false
-  }
+  },
+  "implementationCommit": "6fd49a6c05b2600d8fcf54d04a4ffdb57d5e7e9f",
+  "thirdCiFailure": {
+    "runId": 38037360296,
+    "linux": "PASS",
+    "windows": {
+      "tests": 111,
+      "pass": 110,
+      "fail": 1,
+      "skipped": 0
+    },
+    "subsequentSteps": "SKIPPED",
+    "reason": "Isolated ACL probe timed out"
+  },
+  "pythonCheckFirstAttempt": "FAIL: Python not on PATH; existing interpreter selected via ACB_CHECK_PYTHON, rerun PASS",
+  "deliveryState": "PARTIALLY_DELIVERED",
+  "latestPostRemovalDesktopMockTests": 19,
+  "productionDbSha256": "320fb10bf1961a7af329292961b9cd77184fb91b84cf3fcb91f3d1f344ab5360",
+  "promptWhitespaceAndConversationRegression": "PASS"
 }

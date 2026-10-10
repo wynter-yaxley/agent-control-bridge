@@ -7,7 +7,7 @@
 | ID | 原等级 | 原问题 | 实际修复文件 | 修复方式 | 测试证据 | 当前状态 | 限制与后续建议 |
 |---|---|---|---|---|---|---|---|
 | SEC-001 | P1 | 业务角色伪造、缺所有权约束 | src/caller.ts; src/tasks.ts; src/review-boundary.ts; src/migrations.ts | OS 主体与不可序列化 caller context；holder/instance；独立验收 SQL gate | caller/cli/tasks/migration/transactions 测试 | FIXED_AND_TESTED | 同一 OS 主体运行不可信代码仍不等于进程安全沙箱；真实 Hermes 宿主接入待验证 |
-| SEC-002 | P1 | NTFS ACL 过宽 | src/permissions.ts; src/permissions.ps1; src/db.ts | 沿用已验收的授权 SID/700/600；建库前保护专用数据目录 | permissions 测试；用户提供 Hermes 实查仅 SYSTEM/Administrators/机主 | FIXED_AND_TESTED | 未再次改业务库或项目 ACL；真实多 OS 主体部署应重新验收 |
+| SEC-002 | P1 | NTFS ACL 过宽 | src/permissions.ts; src/permissions.ps1; src/db.ts | 授权 SID/700/600；建库前保护专用数据目录；纯 .NET/SID 校验避免隐式账户名解析，固定阶段错误摘要 | test/database.test.ts 实际临时库 ACL、宽 SID 拒绝、受控子进程；用户提供 Hermes 实查仅 SYSTEM/Administrators/机主 | FIXED_AND_TESTED | 本地全部通过，CI 结果单列于 DELIVERY；未再次改业务库或项目 ACL；真实多 OS 主体部署应重新验收 |
 | STATE-001 | P1 | 双领取、终态竞争 | src/tasks.ts | status/version/owner/instance/attempt 条件 UPDATE，changes=1 | barrier 双领取 10 轮恰 1 成功；finish/cancel 竞争 | FIXED_AND_TESTED | 无自动重试旧版本；重新读版本再决策 |
 | DB-001 | P1 | 多步持久化分开提交 | src/db.ts; src/tasks.ts; src/prompts.ts | 短事务，事件/审计同提交；嵌套 savepoint | events/audit 故障注入全部回滚 | FIXED_AND_TESTED | 外部发送与 SQLite 无分布式原子事务；不确定投递保持 DELIVERING |
 | CODE-002 | P2 | 导出覆盖原文件 | src/chatgpt.ts | 大小写扩展名、同路径拒绝；wx 创建；失败清理自身文件 | imports 的覆盖负例原 hash 不变 | FIXED_AND_TESTED | 跨外部文件和 DB 不承诺断电级原子提交 |
@@ -38,6 +38,7 @@
 - 对话拓扑：一个项目一个 workspace/一个 GPT 对话/N 个 Codex 对话，生产发送前和回执后双向校验；新项目成套登记；角色字符串不可授权。真实映射 ID 由用户已授权应用的可信元数据提供，不能从文本自我声明信任。
 - 应用恢复：已退出/未知区分，报备、事件授权、指定 CDP 参数重启、Windows Python 校验、恢复映射后继续。Mock 验证顺序；真实安装启动能力尚未验证；本轮未启动/重启真实 Agent。
 - 桌面安全：原写工具可能改变编辑焦点，默认阻塞；保留算法但受可信宿主单次授权和来源证明保护。旧 raw prompt continue/relay 不再直通执行。没有未经授权的 OS 物理键鼠/窗口激活路径。
+- 桌面内容与映射：发送后编辑器内容逐字匹配（含空白）；缺少登记会话编辑器时不自动新建 GPT 对话。19 项 Mock 回归包含空白篡改和无编辑器拒绝；不据此宣称真实界面焦点已验证。
 - GitHub：非交互进程包装层不提取凭据；已有 GitHub 集成缺可见性修改接口、本机无已授权 gh。旧建仓脚本需要 credential fill 提取 Token，违反本轮凭据铁律，因此未调用。私有推送和公开状态必须分别报告。
 - 迁移清理：12/12 原文件已迁入，原创 MIT 权利已获用户明确确认。新路径独立执行 help、16 项 Mock/发送算法/异常关闭测试；原始 12 文件的外部持久备份与基线 hash 逐一一致。远端 104 文件与本地 Git 树逐项一致，12/12 原备份和迁移 hash 核验后已清理旧工具目录，删除后 16 项 Mock 回归再次通过；真实写链路单列未验证，不删除无关目录。
 
@@ -57,3 +58,5 @@
 CLI 别名补充证据：目录别名启动旧入口 exit=0/helpPresent=false，新 import.meta.main 入口 exit=0/helpPresent=true；test/cli.test.ts 新增实际子进程契约，不降低旧断言。scripts/test.mjs 流式输出且零测试拒绝，clean-install 在规范临时路径运行并报告 pass/fail/skipped，超时仅清理自己启动的测试子树。初次 Windows CI 安装探针失败记录保留，须核验修订后 CI。SQLite3 及其 sidecar 同时纳入忽略/检查。
 
 受控迁移补充：init 只初始化空库，旧库明确要求 migrate；陌生及缺表当前版本数据库先拒绝，回归证明原始 bytes/version/业务记录不变。Windows 安装 CI 的 ACL 超时不算通过，恢复必要非秘密 OS 元数据并固定受信任系统模块路径，新增真实临时库权限子进程测试；111 项本地回归通过，待远端复核。
+
+CI 证据以 [DELIVERY](DELIVERY.md) 和 [VALIDATION](VALIDATION.json) 的独立查询为准，保留前三次实际失败，跳过不算通过。第三次 Windows 是 110 pass/1 fail，新增受控 ACL 探针超时；没有删除断言或停用 ACL。权限助手现去掉模块自动加载与账户名称解析，失败附固定阶段，实际远端复核独立记录。本地 111 项及干净安装通过；19 项桌面 Mock 与生产外部链路严格区分。
