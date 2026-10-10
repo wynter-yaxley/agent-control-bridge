@@ -30,27 +30,28 @@ def config():
     except (ValueError,OSError,TypeError): raise ToolError('CONFIG','Invalid desktop configuration',2)
 
 class ToolError(Exception):
-    def __init__(self, code, message, exit_code=3): super().__init__(message); self.code=code; self.exit_code=exit_code
+    def __init__(self, code, message, exit_code=3, status='blocked', details=None):
+        super().__init__(message); self.code=code; self.exit_code=exit_code; self.status=status; self.details=details
 class Handle: pass
 class DesktopAuthority:
     """Only a trusted in-process host can issue these; no CLI flag or JSON grants authority."""
     def __init__(self): self._handles=weakref.WeakKeyDictionary()
-    def approve(self, operation, prompt_hash=None):
-        handle=Handle(); self._handles[handle]=(operation,prompt_hash); return handle
-    def consume(self, handle, operation, prompt_hash=None):
-        if not isinstance(handle,Handle) or self._handles.pop(handle,None)!=(operation,prompt_hash):
+    def approve(self, operation, prompt_hash=None, binding=None):
+        handle=Handle(); self._handles[handle]=(operation,prompt_hash,binding); return handle
+    def consume(self, handle, operation, prompt_hash=None, binding=None):
+        if not isinstance(handle,Handle) or self._handles.pop(handle,None)!=(operation,prompt_hash,binding):
             raise ToolError('AUTH','One-time trusted host approval required')
 
 CAPABILITIES = {
  'read': {'backgroundSafe': True,'requiresForeground':False,'usesPhysicalInput':False,'requiresUserApproval':False},
  'write': {'backgroundSafe':False,'requiresForeground':True,'usesPhysicalInput':False,'requiresUserApproval':True},
 }
-def guard_write(operation, authority=None, approval=None, prompt_hash=None):
+def guard_write(operation, authority=None, approval=None, prompt_hash=None, binding=None):
     settings=config()
     if not settings['enabled'] or not settings['allowForegroundAutomation']:
         raise ToolError('FOREGROUND_REQUIRED','Write path may change editing focus; disabled by default',6)
     if authority is None: raise ToolError('AUTH','Configuration does not grant one-time approval')
-    authority.consume(approval,operation,prompt_hash)
+    authority.consume(approval,operation,prompt_hash,binding)
 
 def targets():
     settings=config()
@@ -115,6 +116,28 @@ def validate_prompt(prompt):
 def entry(fn):
     try: return fn() or 0
     except ToolError as error:
-        print(json.dumps({'ok':False,'code':error.code,'error':str(error)},ensure_ascii=False),file=sys.stderr); return error.exit_code
+        payload={'ok':False,'status':error.status,'code':error.code,'error':str(error)}
+        if error.details is not None: payload['details']=error.details
+        print(json.dumps(payload,ensure_ascii=False),file=sys.stderr); return error.exit_code
     except Exception:
         print(json.dumps({'ok':False,'code':'EXECUTION','error':'Tool failed; private response omitted'}),file=sys.stderr); return 3
+
+
+def guard_project_route(*args, **kwargs):
+    from desktop_guards import guard_project_route as implementation
+    return implementation(*args, **kwargs)
+
+
+def guard_local_codex_execution(*args, **kwargs):
+    from desktop_guards import guard_local_codex_execution as implementation
+    return implementation(*args, **kwargs)
+
+
+def paste_text(*args, **kwargs):
+    from clipboard_paste import paste_text as implementation
+    return implementation(*args, **kwargs)
+
+
+def rename_session(*args, **kwargs):
+    from desktop_rename import rename_session as implementation
+    return implementation(*args, **kwargs)

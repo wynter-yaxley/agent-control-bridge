@@ -46,8 +46,8 @@ export class ConversationRegistry {
       this.db.prepare('INSERT INTO audit_log(at,actor,action,detail) VALUES(?,?,?,?)').run(now(), caller.principal, 'conversation_mapping', `project=${input.projectId}`);
     });
   }
-  forTask(taskId: string) {
-    const mapping = this.db.prepare('SELECT w.*,p.name AS project_name FROM conversation_workspaces w JOIN tasks t ON t.project_id=w.project_id JOIN projects p ON p.id=w.project_id WHERE t.id=?').get(taskId);
+  forTask(taskId: string): { project_id:string; workspace_path:string; workspace_key:string; chatgpt_conversation_id:string; chatgpt_conversation_name:string; project_name:string } {
+    const mapping = this.db.prepare('SELECT w.*,p.name AS project_name FROM conversation_workspaces w JOIN tasks t ON t.project_id=w.project_id JOIN projects p ON p.id=w.project_id WHERE t.id=?').get(taskId) as { project_id:string; workspace_path:string; workspace_key:string; chatgpt_conversation_id:string; chatgpt_conversation_name:string; project_name:string } | undefined;
     if (!mapping) throw new BridgeError('PROVENANCE', 'Production tasks require a registered project/workspace/GPT conversation');
     return mapping;
   }

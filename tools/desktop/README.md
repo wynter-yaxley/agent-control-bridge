@@ -27,14 +27,24 @@ python tools/desktop/gpt-read --help
 | `python tools/desktop/gpt-read --last --json` | 可见 ChatGPT 消息 JSON；`modelVerified:false` | `--last`, `--json`, `--kind webview\|page` | 是 / 无 / 无 / 已授权会话读取 |
 | `python tools/desktop/cdp_messages.py page` | 兼容可见消息 JSON | positional `webview` / `page` | 是 / 无 / 无 / 已授权会话读取 |
 | `python tools/desktop/probe_targets.py` | 目标数量/类型；不输出 URL、页面内容、会话信息 | 无（支持 `--help`） | 是 / 无 / 无 / CDP 已启用 |
+| `python tools/desktop/route-execution-guard gpt|codex` | 只读归属/执行位观察分类；明确 `trustedAuthorityGranted:false` | `gpt` 或 `codex` | 是 / 无 / 无 / 用户授权的 CDP 只读 |
 | `python tools/desktop/codex-status --limit 6` | 只读线程历史摘要；不证明当前后台执行 | `--thread ID`, `--project NAME`, `--limit 1..100` | 是 / 无 / 无 / 用户元数据读取 |
 | `python tools/desktop/relay.py codex2gpt` | 返回助手输出候选，`REVIEW_REQUIRED`，不自动发送 | `gpt2codex\|codex2gpt` | 读取是 / 无 / 无 / 不授予写权 |
 | `python tools/desktop/gpt-send --help` / `gpt_send_cdp.py` | 原 CDP 注入/提交算法；普通 CLI 发送默认阻塞 | 提示词、`--force-clear`（仅可信宿主受控调用） | 否 / 可能改变编辑焦点 / 无 OS 物理输入 / 单次宿主授权 |
+| `python tools/desktop/gpt-rename --help` / `desktop_rename.py` | 对指定会话执行菜单重命名、剪贴板粘贴、提交策略尝试和标题读回；普通 CLI 无法授权 | 新标题（可信宿主 API 另传 target context） | 否 / 可能改变编辑焦点 / 无 OS 物理输入 / target-bound 单次授权 |
 | `python tools/desktop/codex-send --help` / `codex_send_cdp.py` | 原 Codex composer 算法；生产需可信桥接来源回执及授权 | 提示词、`--force-clear`（仅可信宿主受控调用） | 否 / 可能改变编辑焦点 / 无 OS 物理输入 / 来源 + 单次宿主授权 |
 | `python tools/desktop/codex-continue --help` | 保留兼容入口；原直接 raw-prompt resume 被来源门禁阻塞 | THREAD、PROMPT、`--confirm` 不能授予来源 | 不执行 / 无 / 无 / 缺可信适配器时拒绝 |
 | `python tools/desktop/recovery.py --check-cdp` | Windows 侧只读 CDP 可达性，不能证明模型或会话已恢复 | `--check-cdp` | 是 / 无 / 无 / 不会重启 |
 
 所有工具 `--help` 均无网络与输入副作用。`--json` 是读取入口兼容参数，读取输出始终是 JSON。`gpt2codex` 默认返回 PROVENANCE 拒绝：DOM 文本、自我声明 `source=chatgpt` 无法证明实际 GPT-6/High 或会话来源。Node `PromptPipeline` 是可信宿主接入点；当前未交付能验证实际桌面模型/思考强度并完成自动双向发送的生产适配器。
+
+## Project route and execution guards
+
+`gpt_send_cdp.main` and `codex_send_cdp.main` are trusted-host APIs. The host must pass the project mapping returned by `ConversationRegistry` (including provider, registered session ID, project ID, and workspace/root paths) and issue a `DesktopAuthority` handle bound to `desktop_guards.binding_fingerprint(mapping)`. The desktop page must independently expose the exact active conversation ID and project ID through navigation metadata; titles are never used as ownership proof. If a session is shown in Recent, the bridge only tries repair when the page exposes a session-ID-bound `data-action="move-to-project"` and a project-ID-bound menu item, and the host supplies a separate `project_route_repair` approval. The bridge then rereads page state and blocks unless ownership matches. Unknown or unsupported UI metadata returns structured `unsupported`, `blocked`, or `verification_failed` results.
+
+Production `PromptPipeline` adapters must implement `preflight(target, signal)`. It must collect the local Codex surface, execution-mode attribute, visible conversation/project/workspace values, and matching `.codex-global-state.json` thread assignment/root metadata. `local Codex` is allowed only when all IDs and paths match; Work/cloud, ordinary GPT, unknown, conflicting, stale, or missing evidence is rejected. Preflight runs twice before the prompt enters `DELIVERING`, and the target is passed into `deliver`; the Windows CDP sender repeats the check after paste immediately before submission. UI labels are observations, never authority; `/mnt/data` is only a risk clue. The bridge does not send a probe prompt.
+
+The reusable clipboard module supports a Windows Unicode text clipboard state. It refuses clipboard contents containing other formats when it cannot preserve them, confirms focus and exact pasted text, and reports restoration failure. Rename submission uses only currently observed capabilities, tries each strategy at most once, verifies the target row twice, and returns `persistence: not independently verified after reload`; it does not claim the closed application has saved across restart. The diagnostic command is read-only and never grants authority. These code paths have Mock coverage only; the application must expose the documented identity attributes for writes to proceed, so incompatible UI versions fail closed.
 
 ## 退出码与安全入口
 

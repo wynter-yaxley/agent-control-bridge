@@ -1,5 +1,6 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { createHash, randomUUID } from 'node:crypto';
+import { resolve, win32 } from 'node:path';
 import { CallerAuthority, type CallerContext } from './caller.ts';
 import { transaction, now } from './db.ts';
 import { BridgeError } from './errors.ts';
@@ -14,12 +15,77 @@ export interface ChatgptAdapter {
   readonly source: 'chatgpt' | 'mock-chatgpt';
   readonly conversationId?: string;
   readonly conversationName?: string;
+  // App-side navigation read, distinct from the bridge's expected mapping.
+  preflight?(target: { conversationId: string; projectId: string; workspacePath: string }, signal: AbortSignal): Promise<ProjectRouteEvidence>;
   capabilities(): Promise<{ models: string[]; reasoningEfforts: string[]; verified: boolean }>;
   generate(requirement: string, options: { model: string; reasoningEffort: string; signal: AbortSignal }): Promise<Generation>;
 }
 export interface CodexDelivery {
-  target?(signal: AbortSignal): Promise<{codexConversationId:string; workspacePath:string}>;
-  deliver(content: string, key: string, signal: AbortSignal): Promise<{ executionId: string; codexConversationId?: string; workspacePath?: string }>;
+  target?(signal: AbortSignal): Promise<DeliveryTarget>;
+  // Production adapters must independently read the active desktop execution state.
+  // DOM labels are observations; local Codex app metadata and exact path/thread IDs
+  // must corroborate them. Demo adapters never authorize production delivery.
+  preflight?(target: DeliveryTarget, signal: AbortSignal): Promise<ExecutionEvidence>;
+  deliver(content: string, key: string, signal: AbortSignal, target: DeliveryTarget | null): Promise<{ executionId: string; codexConversationId?: string; workspacePath?: string }>;
+}
+export interface DeliveryTarget { codexConversationId: string; workspacePath: string }
+export interface ProjectRouteEvidence {
+  source: 'application-navigation' | 'unknown';
+  conversationId: string | null;
+  projectId: string | null;
+  workspacePath: string | null;
+  listKind?: 'project' | 'recent' | 'unknown';
+}
+export interface ExecutionEvidence {
+  surface: 'codex-desktop' | 'chatgpt-web' | 'unknown';
+  modeAttribute: 'codex-local' | 'work-cloud' | 'gpt' | null;
+  badgeText?: string | null;
+  conversationId: string | null;
+  projectId: string | null;
+  workspacePath: string | null;
+  composerState: 'ready' | 'missing' | 'unknown';
+  codexAppState?: { source: 'codex-app-state'; threadId: string; projectId: string; workspacePath: string } | null;
+}
+
+function canonicalWorkspace(path: string): string {
+  if (typeof path !== 'string' || !path.trim()) return '';
+  const value = path.trim();
+  return /^[A-Za-z]:[\\/]|^\\\\/.test(value) ? win32.normalize(value).toLowerCase() : resolve(value);
+}
+
+export function assertLocalCodexEvidence(mapping: { project_id: string; workspace_path: string }, target: DeliveryTarget, evidence: ExecutionEvidence): void {
+  const badge = typeof evidence?.badgeText === 'string' ? evidence.badgeText.trim().toLocaleLowerCase() : '';
+  if (evidence?.modeAttribute === 'work-cloud' || badge === 'work · 云端环境' || badge === 'work · cloud environment') {
+    throw new BridgeError('PROVENANCE', 'Cloud Work execution is selected; local Codex delivery was blocked');
+  }
+  const localBadge = badge === 'codex · 本地工作区' || badge === 'codex · local workspace';
+  if (!evidence || evidence.surface !== 'codex-desktop' || ![null, 'codex-local'].includes(evidence.modeAttribute) ||
+      (badge !== '' && !localBadge) || evidence.composerState !== 'ready') {
+    throw new BridgeError('PROVENANCE', 'Local Codex execution mode could not be positively verified');
+  }
+  const expectedWorkspace = canonicalWorkspace(mapping?.workspace_path);
+  const targetWorkspace = canonicalWorkspace(target?.workspacePath);
+  const state = evidence.codexAppState;
+  if (!mapping?.project_id || !expectedWorkspace || !target?.codexConversationId || targetWorkspace !== expectedWorkspace ||
+      evidence.conversationId !== target.codexConversationId || evidence.projectId !== mapping.project_id ||
+      canonicalWorkspace(evidence.workspacePath ?? '') !== expectedWorkspace ||
+      !state || state.source !== 'codex-app-state' || state.threadId !== target.codexConversationId ||
+      state.projectId !== mapping.project_id || canonicalWorkspace(state.workspacePath) !== expectedWorkspace) {
+    throw new BridgeError('PROVENANCE', 'Codex thread, project, workspace, and local app state do not agree');
+  }
+}
+
+export function assertProjectRouteEvidence(mapping: { project_id: string; workspace_path: string; chatgpt_conversation_id: string }, evidence: ProjectRouteEvidence): void {
+  if (!evidence || evidence.source !== 'application-navigation' ||
+      evidence.conversationId !== mapping.chatgpt_conversation_id || evidence.projectId !== mapping.project_id) {
+    const detail = evidence?.listKind === 'recent' && evidence.projectId === null
+      ? 'Project conversation is in Recent without verified application ownership'
+      : 'Application conversation/project identity does not match the registered bridge mapping';
+    throw new BridgeError('PROVENANCE', detail);
+  }
+  if (!evidence.workspacePath || canonicalWorkspace(evidence.workspacePath) !== canonicalWorkspace(mapping.workspace_path)) {
+    throw new BridgeError('PROVENANCE', 'Application workspace conflicts with the registered project root');
+  }
 }
 export const promptHash = (content: string) => createHash('sha256').update(content, 'utf8').digest('hex');
 async function bounded<T>(operation: (signal: AbortSignal) => Promise<T>, milliseconds: number): Promise<T> {
@@ -50,8 +116,19 @@ export class PromptPipeline {
     const mapping = !isDemoDatabase(this.db) ? registry.forTask(taskId) : null;
     if(mapping && this.adapter.conversationId!==mapping.chatgpt_conversation_id) throw new BridgeError('PROVENANCE','Adapter target does not match the registered GPT conversation');
     if(mapping && (this.adapter.conversationName!==mapping.project_name||mapping.chatgpt_conversation_name!==mapping.project_name)) throw new BridgeError('PROVENANCE','GPT conversation name must match the workspace project name');
+    if(mapping) {
+      if(!this.adapter.preflight) throw new BridgeError('PROVENANCE','ChatGPT adapter has no app-side project route preflight; refusing to send');
+      const target={conversationId:mapping.chatgpt_conversation_id,projectId:mapping.project_id,workspacePath:mapping.workspace_path};
+      const route=await bounded(signal=>this.adapter.preflight!(target,signal),this.timeoutMs);
+      assertProjectRouteEvidence(mapping,route);
+    }
     const capabilities = await bounded(() => this.adapter.capabilities(), this.timeoutMs);
     if (!capabilities.verified || !capabilities.models.includes(this.requested.model) || !capabilities.reasoningEfforts.includes(this.requested.reasoningEffort)) throw new BridgeError('UNSUPPORTED', 'Requested model/reasoning cannot be verified by the adapter');
+    if(mapping) {
+      const target={conversationId:mapping.chatgpt_conversation_id,projectId:mapping.project_id,workspacePath:mapping.workspace_path};
+      const route=await bounded(signal=>this.adapter.preflight!(target,signal),this.timeoutMs);
+      assertProjectRouteEvidence(mapping,route);
+    }
     const result = await bounded(signal => this.adapter.generate(requirement, { ...this.requested, signal }), this.timeoutMs);
     if (!result.content.trim() || result.content.length > 65536 || !result.sourceMessageId) throw new BridgeError('PROVENANCE', 'Generation has no verifiable source message');
     requireNoSecrets(result.content); requireNoSecrets(result.sourceMessageId);
@@ -79,15 +156,31 @@ export class PromptPipeline {
     if (prompt.delivery_status === 'DELIVERED') return { executionId: String(prompt.codex_execution_id) };
     if (this.db.prepare('SELECT status FROM tasks WHERE id=?').get(prompt.task_id)?.status !== 'QUEUED') throw new BridgeError('STATE', 'Delivery requires a QUEUED task');
     if (!['PENDING', 'FAILED'].includes(String(prompt.delivery_status))) throw new BridgeError('CONFLICT', 'Delivery is pending recovery or manual review');
+    let destination: DeliveryTarget | null = null;
+    let mapping: ReturnType<ConversationRegistry['forTask']> | null = null;
     if(!isDemoDatabase(this.db)) {
       if(!this.delivery.target) throw new BridgeError('PROVENANCE','Codex destination must be independently resolved before sending');
-      const destination=await bounded(signal=>this.delivery.target!(signal),this.timeoutMs);
+      if(!this.delivery.preflight) throw new BridgeError('PROVENANCE','Codex delivery adapter has no local execution preflight; refusing to send');
+      const registry=new ConversationRegistry(this.db,this.authority);
+      mapping=registry.forTask(String(prompt.task_id));
+      destination=await bounded(signal=>this.delivery.target!(signal),this.timeoutMs);
       new ConversationRegistry(this.db,this.authority).assertExecution(String(prompt.task_id),destination.codexConversationId,destination.workspacePath);
+      const initialEvidence=await bounded(signal=>this.delivery.preflight!(destination!,signal),this.timeoutMs);
+      assertLocalCodexEvidence(mapping,destination,initialEvidence);
+    }
+    if(!isDemoDatabase(this.db)) {
+      const registry=new ConversationRegistry(this.db,this.authority);
+      const refreshed=await bounded(signal=>this.delivery.target!(signal),this.timeoutMs);
+      registry.assertExecution(String(prompt.task_id),refreshed.codexConversationId,refreshed.workspacePath);
+      if(refreshed.codexConversationId!==destination!.codexConversationId || canonicalWorkspace(refreshed.workspacePath)!==canonicalWorkspace(destination!.workspacePath))
+        throw new BridgeError('PROVENANCE','Codex target changed after execution preflight');
+      const finalEvidence=await bounded(signal=>this.delivery.preflight!(refreshed,signal),this.timeoutMs);
+      assertLocalCodexEvidence(mapping!,refreshed,finalEvidence);
     }
     if (this.db.prepare("UPDATE prompts SET delivery_status='DELIVERING' WHERE id=? AND delivery_status=? AND EXISTS(SELECT 1 FROM tasks WHERE tasks.id=prompts.task_id AND status='QUEUED')").run(id, prompt.delivery_status).changes !== 1) throw new BridgeError('CONFLICT', 'Concurrent delivery refused');
     try {
       // Transport must deduplicate by this stable key, including after uncertain failures.
-      const receipt = await bounded(signal => this.delivery.deliver(String(prompt.content), id, signal), this.timeoutMs);
+      const receipt = await bounded(signal => this.delivery.deliver(String(prompt.content), id, signal, destination), this.timeoutMs);
       if (!isDemoDatabase(this.db)) new ConversationRegistry(this.db, this.authority).assertExecution(String(prompt.task_id), receipt.codexConversationId, receipt.workspacePath);
       if (typeof receipt.executionId !== 'string' || receipt.executionId.length > 4096) throw new BridgeError('EXECUTION', 'Invalid execution receipt'); requireNoSecrets(receipt.executionId);
       if (!receipt.executionId) throw new BridgeError('EXECUTION', 'Transport returned no execution receipt');

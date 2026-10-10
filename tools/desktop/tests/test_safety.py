@@ -38,7 +38,7 @@ class DesktopSafetyTests(unittest.TestCase):
 
     def test_all_compatibility_tools_help_without_network(self):
         root=Path(__file__).resolve().parents[1]
-        for name in ['gpt-read','gpt-send','codex-send','codex-status','codex-continue','relay.py','cdp_messages.py','probe_targets.py']:
+        for name in ['gpt-read','gpt-send','gpt-rename','route-execution-guard','codex-send','codex-status','codex-continue','relay.py','cdp_messages.py','probe_targets.py']:
             result=subprocess.run([sys.executable,str(root/name),'--help'],capture_output=True,text=True,timeout=5,env={**os.environ,'PYTHONDONTWRITEBYTECODE':'1'})
             self.assertEqual(result.returncode,0,(name,result.stderr))
 

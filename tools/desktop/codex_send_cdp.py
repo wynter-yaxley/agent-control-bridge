@@ -1,121 +1,124 @@
 #!/usr/bin/env python3
-# codex_send_cdp.py — Windows 侧执行，CDP 向 Codex 桌面可见 composer 注入并提交
-# 契约：
-#   - 空提示词 → exit 2（不碰 composer）
-#   - composer 非空（含未发送草稿）且无 --force-clear → exit 3（不碰草稿，调用方可决定清空）
-#   - composer 非空 + --force-clear → 先清空再注入
-#   - 注入后严格相等验证，mismatch → exit 4（不提交）
-import sys
+"""Approved Codex send with project-route and local-environment guards."""
+import hashlib
 import json
-import urllib.request
-from desktop_common import Cdp, find_target, guard_write, entry, ToolError, validate_prompt
+import os
+import sys
+from pathlib import Path
+
+from clipboard_paste import paste_text
+from desktop_common import Cdp, ToolError, config, entry, find_target, guard_write, validate_prompt
+from desktop_guards import (binding_fingerprint, guard_local_codex_execution,
+    guard_project_route, read_codex_app_binding, read_execution_environment,
+    read_project_route, repair_project_route)
 
 
-
-FIND_COMPOSER = """
+FIND_COMPOSER = r"""
 (() => {
-  const eds = [...document.querySelectorAll('.ProseMirror[contenteditable="true"]')];
-  const visible = eds.find(e => {
-    const r = e.getBoundingClientRect();
-    return e.offsetParent !== null && r.width > 0 && r.height > 0;
-  });
-  if (!visible) return 'no-editor';
-  visible.focus();
-  return 'focused';
+ const eds=[...document.querySelectorAll('.ProseMirror[contenteditable="true"]')].filter(e=>{const r=e.getBoundingClientRect();return e.offsetParent!==null&&r.width>0&&r.height>0;});
+ if(eds.length!==1)return eds.length?'ambiguous':'no-editor';eds[0].focus();return document.activeElement===eds[0]?'focused':'focus-failed';
 })()
 """
-
-READ_COMPOSER = """
+READ_COMPOSER = r"""
 (() => {
-  const eds = [...document.querySelectorAll('.ProseMirror[contenteditable="true"]')];
-  const e = eds.find(x => { const r = x.getBoundingClientRect(); return x.offsetParent !== null && r.width > 0 && r.height > 0; });
-  return e ? e.textContent : '';
+ const eds=[...document.querySelectorAll('.ProseMirror[contenteditable="true"]')].filter(e=>{const r=e.getBoundingClientRect();return e.offsetParent!==null&&r.width>0&&r.height>0;});
+ return eds.length===1?eds[0].textContent:null;
 })()
 """
-
-CLEAR_COMPOSER = """
+CLEAR_COMPOSER = r"""
 (() => {
-  const eds = [...document.querySelectorAll('.ProseMirror[contenteditable="true"]')];
-  const e = eds.find(x => { const r = x.getBoundingClientRect(); return x.offsetParent !== null && r.width > 0 && r.height > 0; });
-  if (!e) return 'no-editor';
-  e.textContent = '';
-  e.dispatchEvent(new InputEvent('input', {bubbles: true, data: '', inputType: 'deleteContentBackward'}));
-  return 'cleared';
+ const eds=[...document.querySelectorAll('.ProseMirror[contenteditable="true"]')].filter(e=>{const r=e.getBoundingClientRect();return e.offsetParent!==null&&r.width>0&&r.height>0;});
+ if(eds.length!==1)return 'ambiguous';eds[0].replaceChildren();eds[0].dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'deleteContentBackward'}));return 'cleared';
 })()
 """
 
 
-def find_codex_shell_compat():
-    return find_target("page")
+def find_codex_shell_compat(): return find_target('page')
 
 
-def main(authority=None, approval=None, bridge_receipt=None):
+def _require_route(connection,target_context,authority=None,repair_approval=None):
+    evidence=read_project_route(connection);repair=None
+    if evidence and evidence.get('listKind')=='recent' and repair_approval is not None:
+        repair=lambda expected,observed:repair_project_route(connection,expected,observed,authority,repair_approval)
+    result=guard_project_route(target_context,evidence,repair=repair,provider='codex')
+    if result.get('status')!='success':
+        raise ToolError(result.get('code','PROJECT_ROUTE_BLOCKED'),result.get('reason','Conversation route could not be verified'),
+                        6,status=result.get('status','blocked'),details=result)
+    return result
+
+
+def _load_metadata(target_context, state_path=None):
+    if state_path is None:
+        config()
+        config_path=Path(os.environ.get('ACB_CONFIG',Path(__file__).resolve().parents[2]/'.bridge.config.json')).resolve()
+        try:
+            raw=json.loads(config_path.read_text(encoding='utf-8')) if config_path.exists() else {}
+            configured=raw.get('agents',{}).get('codex',{}).get('statePath')
+            if configured:
+                candidate=Path(configured)
+                state_path=candidate if candidate.is_absolute() else config_path.parent/candidate
+        except (OSError,ValueError,TypeError,AttributeError):
+            pass
+        code_home=os.environ.get('ACB_CODEX_HOME')
+        if code_home:
+            state_path=Path(code_home)/'.codex-global-state.json'
+    return read_codex_app_binding(target_context,state_path)
+
+
+def _require_local(connection,target_context,metadata,metadata_reader=None,reread=True):
+    snapshot=read_execution_environment(connection)
+    refresh=(lambda:read_execution_environment(connection)) if reread else None
+    result=guard_local_codex_execution(target_context,snapshot,metadata,reread=refresh,metadata_reread=metadata_reader)
+    if result.get('status')!='success':
+        raise ToolError(result.get('code','EXECUTION_ENVIRONMENT_UNKNOWN'),result.get('reason','Local Codex environment could not be verified'),
+                        6,status=result.get('status','blocked'),details=result)
+    return result
+
+
+def main(authority=None, approval=None, bridge_receipt=None, target_context=None,
+         route_repair_approval=None, clipboard=None, codex_metadata=None, codex_metadata_reader=None):
     if '--help' in sys.argv:
-        print('Use trusted host API with one-time approval; CLI sending is blocked. No model is invoked by help.'); return 0
+        print('Trusted host API only; local Codex target, project, workspace, and execution mode must be verified.'); return 0
+    if not isinstance(target_context,dict): raise ToolError('PROVENANCE','Trusted bridge project/thread mapping required')
     if bridge_receipt is None: raise ToolError('PROVENANCE','Codex requires a host-verified ChatGPT generation receipt')
-    if len(sys.argv) < 2:
-        print("用法: codex_send_cdp.py <提示词> [--force-clear]")
-        sys.exit(2)
-    args = sys.argv[1:]
-    force_clear = "--force-clear" in args
-    prompt = " ".join(a for a in args if a != "--force-clear")
+    args=sys.argv[1:]
+    if not args: raise ToolError('INPUT','Prompt is required',2)
+    force_clear='--force-clear' in args;prompt=' '.join(arg for arg in args if arg!='--force-clear')
     validate_prompt(prompt)
-    if not prompt.strip():
-        print(json.dumps({"error": "空提示词，拒绝执行（不碰 composer）"}, ensure_ascii=False))
-        sys.exit(2)
-
-    import hashlib
-    digest = hashlib.sha256(prompt.encode()).hexdigest()
+    digest=hashlib.sha256(prompt.encode()).hexdigest()
     if authority is None: raise ToolError('AUTH','Trusted host authority required')
-    authority.consume(bridge_receipt, 'verified-chatgpt-prompt', digest)
-    guard_write('codex_send_cdp.py', authority, approval, digest)
-    ws_url = find_codex_shell_compat()
-    if not ws_url:
-        print(json.dumps({"error": "未找到 Codex shell target"}, ensure_ascii=False))
-        sys.exit(2)
-
-    connection = Cdp(ws_url)
+    authority.consume(bridge_receipt,'verified-chatgpt-prompt',digest)
+    guard_write('codex_send_cdp.py',authority,approval,digest,binding_fingerprint(target_context))
+    connection=Cdp(find_codex_shell_compat())
     try:
-        ws = connection
-        pending = [None]
-        def send(method, params): pending[0] = (method, params)
-        def recv(): return connection.call(*pending[0])
-        def evaljs(js): return connection.evaluate(js)
-
-        # 1. focus composer
-        if evaljs(FIND_COMPOSER) != "focused":
-            print(json.dumps({"error": "未找到 Codex composer"}, ensure_ascii=False))
-            sys.exit(3)
-
-        # 2. 检查 composer 是否非空（含未发送草稿）
-        cur = evaljs(READ_COMPOSER)
-        if cur.strip():
-            if not force_clear:
-                print(json.dumps({"error": "composer 非空（含未发送草稿），未触碰；如需清空加 --force-clear"}, ensure_ascii=False))
-                sys.exit(3)
-            evaljs(CLEAR_COMPOSER)
-
-        # 3. 注入（Input.insertText，ProseMirror 监听 beforeinput）
-        send("Input.insertText", {"text": prompt})
-        recv()
-
-        # 4. 严格相等验证；mismatch 则 abort，不提交
-        txt = evaljs(READ_COMPOSER)
-        if txt != prompt:
-            print(json.dumps({"error": "注入 mismatch，中止提交（未按 Enter）"}, ensure_ascii=False))
-            sys.exit(4)
-        print(json.dumps({"inject": "ok"}, ensure_ascii=False))
-
-        # 5. Enter 提交
-        send("Input.dispatchKeyEvent", {"type": "keyDown", "key": "Enter", "code": "Enter", "windowsVirtualKeyCode": 13, "nativeVirtualKeyCode": 13})
-        recv()
-        send("Input.dispatchKeyEvent", {"type": "keyUp", "key": "Enter", "code": "Enter", "windowsVirtualKeyCode": 13, "nativeVirtualKeyCode": 13})
-        recv()
-
-        print(json.dumps({"ok": True,"submitted":True,"executionVerified":False}, ensure_ascii=False))
-    finally:
-        connection.close()
+        _require_route(connection,target_context,authority,route_repair_approval)
+        if connection.evaluate(FIND_COMPOSER)!='focused': raise ToolError('AGENT','Expected exactly one focused Codex composer')
+        metadata_reader=codex_metadata_reader or ((lambda:codex_metadata) if codex_metadata is not None else (lambda:_load_metadata(target_context)))
+        metadata=metadata_reader()
+        _require_local(connection,target_context,metadata,metadata_reader)
+        current=connection.evaluate(READ_COMPOSER)
+        if not isinstance(current,str): raise ToolError('AGENT','Codex composer contents could not be read')
+        if current.strip():
+            if not force_clear: raise ToolError('DRAFT_PRESENT','Codex composer contains a draft; it was preserved')
+            if connection.evaluate(CLEAR_COMPOSER)!='cleared': raise ToolError('AGENT','Could not safely clear the approved composer')
+        paste_text(connection,{'kind':'codex-composer'},prompt,clipboard=clipboard)
+        if connection.evaluate(READ_COMPOSER)!=prompt:
+            raise ToolError('PASTE_MISMATCH','Codex composer readback differs; prompt was not sent',4,status='verification_failed')
+        # Recheck both session ownership and actual local execution mode directly
+        # before commit to close the UI-switch/TOCTOU window.
+        _require_route(connection,target_context,authority,route_repair_approval)
+        _require_local(connection,target_context,metadata,metadata_reader)
+        if connection.evaluate(READ_COMPOSER)!=prompt:
+            raise ToolError('PASTE_MISMATCH','Codex composer changed before submission',4,status='verification_failed')
+        for event in (
+            {'type':'keyDown','key':'Enter','code':'Enter','windowsVirtualKeyCode':13,'nativeVirtualKeyCode':13},
+            {'type':'keyUp','key':'Enter','code':'Enter','windowsVirtualKeyCode':13,'nativeVirtualKeyCode':13},
+        ):
+            connection.call('Input.dispatchKeyEvent',event)
+        print(json.dumps({'ok':True,'status':'success','submitted':True,'route':'verified',
+                          'executionEnvironment':'local-codex','executionVerified':False},ensure_ascii=False))
+        return 0
+    finally: connection.close()
 
 
-if __name__ == "__main__":
-    sys.exit(entry(main))
+if __name__=='__main__': sys.exit(entry(main))

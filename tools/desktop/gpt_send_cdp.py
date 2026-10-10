@@ -1,124 +1,105 @@
 #!/usr/bin/env python3
-# gpt_send_cdp.py — Windows 侧执行，CDP 向 ChatGPT 输入框注入提示词并提交
-# 流程：已登记对话的输入框 → 精确注入校验 → 提交；不自动新建对话
-import sys
+"""Approved visible ChatGPT send with project/session route verification."""
+import hashlib
 import json
-import time
-import urllib.request
-from desktop_common import Cdp, find_target, guard_write, entry, ToolError, validate_prompt
+import sys
+
+from clipboard_paste import paste_text
+from desktop_common import Cdp, ToolError, entry, find_target, guard_write, validate_prompt
+from desktop_guards import binding_fingerprint, guard_project_route, read_project_route, repair_project_route
 
 
-
-CHECK_EDITOR = """
+CHECK_EDITOR = r"""
 (() => {
-  const eds = [...document.querySelectorAll('#prompt-textarea, div[contenteditable="true"], textarea')];
-  const e = eds.find(x => { const r = x.getBoundingClientRect(); return x.offsetParent !== null && r.width > 0 && r.height > 0; });
-  return e ? 'found' : 'none';
+ const visible=e=>{if(!e)return false;const r=e.getBoundingClientRect();return e.offsetParent!==null&&r.width>0&&r.height>0;};
+ const eds=[...document.querySelectorAll('#prompt-textarea,div[contenteditable="true"],textarea')].filter(visible);
+ return eds.length===1?'found':(eds.length?'ambiguous':'none');
+})()
+"""
+READ_EDITOR = r"""
+(() => {
+ const visible=e=>{if(!e)return false;const r=e.getBoundingClientRect();return e.offsetParent!==null&&r.width>0&&r.height>0;};
+ const eds=[...document.querySelectorAll('#prompt-textarea,div[contenteditable="true"],textarea')].filter(visible);
+ if(eds.length!==1)return JSON.stringify({found:false});
+ const e=eds[0];return e.matches('textarea,input')?e.value:e.textContent;
+})()
+"""
+CLEAR_EDITOR = r"""
+(() => {
+ const visible=e=>{if(!e)return false;const r=e.getBoundingClientRect();return e.offsetParent!==null&&r.width>0&&r.height>0;};
+ const eds=[...document.querySelectorAll('#prompt-textarea,div[contenteditable="true"],textarea')].filter(visible);
+ if(eds.length!==1)return 'ambiguous';const e=eds[0];
+ if(e.matches('textarea,input')){e.value='';e.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'deleteContentBackward'}));}
+ else{e.replaceChildren();e.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'deleteContentBackward'}));}
+ return 'cleared';
+})()
+"""
+SUBMIT_EDITOR = r"""
+(() => {
+ const visible=e=>{if(!e)return false;const r=e.getBoundingClientRect();return e.offsetParent!==null&&r.width>0&&r.height>0;};
+ const buttons=[...document.querySelectorAll('[data-testid="send-button"],button[aria-label*="发送"],button[aria-label*="Send"]')].filter(visible);
+ if(buttons.length===1){buttons[0].click();return 'clicked';}
+ return buttons.length>1?'ambiguous':'no-submit';
 })()
 """
 
 
 def find_target_compat():
-    return find_target("webview")
+    return find_target('webview')
 
 
-def main(authority=None, approval=None, bridge_receipt=None):
+def _require_route(connection,target_context,authority=None,repair_approval=None):
+    evidence=read_project_route(connection)
+    repair=None
+    if target_context.get('projectId') is not None and evidence and evidence.get('listKind')=='recent' and repair_approval is not None:
+        repair=lambda expected,observed:repair_project_route(connection,expected,observed,authority,repair_approval)
+    result=guard_project_route(target_context,evidence,repair=repair,provider='gpt')
+    if result.get('status')!='success':
+        status=result.get('status','blocked')
+        raise ToolError(result.get('code','PROJECT_ROUTE_BLOCKED'),result.get('reason','Conversation route could not be verified'),
+                        6,status=status,details=result)
+    return result
+
+
+def main(authority=None, approval=None, bridge_receipt=None, target_context=None,
+         route_repair_approval=None, clipboard=None):
     if '--help' in sys.argv:
-        print('Use trusted host API with one-time approval; CLI sending is blocked. No model is invoked by help.'); return 0
-    guard_write('gpt_send_cdp.py', authority, approval)
-    if len(sys.argv) < 2:
-        print("用法: gpt_send_cdp.py <提示词> [--force-clear]")
-        sys.exit(2)
-    args = sys.argv[1:]
-    force_clear = "--force-clear" in args
-    prompt = " ".join(a for a in args if a != "--force-clear")
-    # 入口拒空：空串/纯空白直接拒绝
-    if not prompt.strip():
-        print(json.dumps({"error": "空提示词，拒绝执行"}, ensure_ascii=False))
-        sys.exit(2)
+        print('Use the trusted host API with a one-time target-bound approval; CLI sending is blocked.'); return 0
+    if not isinstance(target_context,dict): raise ToolError('PROVENANCE','Trusted bridge session mapping required')
+    if len(sys.argv)<2: raise ToolError('INPUT','Prompt is required',2)
+    args=sys.argv[1:];force_clear='--force-clear' in args
+    prompt=' '.join(arg for arg in args if arg!='--force-clear')
     validate_prompt(prompt)
-    js_prompt = json.dumps(prompt)
-
-    ws_url = find_target_compat()
-    if not ws_url:
-        print(json.dumps({"error": "未找到 ChatGPT target"}, ensure_ascii=False))
-        sys.exit(2)
-
-    connection = Cdp(ws_url)
+    digest=hashlib.sha256(prompt.encode()).hexdigest()
+    if authority is None or bridge_receipt is None: raise ToolError('PROVENANCE','Host-verified prompt receipt required')
+    authority.consume(bridge_receipt,'verified-chatgpt-prompt',digest)
+    guard_write('gpt_send_cdp.py',authority,approval,digest,binding_fingerprint(target_context))
+    connection=Cdp(find_target_compat())
     try:
-        ws = connection
-        pending = [None]
-        def send(method, params): pending[0] = (method, params)
-        def recv(): return connection.call(*pending[0])
-        def evaljs(js): return connection.evaluate(js)
-
-        # Recovery must restore the registered conversation, never open an untracked one.
-        if evaljs(CHECK_EDITOR) != "found":
-            raise ToolError('PROVENANCE','Restore the registered GPT conversation; automatic new-chat fallback is disabled')
-
-        # 2. 检查输入框是否非空（含未发送草稿）；非空且无 force-clear 则拒绝
-        read_editor = """
-        (() => {
-          const eds = [...document.querySelectorAll('#prompt-textarea, div[contenteditable="true"], textarea')];
-          const e = eds.find(x => { const r = x.getBoundingClientRect(); return x.offsetParent !== null && r.width > 0 && r.height > 0; });
-          return e ? e.textContent : '';
-        })()
-        """
-        cur = evaljs(read_editor)
-        if cur.strip():
-            if not force_clear:
-                print(json.dumps({"error": "输入框非空（含未发送草稿），未触碰；如需清空加 --force-clear"}, ensure_ascii=False))
-                sys.exit(3)
-            clear_js = """
-            (() => {
-              const eds = [...document.querySelectorAll('#prompt-textarea, div[contenteditable="true"], textarea')];
-              const e = eds.find(x => { const r = x.getBoundingClientRect(); return x.offsetParent !== null && r.width > 0 && r.height > 0; });
-              if (!e) return 'no-editor';
-              e.textContent = '';
-              e.dispatchEvent(new InputEvent('input', {bubbles: true, data: '', inputType: 'deleteContentBackward'}));
-              return 'cleared';
-            })()
-            """
-            evaljs(clear_js)
-
-        # 3. 注入（不清空，因上一步已确认空或已 force-clear）
-        inject_js = f"""
-        (() => {{
-          const eds = [...document.querySelectorAll('#prompt-textarea, div[contenteditable="true"], textarea')];
-          const editor = eds.find(x => {{ const r = x.getBoundingClientRect(); return x.offsetParent !== null && r.width > 0 && r.height > 0; }});
-          if (!editor) return 'no-editor';
-          editor.focus();
-          const ok = document.execCommand('insertText', false, {js_prompt});
-          editor.dispatchEvent(new InputEvent('input', {{bubbles: true, data: {js_prompt}, inputType: 'insertText'}}));
-          return ok ? 'ok:' + editor.textContent : 'failed';
-        }})()
-        """
-        val = evaljs(inject_js)
-        print(json.dumps({"inject": "checked"}))
-        if val == "no-editor":
-            sys.exit(3)
-        # 严格相等验证：注入后 editor 文本须 == prompt，否则 abort 不发送
-        if not val.startswith("ok:") or val[3:] != prompt:
-            print(json.dumps({"error": "注入 mismatch，中止发送"}, ensure_ascii=False))
-            sys.exit(4)
-
-        # 3. 发送
-        submit_js = """
-        (() => {
-          const btn = document.querySelector('[data-testid="send-button"], button[aria-label*="发送"], button[aria-label*="Send"]');
-          if (btn) { btn.click(); return 'clicked'; }
-          const eds = [...document.querySelectorAll('#prompt-textarea, div[contenteditable="true"], textarea')];
-          const editor = eds.find(x => { const r = x.getBoundingClientRect(); return x.offsetParent !== null && r.width > 0 && r.height > 0; });
-          if (editor) { editor.dispatchEvent(new KeyboardEvent('keydown', {bubbles: true, key: 'Enter', code: 'Enter', keyCode: 13})); return 'enter'; }
-          return 'no-submit';
-        })()
-        """
-        submitted = evaljs(submit_js)
-        if submitted not in ('clicked','enter'): raise ToolError('EXECUTION','No submit control found')
-        print(json.dumps({'submit':submitted,'executionVerified':False}, ensure_ascii=False))
+        # Project route is checked before touching the composer. Recent-list repair
+        # is attempted only when the app exposes an ID-bound action and a separate grant.
+        _require_route(connection,target_context,authority,route_repair_approval)
+        if connection.evaluate(CHECK_EDITOR)!='found':
+            raise ToolError('AGENT','Expected exactly one visible ChatGPT composer')
+        current=connection.evaluate(READ_EDITOR)
+        if not isinstance(current,str): raise ToolError('INPUT','Composer contents could not be read safely')
+        if current.strip():
+            if not force_clear: raise ToolError('DRAFT_PRESENT','Composer contains an existing draft; it was preserved')
+            if connection.evaluate(CLEAR_EDITOR)!='cleared': raise ToolError('INPUT','Could not safely clear the approved composer')
+        paste_text(connection,{'kind':'gpt-composer'},prompt,clipboard=clipboard)
+        value=connection.evaluate(READ_EDITOR)
+        if value!=prompt: raise ToolError('PASTE_MISMATCH','Composer readback differs; prompt was not submitted',4,status='verification_failed')
+        # Recheck route after text entry and immediately before the send action.
+        _require_route(connection,target_context,authority,route_repair_approval)
+        if connection.evaluate(READ_EDITOR)!=prompt:
+            raise ToolError('PASTE_MISMATCH','Composer changed before submission',4,status='verification_failed')
+        submitted=connection.evaluate(SUBMIT_EDITOR)
+        if submitted!='clicked': raise ToolError('EXECUTION','A unique supported submit control was not available')
+        print(json.dumps({'ok':True,'status':'success','submit':submitted,'route':'verified',
+                          'executionVerified':False},ensure_ascii=False))
+        return 0
     finally:
         connection.close()
 
 
-if __name__ == "__main__":
-    sys.exit(entry(main))
+if __name__=='__main__': sys.exit(entry(main))

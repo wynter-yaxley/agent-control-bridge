@@ -15,6 +15,8 @@
     "tools/desktop/codex-send",
     "tools/desktop/codex-status",
     "tools/desktop/codex-continue",
+    "tools/desktop/gpt-rename",
+    "tools/desktop/route-execution-guard",
     "tools/desktop/README.md",
     "tools/desktop/TOOLS.md",
     "tools/desktop/requirements.txt",
