@@ -2,7 +2,7 @@ import { createDb } from '../src/db.ts';
 import { CallerAuthority } from '../src/caller.ts';
 import { TaskStore } from '../src/tasks.ts';
 export function fixture(path = ':memory:') {
-  const db = createDb({ dbPath: path });
+  const db = createDb({ dbPath: path, allowMigrations: true });
   const authority = new CallerAuthority();
   const worker = authority.issue({ principal: 'fixture:pi', instance: 'worker-a', executor: 'pi', reviewer: false });
   const other = authority.issue({ principal: 'fixture:codex', instance: 'worker-b', executor: 'codex', reviewer: false });

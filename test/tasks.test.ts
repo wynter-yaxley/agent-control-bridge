@@ -72,7 +72,11 @@ test('all prohibited state pairs are rejected without persistence', t => {
   const f = fixture(); t.after(() => f.db.close());
   for (const from of TASK_STATUSES) for (const to of TASK_STATUSES) {
     if (ALLOWED_TRANSITIONS[from].includes(to)) continue;
-    const task = f.running(); f.db.prepare('UPDATE tasks SET status=? WHERE id=?').run(from, task.id);
+    let task = f.running();
+    if (from === 'SUCCEEDED') {
+      const finish = f.store.executorFinished(task.id, f.worker, undefined, task.version); assert.ok(finish.ok);
+      const verified = f.store.verify(task.id, f.reviewer, true, undefined, finish.task.version); assert.ok(verified.ok); task = verified.task;
+    } else f.db.prepare('UPDATE tasks SET status=? WHERE id=?').run(from, task.id);
     const before = snapshot(f.db);
     assert.equal(f.store.transition(task.id, to, f.worker, task.version).ok, false, `${from}->${to}`);
     assert.equal(snapshot(f.db), before);

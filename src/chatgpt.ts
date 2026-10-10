@@ -8,7 +8,9 @@
 import { readFileSync, existsSync, writeFileSync, readdirSync, statSync, openSync, closeSync, unlinkSync, fstatSync, lstatSync } from "node:fs";
 import { resolve, extname } from 'node:path';
 import { createHash } from 'node:crypto';
-import { execSync } from "node:child_process";
+import { execFileSync } from 'node:child_process';
+import { WINDOWS_POWERSHELL } from './permissions.ts';
+import { readBounded, safeText } from './security.ts';
 import type { DatabaseSync } from "node:sqlite";
 import { now, transaction } from "./db.ts";
 import { protectPath } from './permissions.ts';
@@ -32,7 +34,7 @@ export function fetchChatgptServiceStatus(): ChatgptServiceStatus {
   const base: ChatgptServiceStatus = { source: "status.openai.com（OpenAI 官方状态页 API）", fetched_at, overall: "unknown", watched: [], degraded: [], incidents: [] };
   let raw: string;
   try {
-    raw = execSync("curl -s --max-time 6 https://status.openai.com/api/v2/summary.json", { timeout: 8000 }).toString();
+    raw = execFileSync('curl', ['--silent', '--fail', '--max-time', '6', 'https://status.openai.com/api/v2/summary.json'], { timeout: 8000, maxBuffer: 1048576 }).toString();
   } catch {
     return { ...base, error: "无法访问官方状态页（网络不可达），状态未知——不虚构" };
   }
@@ -67,51 +69,14 @@ export interface ChatgptAppStatus {
   note: string;
 }
 
-const APPX_PKG = "/mnt/c/Users/[USER]/AppData/Local/Packages/OpenAI.Codex_2p2nqsd0c76g0";
-const APP_PROFILE = `${APPX_PKG}/LocalCache/Roaming/Codex/web/Codex`;
-const APP_LS_LEVELDB = `${APP_PROFILE}/Default/Local Storage/leveldb`;
-
 export function readChatgptAppStatus(): ChatgptAppStatus {
-  const base: ChatgptAppStatus = {
-    source: "OpenAI.Codex MSIX 包内 ChatGPT.exe（Appx LocalCache，真实文件/进程读取）",
-    package_installed: existsSync(APPX_PKG),
-    version: null,
-    running: false,
-    process_count: 0,
-    window_title: null,
-    cache_last_write: null,
-    local_conversation_cache: false,
-    note: "ChatGPT 对话本体在云端；本地缓存仅 device-id/工作元数据，未读取任何登录凭据。",
-  };
-  // 进程 + 窗口标题（无变量管道——WSL→PowerShell 会吃掉 $ 变量，勿用变量）
+  const base: ChatgptAppStatus = { source: 'OS process metadata only', package_installed: false, version: null, running: null, process_count: null, window_title: null, cache_last_write: null, local_conversation_cache: false, note: 'No profiles, credentials or conversation caches are accessed; process existence does not prove task execution' };
+  if (process.platform !== 'win32') return { ...base, note: 'Windows desktop metadata unavailable on this platform' };
   try {
-    const out = execSync(
-      `powershell.exe -NoProfile -Command "Get-Process -Name ChatGPT -ErrorAction SilentlyContinue | Measure-Object | Select-Object -ExpandProperty Count; Get-Process -Name ChatGPT -ErrorAction SilentlyContinue | Where-Object MainWindowTitle -ne '' | Select-Object -First 1 -ExpandProperty MainWindowTitle"`,
-      { timeout: 10000 }
-    ).toString().split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-    base.process_count = out.length ? parseInt(out[0], 10) : 0;
-    base.running = base.process_count > 0;
-    if (out.length > 1) base.window_title = out.slice(1).join(" ");
-  } catch {
-    base.running = null;
-    base.process_count = null;
-    base.note += "（进程查询失败，状态未知——不虚构）";
-  }
-  // 包版本（一次查询；失败不虚构）
-  try {
-    const v = execSync(`powershell.exe -NoProfile -Command "(Get-AppxPackage -Name OpenAI.Codex).Version"`, { timeout: 10000 }).toString().trim();
-    if (v) base.version = v;
-  } catch { /* 保持 null */ }
-  // 缓存活跃度（leveldb 最新 mtime）
-  try {
-    const files = readdirSync(APP_LS_LEVELDB);
-    let newest = 0;
-    for (const f of files) {
-      const st = statSync(`${APP_LS_LEVELDB}/${f}`);
-      if (st.mtimeMs > newest) newest = st.mtimeMs;
-    }
-    if (newest > 0) base.cache_last_write = new Date(newest).toISOString();
-  } catch { /* 保持 null */ }
+    const output = execFileSync(WINDOWS_POWERSHELL, ['-NoProfile','-NonInteractive','-Command', '(Get-Process -Name ChatGPT -ErrorAction SilentlyContinue | Measure-Object).Count'], { timeout: 10000, encoding: 'utf8', stdio: ['ignore','pipe','pipe'] }).trim();
+    if (!/^\d+$/.test(output)) throw new Error();
+    base.process_count = Number(output); base.running = Number(output) > 0;
+  } catch { base.note += '; process query failed, state unknown'; }
   return base;
 }
 
@@ -167,10 +132,10 @@ export function importChatgptExport(db: DatabaseSync, filePath: string, outputPa
   let fileIdentity: ReturnType<typeof fstatSync> | undefined;
   try {
     const info = lstatSync(input);
-    if (!info.isFile() || info.isSymbolicLink() || info.size > 50 * 1024 * 1024) throw new Error('Invalid input');
-    const raw = readFileSync(input, 'utf8');
+    if (!info.isFile() || info.isSymbolicLink() || info.size > 8 * 1024 * 1024) throw new Error('Invalid input');
+    const raw = readBounded(input);
     const data: unknown = JSON.parse(raw);
-    if (!Array.isArray(data) || data.length > 10000) throw new Error('Invalid export');
+    if (!Array.isArray(data) || data.length > 1000) throw new Error('Invalid export');
     const rows: { id: string; external: string; title: string; time: string }[] = [];
     const lines = ['# ChatGPT 会话导出', ''];
     let messages = 0;
@@ -181,7 +146,9 @@ export function importChatgptExport(db: DatabaseSync, filePath: string, outputPa
           (item.conversation_id !== undefined && typeof item.conversation_id !== 'string') ||
           (item.mapping !== undefined && (!item.mapping || typeof item.mapping !== 'object' || Array.isArray(item.mapping)))) throw new Error('Invalid conversation');
       const external = item.conversation_id ?? createHash('sha256').update(raw).update(String(index)).digest('hex');
-      const title = item.title ?? `会话 ${index + 1}`;
+      const title = safeText(item.title ?? `会话 ${index + 1}`);
+      if (title.length > 4096) throw new Error();
+      if (item.create_time !== undefined && (typeof item.create_time !== 'number' || !Number.isFinite(item.create_time))) throw new Error();
       const time = item.create_time === undefined ? now() : new Date(item.create_time * 1000).toISOString();
       rows.push({ id: `chatgpt:${external}`, external, title, time });
       lines.push(`\n## ${title}\n`);
@@ -190,7 +157,8 @@ export function importChatgptExport(db: DatabaseSync, filePath: string, outputPa
       for (const entry of entries) {
         const parts = entry.message?.content?.parts ?? [];
         if (!Array.isArray(parts)) throw new Error('Invalid content');
-        const content = parts.filter(p => typeof p === 'string').join('\n').trim();
+        const content = safeText(parts.filter(p => typeof p === 'string').join('\n').trim());
+        if (content.length > 65536 || messages > 10000) throw new Error();
         if (content) { messages++; lines.push(`**[${entry.message!.author!.role}]**\n${content}\n`); }
       }
     }
@@ -198,9 +166,9 @@ export function importChatgptExport(db: DatabaseSync, filePath: string, outputPa
     fileIdentity = fstatSync(fd);
     protectPath(output);
     transaction(db, () => {
-      for (const row of rows) db.prepare(`INSERT INTO sessions(id,external_id,source,title,state,last_observed_at)
-        VALUES(?,?,'chatgpt',?,'archived',?) ON CONFLICT(id) DO UPDATE SET title=excluded.title,last_observed_at=excluded.last_observed_at WHERE sessions.source='chatgpt'`)
-        .run(row.id, row.external, row.title, row.time);
+      for (const row of rows) db.prepare(`INSERT INTO sessions(id,external_id,source,title,state,last_observed_at,source_created_at)
+        VALUES(?,?,'chatgpt',?,'archived',?,?) ON CONFLICT(source,external_id) WHERE external_id IS NOT NULL DO UPDATE SET title=excluded.title,last_observed_at=excluded.last_observed_at,source_created_at=excluded.source_created_at`)
+        .run(row.id, row.external, row.title, now(), row.time);
       writeFileSync(fd!, lines.join('\n'), 'utf8');
     });
     return { sessions: rows.length, messages, markdownPath: output };

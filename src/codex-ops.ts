@@ -4,8 +4,7 @@
 // fork / resume 涉及写 Codex 会话，属高风险，必须经 Bridge 审批流程后执行。
 import { existsSync } from "node:fs";
 
-const CODEX_EXE =
-  "/mnt/c/Users/[USER]/AppData/Local/OpenAI/Codex/bin/9691020b546a15b2/codex.exe";
+const CODEX_EXE = 'codex'; // Command plans only; real executable comes from unified config.
 
 export interface CodexOp {
   command: string;
@@ -14,8 +13,8 @@ export interface CodexOp {
   description: string;
 }
 
-export function codexAvailable(): boolean {
-  return existsSync(CODEX_EXE);
+export function codexAvailable(executable: string | null = null): boolean {
+  return executable !== null && existsSync(executable);
 }
 
 // fork：从原会话创建可验证分支（任务书第四阶段优先级 B）

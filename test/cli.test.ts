@@ -9,6 +9,14 @@ test('help and invalid command/parameters never open a database', () => {
     else {assert.equal(code,2);assert.equal(out,'');assert.match(err,/INPUT/);}
   }
 });
+test('CLI contract: required title, canonical aliases, per-command help, and structured errors',()=>{
+ for(const args of [['task-create'],['task-create','-t','one','--title','two'],['task-create','--invalid']]) {
+  let out='',err='';assert.equal(runCli(args,{stdout:s=>out+=s,stderr:s=>err+=s}),2);assert.equal(out,'');assert.equal(JSON.parse(err).code,'INPUT');
+ }
+ for(const command of ['init','task-create','task-claim','task-progress','task-verify','task-recover','migrate','schema-version','chatgpt-import']) {
+  assert.equal(runCli([command,'--help'],{stdout:()=>{},stderr:()=>assert.fail('help error')}),0);
+ }
+});
 for(const flags of [[],['--pass','--fail'],['--pass','--pass'],['--pass','--unknown']]) test(`review decision flags ${JSON.stringify(flags)} reject before mutation`, t => {
   const f=fixture();t.after(()=>f.db.close());const task=f.awaiting(),before=snapshot(f.db);let out='',err='';
   assert.equal(runCli(['task-verify',task.id,'--version',String(task.version),...flags],{db:f.db,authority:f.authority,context:f.reviewer,stdout:s=>out+=s,stderr:s=>err+=s}),2);

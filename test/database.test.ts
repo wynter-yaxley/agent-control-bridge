@@ -17,7 +17,7 @@ test('v0 migration preserves original task data, adds fencing, and legacy owners
   const f=fixture(path); let closed=false; t.after(()=>{if(!closed)f.db.close();}); const after=f.db.prepare('SELECT * FROM tasks').get()!;
   for (const [key,value] of Object.entries(before)) assert.equal(after[key],value,key);
   assert.equal(after.version,0); assert.equal(after.attempt,0); assert.equal(after.attempt_executor,null);
-  assert.equal(f.db.prepare('PRAGMA user_version').get()!.user_version,1);
+  assert.equal(f.db.prepare('PRAGMA user_version').get()!.user_version,2);
   assert.equal(f.store.executorFinished('legacy',f.worker,undefined,0).ok,false);
   assert.equal(f.store.cancel('legacy',f.worker,undefined,0).ok,false);
   f.db.close(); closed=true; const reopened=createDb({dbPath:path}); assert.equal(reopened.prepare('SELECT COUNT(*) n FROM tasks').get()!.n,1); reopened.close();
@@ -29,9 +29,9 @@ test('schema initialization failure rolls back DDL and closes the connection', t
   const db=new DatabaseSync(path); assert.equal(db.prepare("SELECT COUNT(*) n FROM sqlite_master WHERE name='synthetic'").get()!.n,0); db.close();
 });
 test('newer schema is rejected without changing it', t => {
-  const root=temporary(t), path=join(root,'future.db'), original=new DatabaseSync(path); original.exec('PRAGMA user_version=2'); original.close();
+  const root=temporary(t), path=join(root,'future.db'), original=new DatabaseSync(path); original.exec('PRAGMA user_version=999'); original.close();
   assert.throws(()=>createDb({dbPath:path}),/newer/);
-  const db=new DatabaseSync(path); assert.equal(db.prepare('PRAGMA user_version').get()!.user_version,2); db.close();
+  const db=new DatabaseSync(path); assert.equal(db.prepare('PRAGMA user_version').get()!.user_version,999); db.close();
 });
 test('nested transactions roll back their caller when a later operation fails', t => {
   const db=createDb({dbPath:':memory:'}); t.after(()=>db.close());

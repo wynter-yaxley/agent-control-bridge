@@ -2,13 +2,47 @@
   "name": "agent-control-bridge",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
+  "bin": {
+    "agent-control-bridge": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "tools/desktop/*.py",
+    "tools/desktop/tests/*.py",
+    "tools/desktop/gpt-read",
+    "tools/desktop/gpt-send",
+    "tools/desktop/codex-send",
+    "tools/desktop/codex-status",
+    "tools/desktop/codex-continue",
+    "tools/desktop/README.md",
+    "tools/desktop/TOOLS.md",
+    "tools/desktop/requirements.txt",
+    "config.example.json",
+    "config/caller-policy.example.json",
+    "assets",
+    "README.md",
+    "README_EN.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md"
+  ],
   "type": "module",
-  "description": "Hermes × Codex × ChatGPT × Pi 统一控制桥",
+  "description": "Hermes Ã— Codex Ã— ChatGPT Ã— Pi ç»Ÿä¸€æŽ§åˆ¶æ¡¥",
   "scripts": {
-    "start": "node --experimental-strip-types --experimental-sqlite src/index.ts",
-    "cli": "node --experimental-strip-types --experimental-sqlite src/cli.ts",
+    "start": "node dist/cli.js",
+    "cli": "node src/cli.ts",
     "test": "node scripts/test.mjs",
-    "test:e2e": "node --experimental-strip-types src/e2e.ts"
+    "test:e2e": "node --test test/e2e.test.ts test/workflow.test.ts",
+    "test:desktop": "python -B -m unittest discover -s tools/desktop/tests -v",
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc -p tsconfig.test.json",
+    "check": "node scripts/check.mjs",
+    "demo": "node src/cli.ts demo",
+    "test:install": "node scripts/clean-install.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.0",
+    "typescript": "5.9.3"
   },
   "engines": {
     "node": ">=24.19.0"

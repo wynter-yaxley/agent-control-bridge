@@ -2,6 +2,11 @@ import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
 import { EXECUTORS, TASK_STATUSES, isAllowedTransition, type Task, type TaskStatus, type Executor } from './types.ts';
 import { now, uuid, transaction } from './db.ts';
 import { CallerAuthority, type CallerContext, type CallerIdentity } from './caller.ts';
+import { installReviewBoundary, withinAuthorizedReview } from './review-boundary.ts';
+import { safeText, requireNoSecrets } from './security.ts';
+import { taskChanges } from './task-events.ts';
+import { isDemoDatabase } from './demo-scope.ts';
+import { createHash } from 'node:crypto';
 
 export type TaskResult = { ok: true; task: Task } | { ok: false; code: string; error: string };
 class Rejected extends Error {
@@ -11,7 +16,9 @@ class Rejected extends Error {
 function reject(code: string, message: string): never { throw new Rejected(code, message); }
 function text(value: unknown, field: string): asserts value is string {
   if (typeof value !== 'string' || !value.trim() || value.length > 4096) reject('INPUT', `Invalid ${field}`);
+  requireNoSecrets(value);
 }
+function optionalText(value: unknown): void { if (value === undefined) return; if (typeof value !== 'string' || value.length > 65536) reject('INPUT', 'Invalid optional text'); }
 function lease(seconds: number): string {
   if (!Number.isInteger(seconds) || seconds < 1 || seconds > 86400) reject('INPUT', 'Lease must be 1..86400 seconds');
   return new Date(Date.now() + seconds * 1000).toISOString();
@@ -20,7 +27,7 @@ function lease(seconds: number): string {
 export class TaskStore {
   #db: DatabaseSync;
   #authority: CallerAuthority;
-  constructor(db: DatabaseSync, authority: CallerAuthority) { this.#db = db; this.#authority = authority; }
+  constructor(db: DatabaseSync, authority: CallerAuthority) { this.#db = db; this.#authority = authority; installReviewBoundary(db); }
   #caller(context: unknown): Readonly<CallerIdentity> {
     return this.#authority.resolve(context) ?? reject('AUTH', 'Authorized caller context required');
   }
@@ -38,8 +45,10 @@ export class TaskStore {
     if (requireLiveLease && (!task.claim_expires_at || task.claim_expires_at <= now())) reject('LEASE', 'Attempt lease expired');
   }
   #event(id: string, type: string, payload: unknown, caller: Readonly<CallerIdentity>): void {
+    const serialized = payload === undefined ? null : safeText(JSON.stringify(payload));
+    if (serialized !== null && serialized.length > 65536) reject('INPUT', 'Event payload exceeds limit');
     this.#db.prepare('INSERT INTO events(task_id,type,payload,source,observed_at) VALUES(?,?,?,?,?)')
-      .run(id, type, payload === undefined ? null : JSON.stringify(payload), caller.principal, now());
+      .run(id, type, serialized, caller.principal, now());
   }
   #audit(caller: Readonly<CallerIdentity>, action: string, detail: string): void {
     this.#db.prepare('INSERT INTO audit_log(at,actor,action,detail) VALUES(?,?,?,?)').run(now(), caller.principal, action, detail);
@@ -57,7 +66,7 @@ export class TaskStore {
     if (result.changes !== 1) reject('CONFLICT', 'Concurrent task update rejected');
   }
   #mutate(action: () => Task): TaskResult {
-    try { return { ok: true, task: transaction(this.#db, action) }; }
+    try { const task = transaction(this.#db, action); taskChanges.emit('changed', task.id); return { ok: true, task }; }
     catch (error) {
       if (error instanceof Rejected) return { ok: false, code: error.code, error: error.message };
       // Preserve original exception for the trusted host; CLI prints no raw DB payloads.
@@ -80,19 +89,26 @@ export class TaskStore {
     });
   }
   getTask(id: string): Task | null { return this.#db.prepare('SELECT * FROM tasks WHERE id=?').get(id) as unknown as Task ?? null; }
-  listTasks(filter: { status?: TaskStatus; projectId?: string; executor?: Executor } = {}): Task[] {
+  listTasks(filter: { status?: TaskStatus; projectId?: string; executor?: Executor; limit?: number; offset?: number } = {}): Task[] {
     if (filter.status && !TASK_STATUSES.includes(filter.status)) reject('INPUT', 'Invalid status');
     if (filter.executor && !EXECUTORS.includes(filter.executor)) reject('INPUT', 'Invalid executor');
     const clauses: string[] = [], values: SQLInputValue[] = [];
     for (const [key, value] of [['status',filter.status], ['project_id',filter.projectId], ['executor',filter.executor]] as const) {
       if (value) { clauses.push(`${key}=?`); values.push(value); }
     }
-    return this.#db.prepare(`SELECT * FROM tasks ${clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''} ORDER BY priority DESC,created_at ASC`).all(...values) as unknown as Task[];
+    const limit = filter.limit ?? 100, offset = filter.offset ?? 0;
+    if (!Number.isInteger(limit) || limit < 1 || limit > 200 || !Number.isInteger(offset) || offset < 0) reject('INPUT', 'Invalid pagination');
+    return this.#db.prepare(`SELECT * FROM tasks ${clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''} ORDER BY priority DESC,created_at ASC,id ASC LIMIT ? OFFSET ?`).all(...values, limit, offset) as unknown as Task[];
   }
   claim(id: string, context: CallerContext, leaseSeconds = 600, expectedVersion?: number): TaskResult {
     return this.#mutate(() => {
       const caller = this.#caller(context), task = this.#task(id, expectedVersion);
       if (!caller.executor || (task.executor !== null && task.executor !== caller.executor)) reject('OWNER', 'Executor is not assigned to this task');
+      if (caller.executor === 'codex') {
+        const prompt = this.#db.prepare("SELECT source,content,prompt_hash FROM prompts WHERE task_id=? AND verified=1 AND delivery_status='DELIVERED' ORDER BY generated_at DESC LIMIT 1").get(id);
+        if (!prompt || (prompt.source !== 'chatgpt' && !isDemoDatabase(this.#db))) reject('PROVENANCE', 'A trusted ChatGPT prompt delivered through the bridge is required');
+        if (createHash('sha256').update(String(prompt.content)).digest('hex') !== prompt.prompt_hash) reject('PROVENANCE', 'Prompt provenance hash no longer matches');
+      }
       if (task.status !== 'QUEUED' || task.claimed_by !== null || task.claimed_instance !== null) reject('STATE', 'Task is not unclaimed QUEUED');
       this.#cas(task, 'RUNNING', { claimed_by: caller.principal, claimed_instance: caller.instance,
         attempt_executor: caller.principal, attempt_instance: caller.instance, attempt: task.attempt + 1,
@@ -103,6 +119,7 @@ export class TaskStore {
     });
   }
   executorFinished(id: string, context: CallerContext, note?: string, expectedVersion?: number): TaskResult {
+    optionalText(note);
     return this.#mutate(() => {
       const caller = this.#caller(context), task = this.#task(id, expectedVersion);
       this.#holder(task, caller);
@@ -114,21 +131,24 @@ export class TaskStore {
     });
   }
   verify(id: string, context: CallerContext, pass: boolean, reason?: string, expectedVersion?: number): TaskResult {
+    optionalText(reason);
     return this.#mutate(() => {
       const caller = this.#caller(context), task = this.#task(id, expectedVersion);
       if (!caller.reviewer) reject('AUTH', 'Independent reviewer capability required');
       if (!task.attempt_executor || caller.principal === task.attempt_executor) reject('AUTH', 'Executor principal cannot review its own attempt');
       if (typeof pass !== 'boolean') reject('INPUT', 'Explicit boolean review decision required');
       if (task.status !== 'WAITING_APPROVAL') reject('STATE', 'Task is not awaiting review');
-      this.#cas(task, pass ? 'SUCCEEDED' : 'FAILED', { claim_expires_at: null });
+      withinAuthorizedReview(this.#db, () => this.#cas(task, pass ? 'SUCCEEDED' : 'FAILED', { claim_expires_at: null }));
       this.#event(id, pass ? 'verified_pass' : 'verified_fail', { reason: reason ?? null, attempt: task.attempt }, caller);
       this.#audit(caller, pass ? 'task_verify_pass' : 'task_verify_fail', `task=${id}`);
       return this.getTask(id)!;
     });
   }
   cancel(id: string, context: CallerContext, reason?: string, expectedVersion?: number): TaskResult {
+    optionalText(reason);
     return this.#mutate(() => {
       const caller = this.#caller(context), task = this.#task(id, expectedVersion);
+      if (this.#db.prepare("SELECT 1 FROM prompts WHERE task_id=? AND delivery_status='DELIVERING'").get(id)) reject('STATE', 'Resolve uncertain prompt delivery before cancelling');
       if (task.claimed_by !== null) this.#holder(task, caller, false);
       else if (task.created_by !== caller.principal || task.created_instance !== caller.instance) reject('OWNER', 'Only the creating instance may cancel an unclaimed task');
       this.#cas(task, 'CANCELLED', { claim_expires_at: null });
@@ -153,7 +173,7 @@ export class TaskStore {
       if (['SUCCEEDED','WAITING_APPROVAL','CANCELLED','RUNNING'].includes(to)) reject('STATE', 'Use claim/finish/verify/cancel/resume; direct transition forbidden');
       if (to === 'QUEUED') {
         if (!caller.reviewer) reject('AUTH', 'Only an authorized reviewer may requeue');
-        this.#cas(task, to, { claimed_by: null, claimed_instance: null, claim_expires_at: null, started_at: null });
+        this.#cas(task, to, { claimed_by: null, claimed_instance: null, claim_expires_at: null, started_at: null, error: null, attempt_executor: null, attempt_instance: null });
       } else {
         this.#holder(task, caller);
         if (!['RUNNING','BLOCKED'].includes(task.status)) reject('STATE', 'Use independent verification for review decisions');
@@ -185,6 +205,7 @@ export class TaskStore {
     });
   }
   decideApproval(id: string, decision: 'approved' | 'rejected', context: CallerContext, reason?: string): void {
+    optionalText(reason);
     const caller = this.#caller(context);
     if (!caller.reviewer) reject('AUTH', 'Reviewer capability required');
     if (!['approved','rejected'].includes(decision)) reject('INPUT', 'Invalid approval decision');
@@ -193,7 +214,7 @@ export class TaskStore {
       if (!approval) reject('NOT_FOUND', 'Approval not found');
       if (approval.requested_by === caller.principal) reject('AUTH', 'Requester cannot approve its own action');
       const result = this.#db.prepare("UPDATE approvals SET decision=?,decided_by=?,decided_at=?,reason=? WHERE id=? AND decision='pending'")
-        .run(decision, caller.principal, now(), reason ?? null, id);
+        .run(decision, caller.principal, now(), reason === undefined ? null : safeText(reason), id);
       if (result.changes !== 1) reject('CONFLICT', 'Approval is already decided');
       this.#event(String(approval.task_id), 'approval_decision', { approval: id, decision }, caller);
       this.#audit(caller, 'approval_decision', `approval=${id} decision=${decision}`);
@@ -203,6 +224,18 @@ export class TaskStore {
     return transaction(this.#db, () => { const task = this.createTask(input, context); return { task, approvalId: this.requestApproval(task.id, action, context) }; });
   }
   recordAudit(context: CallerContext, action: string, detail: string): void { this.#audit(this.#caller(context), action, detail); }
+  progress(id: string, context: CallerContext, note: string, expectedVersion: number): TaskResult {
+    return this.#mutate(() => { const caller = this.#caller(context), task = this.#task(id, expectedVersion); this.#holder(task, caller);
+      text(note, 'progress'); if (task.status !== 'RUNNING') reject('STATE', 'Progress requires RUNNING');
+      this.#update(task, { updated_at: now() }); this.#event(id, 'progress', { note: safeText(note) }, caller); this.#audit(caller, 'task_progress', `task=${id}`); return this.getTask(id)!; });
+  }
+  recover(id: string, context: CallerContext, reason: string, expectedVersion: number): TaskResult {
+    return this.#mutate(() => { const caller = this.#caller(context), task = this.#task(id, expectedVersion); text(reason, 'recovery reason');
+      if (!caller.reviewer || caller.principal === task.attempt_executor) reject('AUTH', 'Independent reviewer must authorize recovery');
+      if (!['RUNNING','BLOCKED'].includes(task.status) || (task.claim_expires_at && task.claim_expires_at > now())) reject('STATE', 'Only expired or legacy active attempts can be recovered');
+      this.#cas(task, 'FAILED', { claim_expires_at: null, error: 'Explicit recovery after disconnection' });
+      this.#event(id, 'recovered', { reason: safeText(reason), attempt: task.attempt }, caller); this.#audit(caller, 'task_recover', `task=${id}`); return this.getTask(id)!; });
+  }
   sweepExpiredLeases(context: CallerContext): { taskId: string; claimedBy: string }[] {
     const caller = this.#caller(context);
     return transaction(this.#db, () => {

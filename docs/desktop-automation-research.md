@@ -1,3 +1,5 @@
+> 历史研究记录：不作为当前能力或授权依据。旧直接发送/启动示例未经过当前来源与前台权限门禁；以 README、tools/desktop/README.md 和工作恢复规范为准。
+
 # 桌面应用自动化生态调研（GPT/Codex × 飞书 × Hermes）
 
 > 调研日期 2026-10-09 · 需求：Hermes 实时看 ChatGPT(UWP) 对话 + Codex 项目进度，飞书遥控 GPT/Codex，GPT 提示词 relay 给 Codex

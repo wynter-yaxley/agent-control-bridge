@@ -1,116 +1,147 @@
 # Agent Control Bridge
 
-[中文](README.md) · [Code audit](docs/audit/CODE_AUDIT_REPORT.md) · [Repairs and acceptance record](docs/audit/REPAIR_STATUS.md)
+[简体中文](README.md)
 
-A local TypeScript / Node.js / SQLite control bridge. Its goal is to let **Hermes**, an Agent deployed on Feishu, observe the workflows of **Codex** and **ChatGPT (the Windows desktop UWP application)** in real time, coordinate their development work, and report progress to users. This version supplies a task ledger, secure state transitions, local status snapshots, and manual deliverable import. Complete real-time collaboration remains a goal.
+Agent Control Bridge is a local task-control and state-management bridge connecting Hermes, ChatGPT and Codex. It provides a task ledger, progress observation and independent review interfaces for Hermes on Feishu: ChatGPT generates engineering prompts, the bridge verifies and relays them, and Codex performs development.
 
-## Background and roles
+Each Agent retains its role: Hermes coordinates and reports to users; ChatGPT communicates and generates prompts; Codex develops; Bridge controls provenance, permissions and state; SQLite preserves traceable records. The project serves collaboration among existing desktop Agents and does not provide model inference.
 
-Working across windows, conversations, and Agents makes it easy to lose progress, the next prompt, and responsibility for acceptance. The bridge must distinguish observed state, executor-reported completion, and independent acceptance.
+## Core capabilities
 
-| Participant | Intended responsibility | Current boundary |
-|---|---|---|
-| ChatGPT | Review project progress and generate/output prompts, relayed through the bridge to Codex for further development | Official JSON exports and manual Markdown handoffs are supported; automatic cloud conversation reading and prompt delivery are absent |
-| Codex | Develop from prompts and produce reviewable deliverables | Local project/conversation metadata can be read; background execution is invisible |
-| Hermes | Act as the hub/bridge, observe both sides, relay prompts in both directions, report progress to Feishu users in real time, and independently review | Status readers and task APIs exist; Feishu messaging, continuous subscriptions, and automatic bidirectional relay are absent |
-| User | Define authorization, inspect deliverables, and approve subsequent GitHub synchronization | Model text and `--by` labels cannot grant authorization |
+- **Task lifecycle**: atomic claims, version conflicts, leases, progress, delivery, cancellation and explicit recovery.
+- **Independent review**: executors submit work pending review; an authorized independent reviewer is the only entry to `SUCCEEDED`.
+- **Prompt relay interfaces**: verify trusted provenance, conversations, model capabilities and content hashes; record delivery and retain uncertain outcomes for investigation.
+- **SQLite ledger**: tasks, events, approvals, provenance, reviews and durable notifications; controlled Schema upgrades.
+- **Watcher**: event-triggered checks with periodic fallback, notification deduplication, restart recovery and overdue-blocking records.
+- **Desktop tools**: restricted CDP reads and authorized sending interfaces, writes disabled by default; no physical mouse or keyboard takeover.
+- **Credential-free Demo**: isolated Mocks demonstrate ChatGPT → Bridge → Codex → Watcher → independent review.
+
+**Current limits**: the desktop generation adapter cannot yet independently prove GPT-6/High, so production automatic prompt delivery is refused by default. Feishu sending needs a Hermes message adapter. Codex history is a snapshot and does not fully reveal background execution; ledger cancellation does not prove the actual Agent stopped. See [deployment](docs/DEPLOYMENT.md).
 
 ## Architecture
 
-```text
-Feishu user <---goal: progress/instructions---> Hermes (hub, independent reviewer)
-                                                   |
-                                      Trusted host / local caller policy
-                                                   |
-ChatGPT Windows UWP --manual export--> CLI / Agent Control Bridge <--local metadata-- Codex
-           ^                                       |                                 ^
-           +----goal: bidirectional prompt relay (not implemented)--------------------+
-                                                   |
-                                 CallerContext → TaskStore → SQLite
-                                  identity/instance CAS/transactions tasks/events/approvals/audit
-```
-
-`caller.ts` issues nonserializable contexts bound to trusted identities; CLI loads them from the OS principal and fixed deployment policy. `tasks.ts` enforces business rules, leases, and transitions. `db.ts` manages short transactions, versioned migration, WAL, foreign keys, and permissions; `permissions.ts/.ps1` restrict NTFS ACLs. Other readers supply snapshots and cannot turn Agent output into commands or authorization.
-
-SQLite is the local persistent ledger, not a model launcher or real Agent scheduler. Task writes, events, and audit records commit together. It remains a single-machine, single-file dependency without distributed consistency.
-
-## State machine and mandatory rule
-
-**Executors cannot declare themselves `SUCCEEDED`; independent verification is the only entrance.** Reviewers need a trusted reviewer capability and an OS principal different from the current attempt executor. Hermes cannot approve its own execution either.
+![Agent Control Bridge architecture and data flows](assets/architecture.svg)
 
 ```text
-QUEUED --atomic claim--> RUNNING --finish--> WAITING_APPROVAL
-                           |                   | verify(independent identity)
-                           |                   +----pass----> SUCCEEDED
-                           |                   +----fail----> FAILED
-                           +----block----> BLOCKED --resume--> RUNNING
-                           +----fail-----------------------> FAILED
-FAILED / UNKNOWN --authorized reviewer requeue--> QUEUED
-WAITING_APPROVAL --same holder resume--> RUNNING
-QUEUED / RUNNING / BLOCKED / WAITING_APPROVAL / FAILED --authorized cancel--> CANCELLED
+User requirement → Hermes → ChatGPT prompt → Bridge verification/relay → Codex execution
+                                 Bridge ← state and delivery ← Codex
+                                    ↕ SQLite              ↓ Watcher
+User ← Hermes report ← independent review entry → Bridge final state
 ```
 
-Claim writes state, holder, instance, attempt, and lease in one operation. Mutations require the current `version`; SQL conditions match state, version, owner, instance, and attempt, and exactly one row must change. Stale versions, duplicate callbacks, and finish/cancel/renew from another instance are rejected. Failed claims leave no partial ownership.
+Each project registers **one Codex workspace + N Codex conversations in that workspace + one GPT conversation**. The GPT conversation name must match the workspace project name; development, tests and delivery occur in registered Codex conversations. New projects use isolated sets, and production adapters must independently check actual conversations.
 
-Expired leases produce alerts rather than inferred success. Finish, renew, and resume require a live lease; holders may cancel their own expired tasks. Verification does not require the executor to remain online. Automatic takeover, execution interruption, and enforced timeout termination are absent. `SUCCEEDED` and `CANCELLED` have no outgoing transitions.
+## Quickstart
 
-## Runtime and CLI
+### Requirements
 
-Requires **Node.js >= 24.19.0**; this repair was validated on Windows with Node 24.19.0. Uses built-in SQLite, TypeScript stripping, and testing; there are no third-party runtime dependencies and no dependency installation is needed. Type stripping is not TypeScript type checking.
+The core CLI requires **Node.js >=24.19.0, npm and Git**. It uses Node's built-in SQLite, without third-party runtime dependencies or native SQLite extensions. Core targets Windows/Linux. Desktop integration targets Windows and needs Python >=3.10, optional `websocket-client`, installed and signed-in Agent applications, and controlled CDP. Demo needs none of these desktop prerequisites.
 
-```powershell
-Set-Location 'D:\Agent control bridge'
-node --experimental-strip-types src/cli.ts help
-# init only initializes/migrates the schema; no Agents or demo tasks
-node --experimental-strip-types src/cli.ts init
-node --experimental-strip-types src/cli.ts task-create -t 'Implement prompt handoff' -k dev -e pi
-node --experimental-strip-types src/cli.ts task-list --status QUEUED
-# Replace <taskId> and versions with actual query results
-node --experimental-strip-types src/cli.ts task-claim <taskId> --version 0 -e pi
-node --experimental-strip-types src/cli.ts task-renew <taskId> --version 1 --lease 600
-node --experimental-strip-types src/cli.ts task-finish <taskId> --version 2 -e pi
-node --experimental-strip-types src/cli.ts task-show <taskId>
-# Only a configured independent reviewer may invoke this; ordinary pi CLI refuses
-node --experimental-strip-types src/cli.ts task-verify <taskId> --version 3 --pass
-node --experimental-strip-types src/cli.ts chatgpt-import 'D:\exports\conversations.JSON'
-node --experimental-strip-types src/cli.ts markdown-import 'D:\handoff\prompt.md' --task <taskId>
-```
-
-`<taskId>` is a placeholder and must be replaced before running; do not pass literal angle-bracket placeholders to PowerShell. Exactly one of `--pass` / `--fail` is required. Executor, status, lease, and version inputs are validated. `-e` assigns the task/asserts identity consistency; it cannot change the caller. `--by` only asserts identity and grants no authority; omitting it is recommended. Errors use stderr with exit codes: 1=I/O, 2=input, 3=authorization/owner, 4=state/version conflict.
-
-Queries and help do not migrate or write the database. `status` / `chatgpt-status` access the public service status page; core task commands do not call models. Import accepts case-insensitive `.json`, creates a new `.conversations.md`, and refuses identical paths, aliases, or any existing output; there is no overwrite option. Markdown is data; prompts and shell text inside it are not executed. `codex-fork-request` records a task and approval only, never executing fork. Approval decisions also execute no real control operations.
-
-## Security and deployment authorization
-
-The default CLI principal comes from the Windows SID (UID elsewhere), instance is `local-cli`, executor is `pi`, and it has **no reviewer capability**. CLI/environment input cannot supply roles, SID, instance, or reviewer authority. A trusted host may hold its own `CallerAuthority` and inject a context; plain strings, JSON objects, and contexts from another authority are invalid.
-
-The directory owner manages fixed `config/caller-policy.json`; see the [example](config/caller-policy.example.json). The example is inactive; replace placeholders with real SIDs and use different OS principals for executor and reviewer. This is authorization configuration without Tokens/passwords. Principals absent from an enabled policy are rejected. The owner must also grant those explicitly authorized SIDs access through the project directory ACL. Do not grant ordinary executors reviewer authority.
-
-Windows ACLs retain only the current principal, existing owner, SYSTEM, Administrators, and explicitly authorized SIDs; broad identities such as Everyone, Authenticated Users, and Users are refused. Database directory permissions are restricted before DB/WAL/SHM creation; the database file is explicitly restricted too. Permission failures refuse access. Unix uses 0700 directories and 0600 files. No elevation or system execution-policy changes are used. Identity/ACL helpers use fixed `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`, which PATH cannot replace; nonstandard Windows system directories are currently unsupported and fail closed.
-
-The bridge does not proactively read, store, or use API Keys, Cookies, Tokens, passwords, browser authentication databases, or Agent credentials, and does not invoke paid model APIs. It queries metadata and user-supplied deliverables only. Manually exported conversations may themselves contain secrets and must be redacted before import; complete content redaction and database encryption are not guaranteed. Audit data and import files should remain private.
-
-**Boundary: arbitrary code and direct database write access within one Windows account share a trust domain.** `CallerContext` is not an OS sandbox. Processes with owner/admin privileges can alter policy, code, and SQLite; CLI validation cannot isolate them. Strong isolation requires separate OS accounts, a controlled host, and explicit ACLs. An independently authenticated IPC service is absent. Instance separation comes from the trusted host/policy; a shared `local-cli` is not multiple independent Agent instances.
-
-## Honest limitations
-
-- Codex project/thread metadata is not real-time execution progress; background tools and full conversations are invisible.
-- ChatGPT processes, windows, versions, and cache modification times do not prove that a task is running; authentication cache contents are not read.
-- Existing observers still contain fixed Windows/WSL paths. General path configuration and freshness handling need further work; failed queries or old snapshots are not evidence of current connectivity.
-- Feishu messaging adapters, automatic prompt delivery, continuous monitoring, real Agent start/stop, reliable timeout termination, and distributed scheduling are absent.
-- The import database transaction and output file cannot form a fully atomic commit across a process crash. Ordinary failures roll back DB writes and clean up the newly created file; existing files are never overwritten.
-- The next write entry point upgrades old schema to v1 without changing old business fields. Legacy active tasks lack trusted holder/attempt context, so finish/cancel/verify refuse them. An independent person must review and arrange recovery; historical identities are not automatically claimed.
-
-## Tests, audit, and delivery status
-
-```powershell
+```sh
+git clone https://github.com/wynter-yaxley/agent-control-bridge.git
+cd agent-control-bridge
+npm install
+npm run build
 npm test
-npm run test:e2e
-# Without npm, run the identical scripts directly; no packages required
-node scripts/test.mjs
-node --experimental-strip-types src/e2e.ts
+node dist/cli.js help
+node dist/cli.js demo
 ```
 
-Uses `node:test`, discovers `test/*.test.ts`, and fails when the test count is zero. Core tests use in-memory databases; concurrency, migration, permissions, and CLI e2e use isolated temporary directories and synthetic data, never original `data/bridge.db` or real Agents. Successful states inside e2e belong exclusively to synthetic tasks.
+`demo` creates and removes a unique temporary database. It demonstrates test prompt generation, relay, Codex claim, progress, Watcher, delivery, executor self-review denial, independent Mock review and final query. `mock-chatgpt` provenance and `mock:gpt-6` model names explicitly identify test data. It invokes no paid model and reads no business database. Ordinary configuration or environment variables cannot enable production Mock authority.
 
-See [REPAIR_STATUS](docs/audit/REPAIR_STATUS.md) for actual local results, finding IDs, changed files, and acceptance checks. The [original audit](docs/audit/CODE_AUDIT_REPORT.md) preserves historical findings and does not imply every finding is closed. Delivery is **awaiting Hermes acceptance**. No Git initialization, commit, or push before acceptance; synchronization requires Hermes acceptance and a separate GitHub synchronization instruction. No open-source license has been selected; clarify it before publication.
+### Initialize a local ledger
+
+PowerShell:
+
+```powershell
+Copy-Item config.example.json .bridge.config.json
+node dist/cli.js init --config .bridge.config.json
+node dist/cli.js config-show --config .bridge.config.json
+node dist/cli.js schema-version
+```
+
+Other shells can use `cp config.example.json .bridge.config.json`. External Agents and desktop operations are disabled by default; use a dedicated restricted data directory. See [deployment](docs/DEPLOYMENT.md) for a real environment.
+
+## Configuration
+
+Priority: **explicit CLI options > matching environment variables > local configuration > built-in defaults**. `--config` or `ACB_CONFIG` selects the file; `--db` overrides the database path. Relative data paths in a configuration file resolve from its directory. Environment and CLI database paths resolve from the working directory. Unknown fields, invalid types and unsafe endpoints are rejected.
+
+| Setting | Default and purpose | Environment override |
+|---|---|---|
+| `database.path` | `./data/bridge.db`, dedicated ledger directory | `ACB_DB_PATH` |
+| `database.busyTimeoutMs` | `5000`, bounded SQLite lock wait | — |
+| `watcher.intervalMs` | `60000`, cross-process polling fallback | `ACB_WATCH_INTERVAL_MS` |
+| `watcher.timeoutMs` | `10000`, cooperative inspection budget | — |
+| `failureReporting.blockedAfterMs` | `600000`, persistent-blocking reporting threshold | `ACB_BLOCKED_REPORT_MS` |
+| `agents.chatgpt.model` | `gpt-6`, requested model, not verified actual execution | `ACB_CHATGPT_MODEL` |
+| `agents.chatgpt.reasoningEffort` | `high`, requested reasoning effort | `ACB_CHATGPT_REASONING` |
+| `desktop.cdpUrl` | Local loopback endpoint; concrete example in configuration | `ACB_CDP_URL` |
+| `desktop.enabled` / `allowForegroundAutomation` | `false`; configuration still grants no one-time approval | — |
+| `desktop.allowPhysicalInput` | `false`; physical input is unsupported | — |
+
+Local events can trigger immediate Watcher checks; cross-process changes rely on periodic fallback. With timely inspections and a responsive event loop, the target is one period plus inspection and scheduling delays, **not an unconditional worst-case 60-second SLA**. Blocking notifications are local ledger events; Hermes must consume them and actually report to the user. See [config.example.json](config.example.json) for all fields.
+
+## Usage
+
+### Manual ledger walkthrough
+
+These operations record state and do not automatically execute code. The default CLI caller is `pi` without reviewer rights, so this walkthrough uses `pi`. A production Codex claim additionally requires a verified and delivered ChatGPT prompt.
+
+```sh
+node dist/cli.js task-create -t "Local ledger walkthrough" -k demo -e pi
+node dist/cli.js task-list --status QUEUED
+node dist/cli.js task-claim TASK_ID --version 0 -e pi
+node dist/cli.js task-progress TASK_ID --version 1 --note "Manually simulated development"
+node dist/cli.js task-renew TASK_ID --version 2 --lease 600
+node dist/cli.js task-finish TASK_ID --version 3 --note "Delivery pending independent review"
+node dist/cli.js task-show TASK_ID
+node dist/cli.js watch
+```
+
+Replace `TASK_ID` with the returned UUID and use the latest queried version for each operation. `watch` is a separate observation process; stopping its terminal does not stop an external Agent. Only a deployed independent reviewer OS identity may run:
+
+```sh
+node dist/cli.js task-verify TASK_ID --version 4 --pass --reason "Independently checked delivery"
+node dist/cli.js task-show TASK_ID
+node dist/cli.js status
+```
+
+SQLite stores review results and final state is queryable; a Hermes message adapter sends actual user notifications. Use `demo` for the full walkthrough without identity deployment.
+
+### State machine and permissions
+
+```text
+QUEUED → RUNNING → WAITING_APPROVAL → independent verify(pass) → SUCCEEDED
+                  WAITING_APPROVAL → independent verify(fail) → FAILED
+RUNNING ⇄ BLOCKED
+expired RUNNING/BLOCKED → independent recover → FAILED → reviewer requeue → QUEUED
+UNKNOWN → reviewer requeue → QUEUED
+eligible active state → owner cancel → CANCELLED
+```
+
+`--by`, executor names, role strings and environment variables grant no authority. Caller identity comes from the OS principal and protected policy; updates check version, holder, instance and attempt. Executors cannot review themselves, and ordinary SQL final-success writes also have a review gate. Owners who can edit host code, policy or data belong to the trusted boundary; this ledger cannot isolate arbitrary malicious code sharing the same OS account. See [identity and security](docs/DEPLOYMENT.md).
+
+The project does not obtain, copy, display, persist or modify credentials, Cookies or session Tokens. Business databases, personal configuration, logs, Profiles and caches are ignored. Keep private business content out of messages and logs as well.
+
+### Real desktop mode and extension
+
+Install and sign into external applications, configure local CDP, then have a trusted host install generation/transport adapters and register workspace/GPT/Codex conversations. If ChatGPT's actual model, effort or provenance cannot be verified, the artifact remains `REVIEW_REQUIRED`; reliable proof is required for automatic Codex execution. Manual file imports never authorize execution.
+
+Desktop sending may change editing focus and requires one-time trusted host approval; CLI options cannot authorize it. Defaults expose restricted reading and diagnostics only, and never restart an application in use. See [desktop tools](tools/desktop/README.md) for parameters, compatibility entries and failures, and [deployment](docs/DEPLOYMENT.md) for recovery.
+
+Additional Agents can implement narrow capability interfaces and register trusted adapters; new executor kinds also need compatible type and Schema extensions. See [development](docs/DEVELOPMENT.md).
+
+### Troubleshooting
+
+Successful JSON uses stdout; error JSON uses stderr. Exit codes: `1` file/I/O; `2` input/configuration; `3` authority/provenance; `4` state/version/lease/review; `5` database/Schema; `6` Agent/capability/dependency; `7` timeout; `8` execution failure.
+
+Run `init` for an absent database and re-query versions after conflicts. Back up legacy databases and test `migrate --db COPY.sqlite` on a copy; ordinary writes reject implicit upgrades. For AUTH/PROVENANCE errors check protected identity or adapters rather than bypassing with labels. Unreachable CDP alone does not prove a crash and cannot authorize an automatic restart.
+
+## License and documentation
+
+[MIT License](LICENSE); see [third-party notices](THIRD_PARTY_NOTICES.md) for dependencies.
+
+- [Deployment and recovery](docs/DEPLOYMENT.md)
+- [Project collaboration rules](docs/PROJECT_RULES.md)
+- [Contributing](CONTRIBUTING.md) and [development](docs/DEVELOPMENT.md)
+- [Historical audit](docs/audit/CODE_AUDIT_REPORT.md), [remediation](docs/audit/REMEDIATION.md) and [delivery record](docs/audit/DELIVERY.md)
