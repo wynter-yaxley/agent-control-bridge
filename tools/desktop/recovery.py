@@ -2,7 +2,7 @@
 import argparse, json, subprocess, sys, uuid
 from pathlib import Path
 from urllib.parse import urlparse
-from desktop_common import config, targets, DesktopAuthority, ToolError, entry
+from desktop_common import config, targets, ToolError, entry
 
 class Recovery:
     def __init__(self, authority, notify, probe, restart, restore_mapping):
@@ -19,13 +19,21 @@ class Recovery:
         self.state='REPORTED'; self.notify({'event':'application_unavailable','crashConfirmed':observation=='exited','requiresApproval':True})
         return self.state
     def resume(self, approval):
-        if self.state!='REPORTED': raise ToolError('STATE','Detect and report before recovery',4)
-        self.authority.consume(approval,self.approval_operation)
-        if self.probe()!='exited': raise ToolError('AGENT','Process exit unconfirmed; do not restart a running application',6)
-        self.state='RESTARTING'
-        settings=config(); endpoint=urlparse(settings['cdpUrl']);
-        self.restart(['--remote-debugging-port='+str(endpoint.port or 80),'--remote-allow-origins='+settings['remoteAllowOrigins']])
-        self.state='VERIFYING_CDP'
+        if self.state == 'REPORTED':
+            self.authority.consume(approval,self.approval_operation)
+            if self.probe()!='exited': raise ToolError('AGENT','Process exit unconfirmed; do not restart a running application',6)
+            # 先做配置/端口校验，失败时不改变状态（避免卡在 RESTARTING 无法自愈）
+            settings=config(); endpoint=urlparse(settings['cdpUrl']);
+            if endpoint.port is None:
+                raise ToolError('CONFIG','CDP endpoint must specify an explicit port; refusing to fall back to 80',2)
+            self.state='RESTARTING'
+            self.restart(['--remote-debugging-port='+str(endpoint.port),'--remote-allow-origins='+settings['remoteAllowOrigins']])
+            self.state='VERIFYING_CDP'
+        elif self.state in ('VERIFYING_CDP','MAPPING_BLOCKED'):
+            # 重试路径：重启已发生且授权已消费，只重试 verify/restore（临时故障可自愈）
+            pass
+        else:
+            raise ToolError('STATE','Detect and report before recovery',4)
         if self.probe()!='running': raise ToolError('AGENT','Restart or CDP availability not verified',6)
         if not self.restore_mapping():
             self.state='MAPPING_BLOCKED'; raise ToolError('PROVENANCE','Restore the registered GPT conversation before delivery')

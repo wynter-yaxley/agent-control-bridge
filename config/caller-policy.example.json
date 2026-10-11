@@ -1,4 +1,5 @@
 [
-  { "principal": "<EXECUTOR_WINDOWS_SID>", "instance": "pi-production", "executor": "pi", "reviewer": false },
-  { "principal": "<INDEPENDENT_REVIEWER_WINDOWS_SID>", "instance": "hermes-reviewer", "executor": "hermes", "reviewer": true }
+  { "principal": "<EXECUTOR_WINDOWS_SID>", "instance": "codex-production", "executor": "codex", "controller": false, "reviewer": false },
+  { "principal": "<HERMES_CONTROLLER_WINDOWS_SID>", "instance": "hermes-controller", "executor": "hermes", "controller": true, "reviewer": false },
+  { "principal": "<INDEPENDENT_REVIEWER_WINDOWS_SID>", "instance": "independent-reviewer", "executor": null, "controller": false, "reviewer": true }
 ]

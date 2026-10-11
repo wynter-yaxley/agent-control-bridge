@@ -15,6 +15,7 @@ Agent Control Bridge 是连接 Hermes、ChatGPT 与 Codex 的本地任务控制�
 - **Watcher**：事件触发检查与周期轮询、通知去重、重启恢复、阻塞超时报备记录。
 - **桌面协作工具**：受限 CDP 读取与授权发送接口，默认关闭写入；不接管物理鼠标键盘。
 - **无凭据 Demo**：隔离 Mock 完整演示 ChatGPT → Bridge → Codex → Watcher → 独立验收。
+- **后台原生读取诊断**：Windows 管道读取已存在的 Codex/GPT 对话摘要，核对目标 ID/标题，无浏览器、物理输入或前台切换；读取成功仍不授权生产生成。见 [原生接口说明](docs/NATIVE_DESKTOP.md)。
 
 **当前边界**：真实桌面生成适配器尚不能独立证明 GPT-6/High，生产自动 Prompt 投递默认拒绝。飞书消息发送须接入 Hermes 消息适配器。Codex 本地历史是快照，不能完整观察所有后台执行；取消台账不证明真实 Agent 已停止。详见 [部署说明](docs/DEPLOYMENT.md)。
 
@@ -33,9 +34,11 @@ Agent Control Bridge 是连接 Hermes、ChatGPT 与 Codex 的本地任务控制�
 
 ## 快速开始
 
+0.2.0 开发版本增加了 stdio MCP 入口、持久后台队列、独立执行者、普通 GPT 宿主接口、项目建套流程和待发送通知回执。普通 GPT 的真实宿主绑定尚未完成；缺少能力时会记录 `BLOCKED`，不会改用浏览器或第二 profile。见 [后台 MCP 接入与当前边界](docs/BACKGROUND_MCP.md)。
+
 ### 环境
 
-核心 CLI 需要 **Node.js >=24.19.0、npm 和 Git**，使用 Node 内置 SQLite，无第三方运行依赖或 SQLite 原生扩展。核心面向 Windows/Linux；桌面集成面向 Windows，需要 Python >=3.10、可选的 `websocket-client`、已安装并登录的外部 Agent 应用及受控 CDP 接口。Demo 不需要这些桌面条件。
+核心 CLI 需要 **Node.js >=24.19.0、npm 和 Git**，使用 Node 内置 SQLite，无需 SQLite 原生扩展。MCP 入口使用官方 MCP TypeScript SDK 和 Zod。核心面向 Windows/Linux；既有桌面集成面向 Windows，需要 Python >=3.10、可选的 `websocket-client`、已安装并登录的外部 Agent 应用及受控 CDP 接口。Demo 不需要这些桌面条件。
 
 ```sh
 git clone https://github.com/wynter-yaxley/agent-control-bridge.git

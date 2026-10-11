@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { isolatedDemo } from '../src/demo-scope.ts';
 import { CallerAuthority, type CallerContext } from '../src/caller.ts';
 import { TaskStore } from '../src/tasks.ts';
-import { PromptPipeline, type ChatgptAdapter } from '../src/prompts.ts';
+import { PromptPipeline, promptHash, type ChatgptAdapter } from '../src/prompts.ts';
 import { createDb } from '../src/db.ts';
 function setup(t:{after:(fn:()=>void)=>void}, adapter?:ChatgptAdapter, failure=false) {
  const scope=isolatedDemo();t.after(()=>scope.close());const authority=new CallerAuthority(),store=new TaskStore(scope.db,authority);
@@ -13,6 +13,21 @@ function setup(t:{after:(fn:()=>void)=>void}, adapter?:ChatgptAdapter, failure=f
  const pipeline=new PromptPipeline(scope.db,authority,source,{model:'gpt-6',reasoningEffort:'high'},{deliver:async()=>{count++;if(failure)throw new Error('synthetic failure');return{executionId:'mock-execution'};}});
  return {scope,authority,store,controller,worker,task,pipeline,count:()=>count};
 }
+test('prompt: overlapping generation and completed retry produce one external generation', async t => {
+ let count=0,release!:()=>void;const wait=new Promise<void>(done=>release=done);
+ const f=setup(t,{source:'mock-chatgpt',capabilities:async()=>({verified:true,models:['gpt-6'],reasoningEfforts:['high']}),generate:async()=>{count++;await wait;return{content:'[MOCK] one generation',sourceMessageId:'fixture-one',actualModel:'mock:gpt-6',actualReasoningEffort:'mock:high'};}});
+ const first=f.pipeline.generate(f.task.id,'same requirement',f.controller);
+ await assert.rejects(()=>f.pipeline.generate(f.task.id,'same requirement',f.controller),/in progress/);
+ release();const id=await first;assert.equal(await f.pipeline.generate(f.task.id,'same requirement',f.controller),id);assert.equal(count,1);
+ await assert.rejects(()=>f.pipeline.generate(f.task.id,'changed requirement',f.controller),/changed/);
+});
+test('prompt: different prompts cannot dispatch the same task attempt concurrently', async t => {
+ const f=setup(t);const first=await f.pipeline.generate(f.task.id,'fixture requirement',f.controller),second='fixture-second-prompt',content='[MOCK] second source';
+ f.scope.db.prepare(`INSERT INTO prompts(id,task_id,source,requested_model,actual_model,requested_reasoning,actual_reasoning,generated_at,prompt_hash,content,source_message_id,verified,delivery_status)
+ SELECT ?,task_id,source,requested_model,actual_model,requested_reasoning,actual_reasoning,generated_at,?,?,source_message_id,verified,'PENDING' FROM prompts WHERE id=?`).run(second,promptHash(content),content,first);
+ const results=await Promise.allSettled([f.pipeline.deliver(first,f.controller),f.pipeline.deliver(second,f.controller)]);
+ assert.equal(results.filter(item=>item.status==='fulfilled').length,1);assert.equal(f.count(),1);
+});
 test('prompt: trusted mock generation, stored hash, idempotent delivery and gated Codex claim',async t=>{
  const f=setup(t);assert.equal(f.store.claim(f.task.id,f.worker,600,0).ok,false);const id=await f.pipeline.generate(f.task.id,'test requirement',f.controller);
  const row=f.scope.db.prepare('SELECT * FROM prompts WHERE id=?').get(id)!;assert.equal(row.source,'mock-chatgpt');assert.equal(row.actual_model,'mock:gpt-6');

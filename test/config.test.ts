@@ -22,3 +22,11 @@ test('config: blocked reporting default/override and invalid thresholds',()=>{
  assert.equal(loadConfig({env:{ACB_BLOCKED_REPORT_MS:'120000'}}).failureReporting.blockedAfterMs,120000);
  for(const value of ['0','-1','NaN'])assert.throws(()=>loadConfig({env:{ACB_BLOCKED_REPORT_MS:value}}));
 });
+
+test('config: native interface budgets are unified and reject unsafe values', t => {
+ const root=mkdtempSync(join(tmpdir(),'acb-native-config-'));t.after(()=>rmSync(root,{recursive:true,force:true}));const path=join(root,'config.json');
+ assert.equal(loadConfig({cwd:root,env:{}}).nativeInterface.maxFrameBytes,2097152);
+ writeFileSync(path,JSON.stringify({nativeInterface:{timeoutMs:12000,maxFrameBytes:65536,maxCandidates:8}}));
+ assert.equal(loadConfig({configPath:path,env:{}}).nativeInterface.timeoutMs,12000);
+ for(const value of [{timeoutMs:0},{timeoutMs:60001},{maxCandidates:33},{maxFrameBytes:4095}]){writeFileSync(path,JSON.stringify({nativeInterface:value}));assert.throws(()=>loadConfig({configPath:path,env:{}}));}
+});

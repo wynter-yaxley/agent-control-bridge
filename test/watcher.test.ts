@@ -2,6 +2,23 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Watcher } from '../src/watcher.ts';
 import { fixture } from './helpers.ts';
+test('watcher: callback failure remains pending and is replayed after restart', async t => {
+ const f=fixture();t.after(()=>f.db.close());f.awaiting();let attempts=0;
+ const failed=new Watcher(f.db,{onNotification:()=>{attempts++;throw new Error('fixture external callback failure');}});
+ await failed.runOnce();await assert.rejects(()=>failed.flushNotifications());
+ assert.equal(f.db.prepare('SELECT delivered_at FROM watcher_notifications').get()!.delivered_at,null);
+ const recovered=new Watcher(f.db,{onNotification:()=>{attempts++;}});assert.equal((await recovered.runOnce()).length,0);await recovered.flushNotifications();await recovered.flushNotifications();assert.equal(attempts,2);
+});
+test('watcher: uncooperative inspection cannot hold the detector indefinitely', async t => {
+ const f=fixture();t.after(()=>f.db.close());
+ await assert.rejects(()=>new Watcher(f.db,{timeoutMs:5,inspect:async()=>new Promise(()=>{})}).runOnce(),/budget/);
+});
+test('watcher: uncooperative notification exceeds its budget without claiming delivery', async t => {
+ const f=fixture();t.after(()=>f.db.close());f.awaiting();
+ const watcher=new Watcher(f.db,{timeoutMs:5,onNotification:async()=>new Promise(()=>{})});
+ await watcher.runOnce();await assert.rejects(()=>watcher.flushNotifications(),{code:'TIMEOUT'});
+ assert.equal(f.db.prepare('SELECT delivered_at FROM watcher_notifications').get()!.delivered_at,null);
+});
 test('watcher: default/override, invalid interval, durable restart deduplication, no self success',async t=>{
  const f=fixture();t.after(()=>f.db.close());assert.equal(new Watcher(f.db).intervalMs,60000);assert.equal(new Watcher(f.db,{intervalMs:12}).intervalMs,12);
  for(const value of [0,-1,1.5])assert.throws(()=>new Watcher(f.db,{intervalMs:value}));

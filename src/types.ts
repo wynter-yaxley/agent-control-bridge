@@ -52,6 +52,7 @@ export interface Task {
   created_instance: string | null;
   version: number;
   attempt: number;
+  execution_prompt_id: string | null;
   claim_expires_at: string | null;
   error: string | null;
   created_at: string;

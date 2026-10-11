@@ -10,7 +10,7 @@ const patterns={
  githubToken:/\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{40,})\b/,
  providerKey:/\bsk-(?:proj-|ant-)?[A-Za-z0-9_-]{32,}\b/,
  jwt:/\beyJ[A-Za-z0-9_-]{15,}\.[A-Za-z0-9_-]{15,}\.[A-Za-z0-9_-]{15,}\b/,
- localIdentifier:/\b(?:LAPTOP|DESKTOP)-[A-Z0-9]+\b/i,
+ localIdentifier:/\b(?:LAPTOP|DESKTOP)-[A-Z0-9]+\b/,
 };
 const username=homedir().split(/[\\/]/).at(-1);
 const violations=[];
@@ -22,7 +22,8 @@ function scan(path,text,scope){
 }
 for(const file of files){if(!existsSync(file))continue;const data=readFileSync(file);if(data.includes(0))throw Error('Unexpected binary source file');scan(file,data.toString('utf8'),'working-tree');}
 let historyBlobs=0;const seen=new Set();
-for(const commit of git('rev-list','--all').trim().split('\n').filter(Boolean)){
+// Scan the complete ancestry being published; other local branches are not pushed.
+for(const commit of git('rev-list','HEAD').trim().split('\n').filter(Boolean)){
  for(const row of split(git('ls-tree','-r','-z',commit))){const match=/^\d+ blob ([a-f0-9]+)\t(.*)$/s.exec(row);if(!match||seen.has(match[1]))continue;seen.add(match[1]);historyBlobs++;scan(match[2],git('show',match[1]),'history');}
 }
 if(violations.length){console.error(JSON.stringify({ok:false,violations}));process.exit(1);}

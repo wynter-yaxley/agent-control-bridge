@@ -31,6 +31,23 @@ class WorkaroundGuardContracts(unittest.TestCase):
         self.assertEqual(result['status'], 'unsupported')
         self.assertNotEqual(result.get('actualOwnership'), 'project-1')
 
+    def test_ui_without_conversation_identity_capability_is_unsupported(self):
+        expected = {
+            'mappingSource': 'bridge-registry', 'registered': True,
+            'projectId': 'project-1',
+            'workspacePath': r'D:\work\project-1',
+            'projectRoot': r'D:\work\project-1',
+            'conversationId': 'chat-1',
+            'provider': 'gpt',
+        }
+        result = guard_project_route(expected, {
+            'conversationId': None, 'projectId': None, 'workspacePath': None,
+            'capabilities': {'conversationIdFromUrl': False, 'dataConversationIdAttr': False,
+                             'dataProjectIdAttr': False, 'dataWorkspacePathAttr': False, 'moveActionAttr': False},
+        })
+        self.assertEqual(result['status'], 'unsupported')
+        self.assertEqual(result['code'], 'UI_IDENTITY_UNSUPPORTED')
+
     def test_project_route_repair_requires_fresh_application_readback(self):
         expected={'mappingSource':'bridge-registry','registered':True,'provider':'gpt',
                   'projectId':'project-1','workspacePath':r'D:\work\project-1',

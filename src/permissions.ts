@@ -19,7 +19,7 @@ export function protectPath(path: string, authorizedSids: readonly string[] = []
       // Decode data with .NET; no module auto-loading or account-name lookup.
       const command = `$p = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${data}')); $s = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${sids}')); & {${script}\n} -TargetPath $p -AdditionalSids $s`;
       execFileSync(WINDOWS_POWERSHELL, ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(command, 'utf16le').toString('base64')],
-      { timeout: 15_000, stdio: ['ignore', 'pipe', 'pipe'] });
+      { timeout: 15_000, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     } catch (error) {
       const detail = error as { code?: string; stdout?: Buffer };
       const phases = detail.stdout?.toString().match(/ACB_ACL_PHASE:(?:entered|read|rules|apply|verify|done)/g);

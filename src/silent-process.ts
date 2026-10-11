@@ -1,8 +1,8 @@
 import { spawn } from 'node:child_process';
 import { redact } from './security.ts';
 export interface OperationResult { operation: string; ok: boolean; code: string; exitCode: number | null; needsUserAction: boolean; partialChanges: boolean; summary: string; stdout?: string }
-export function controlledProcessEnv(): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = {};
+export function controlledProcessEnv(): Record<string, string> {
+  const env: Record<string, string> = {};
   // OS runtime metadata only; no model, npm authentication or arbitrary user variables.
   for (const key of ['PATH','Path','SystemRoot','WINDIR','ComSpec','TEMP','TMP','HOME','USERPROFILE','HOMEDRIVE','HOMEPATH','APPDATA','LOCALAPPDATA','XDG_CONFIG_HOME','ProgramFiles','ProgramFiles(x86)','ProgramW6432','ProgramData','ALLUSERSPROFILE','USERNAME','USERDOMAIN']) if (process.env[key] !== undefined) env[key] = process.env[key];
   // Built-in cmdlets must resolve from OS-owned modules, even in a sanitized runner.

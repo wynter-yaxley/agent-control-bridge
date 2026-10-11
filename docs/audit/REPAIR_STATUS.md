@@ -106,7 +106,7 @@ node --experimental-strip-types --test test/tasks.test.ts
 
 - `data/bridge.db`
 - `docs/audit/CODE_AUDIT_REPORT.md`
-- `docs/[HOST]-research.md`
+- `docs/desktop-automation-research.md`
 - `src/codex-ops.ts`
 - `src/codex.ts`
 - `src/hermes.ts`

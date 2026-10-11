@@ -15,9 +15,9 @@ import datetime
 
 import os
 from pathlib import Path
-from desktop_common import entry, ToolError, redact
+from desktop_common import entry, ToolError, redact, read_bounded_json
 import argparse
-config_file=Path(os.environ.get('ACB_CONFIG',Path(__file__).resolve().parents[2]/'.bridge.config.json')); settings=json.loads(config_file.read_text(encoding='utf-8')) if config_file.exists() else {}; configured=settings.get('agents',{}).get('codex',{}).get('statePath'); state_file=(config_file.resolve().parent/ configured).resolve() if configured else Path.home()/'.codex'/'.codex-global-state.json'; CODEX_DIR=Path(os.environ.get('ACB_CODEX_HOME',state_file.parent))
+config_file=Path(os.environ.get('ACB_CONFIG',Path(__file__).resolve().parents[2]/'.bridge.config.json')); settings=read_bounded_json(config_file) or {}; configured=settings.get('agents',{}).get('codex',{}).get('statePath'); state_file=(config_file.resolve().parent/ configured).resolve() if configured else Path.home()/'.codex'/'.codex-global-state.json'; CODEX_DIR=Path(os.environ.get('ACB_CODEX_HOME',state_file.parent))
 DB_PATH = str(CODEX_DIR/'thread_history_1.sqlite')
 STATE_PATH = str(CODEX_DIR/'.codex-global-state.json')
 
@@ -70,7 +70,7 @@ def main():
     thread2proj, proj = load_projects()
 
     try:
-        # 复制副本读（避开 Codex 正在写库导致的锁冲突）
+        # 只读 URI 直接打开（不复制副本，避免临时文件与锁冲突）
         conn = sqlite3.connect(Path(DB_PATH).resolve().as_uri()+'?mode=ro', uri=True, timeout=5)
     except Exception as e:
         print("Codex metadata database unavailable",file=sys.stderr)

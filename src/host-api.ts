@@ -1,0 +1,22 @@
+// Trusted embedding API. Importing modules grants no roles or host capabilities.
+export { BackgroundBridge } from './background.ts';
+export type { BackgroundHostBindings } from './background.ts';
+export { createBridgeMcpServer } from './mcp-server.ts';
+export { CallerAuthority, localCaller } from './caller.ts';
+export type { CallerContext } from './caller.ts';
+export { loadConfig } from './config.ts';
+export type { BridgeConfig } from './config.ts';
+export { createDb } from './db.ts';
+export { ConversationRegistry } from './topology.ts';
+export { ProjectProvisioner } from './project-provisioner.ts';
+export type { ProjectHost, ProjectHostCapabilities, ProjectBundleEvidence, ProjectResources, ProjectOperation } from './project-provisioner.ts';
+export { createOrdinaryChatAdapter } from './ordinary-chat.ts';
+export type { OrdinaryChatHost, OrdinaryChatCapabilities } from './ordinary-chat.ts';
+export { TaskStore } from './tasks.ts';
+export { HermesGatewayAdapter } from './hermes-gateway.ts';
+export { NotificationDispatcher } from './notification-delivery.ts';
+export { inspectCodexThread, createCodexAppServerExecutor, checkCodexProvisioning, checkCodexProjectProvisioning } from './codex-app-server.ts';
+export type { CodexAppServerExecutorOptions, CodexThreadSummary, CodexProvisioningCheck, CodexProjectProvisioningCheck } from './codex-app-server.ts';
+export { NativeDesktopReadClient, checkNativeDesktop } from './native-readonly.ts';
+export type { NativeReadOptions, NativeConversationSummary, NativeProjectExpectation, NativeProjectSummary } from './native-readonly.ts';
+export { checkNativeProvisioningCapabilities, summarizeNativeCreationCatalog } from './native-capabilities.ts';

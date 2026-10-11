@@ -7,6 +7,23 @@
     "intervalMs": 60000,
     "timeoutMs": 10000
   },
+  "nativeInterface": {
+    "timeoutMs": 30000,
+    "maxFrameBytes": 2097152,
+    "maxCandidates": 16
+  },
+  "feishu": {
+    "apiOrigin": "https://open.feishu.cn",
+    "timeoutMs": 15000
+  },
+  "background": {
+    "intervalMs": 60000,
+    "timeoutMs": 120000,
+    "leaseSeconds": 600,
+    "workspaceRoot": "./workspaces",
+    "maxConcurrent": 1,
+    "notificationLeaseMs": 30000
+  },
   "agents": {
     "chatgpt": {
       "enabled": false,
@@ -29,7 +46,7 @@
     "python": "python",
     "allowForegroundAutomation": false,
     "allowPhysicalInput": false,
-    "remoteAllowOrigins": "*"
+    "remoteAllowOrigins": "http://127.0.0.1:9222"
   },
   "logging": {
     "level": "info",

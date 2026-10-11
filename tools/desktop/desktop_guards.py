@@ -9,14 +9,19 @@ import os
 import re
 from pathlib import Path
 
-from desktop_common import ToolError, guard_write
+from desktop_common import ToolError, guard_write, STATE_FILE_MAX_BYTES, MAX_PATH_ROOTS
 
 
 def canonical_path(value):
     if not isinstance(value, str) or not value.strip() or '\x00' in value:
         return None
     if re.match(r'^[A-Za-z]:[\\/]', value) or value.startswith('\\\\'):
-        return ntpath.normcase(ntpath.normpath(value))
+        # Windows 路径：realpath 解析 junction/symlink/8.3 短名，再 normcase 统一大小写
+        try:
+            resolved = os.path.realpath(value)
+        except (OSError, ValueError):
+            return None
+        return ntpath.normcase(ntpath.normpath(resolved))
     return os.path.normcase(os.path.realpath(os.path.expanduser(value)))
 
 
@@ -138,7 +143,12 @@ def guard_project_route(expected, evidence, repair=None, provider=None):
         return {'status': 'verification_failed', 'code': 'PROJECT_STATE_AMBIGUOUS',
                 'reason': 'Application reports ambiguous project navigation evidence',
                 'expectedMapping': 'bridge-registry', 'actualOwnership': 'unknown'}
+    capabilities = evidence.get('capabilities') or {}
     if evidence.get('conversationId') != expected['conversationId']:
+        if evidence.get('conversationId') is None and not capabilities.get('conversationIdFromUrl') and not capabilities.get('dataConversationIdAttr'):
+            return {'status': 'unsupported', 'code': 'UI_IDENTITY_UNSUPPORTED',
+                    'reason': 'Current application UI exposes no supported conversation identity capability',
+                    'expectedMapping': 'bridge-registry', 'actualOwnership': 'unknown'}
         return {'status': 'blocked', 'code': 'CONVERSATION_MISMATCH',
                 'reason': 'Current application conversation does not match the registered target',
                 'expectedMapping': 'bridge-registry', 'actualOwnership': evidence.get('projectId') or 'unknown'}
@@ -190,6 +200,10 @@ def guard_project_route(expected, evidence, repair=None, provider=None):
         return {'status': 'success', 'code': 'ROUTE_REPAIRED_AND_VERIFIED',
                 'expectedMapping': 'bridge-registry', 'actualOwnership': project_id,
                 'evidence': repaired.get('ownershipSource', 'fresh application read after move')}
+    if evidence.get('projectId') is None and not capabilities.get('dataProjectIdAttr'):
+        return {'status': 'unsupported', 'code': 'UI_PROJECT_IDENTITY_UNSUPPORTED',
+                'reason': 'Current application UI exposes no supported project identity capability',
+                'expectedMapping': 'bridge-registry', 'actualOwnership': 'unknown'}
     return {'status': 'blocked', 'code': 'PROJECT_OWNERSHIP_MISMATCH',
             'reason': 'Application-side project identifier does not match the registered target',
             'expectedMapping': 'bridge-registry', 'actualOwnership': evidence.get('projectId') or 'unknown'}
@@ -274,7 +288,6 @@ def guard_local_codex_execution(expected, evidence, metadata, reread=None, metad
 
 ROUTE_SNAPSHOT_JS = r"""
 (() => {
- const root=document.documentElement;
  const path=location.pathname;
  const idMatch=path.match(/\/(?:c|thread)\/([A-Za-z0-9_-]{8,})/);
  const active=[...document.querySelectorAll('[aria-current="page"][data-project-id], [data-current-project-id]')];
@@ -284,12 +297,14 @@ ROUTE_SNAPSHOT_JS = r"""
  const selected=workspace.length===1?workspace[0].dataset.workspacePath:null;
  const row=idMatch&&document.querySelector(`[data-conversation-id="${CSS.escape(idMatch[1])}"]`);
  const move=row&&row.querySelector('[data-action="move-to-project"]');
+ const capabilities={conversationIdFromUrl:!!idMatch,dataConversationIdAttr:document.querySelectorAll('[data-conversation-id]').length>0,dataProjectIdAttr:document.querySelectorAll('[data-project-id],[data-current-project-id]').length>0,dataWorkspacePathAttr:document.querySelectorAll('[data-workspace-path]').length>0,moveActionAttr:document.querySelectorAll('[data-action="move-to-project"]').length>0};
  return JSON.stringify({conversationId:idMatch?idMatch[1]:null,
    projectId:projects.length===1?projects[0]:null,
    ownershipSource:projects.length===1?'active-navigation-data-attribute':null,
    listKind:sections.length===1&&sections[0]==='recent'?'recent':null,
    workspacePath:selected,
    moveAction:move?{supported:true,conversationId:idMatch[1]}:null,
+   capabilities:capabilities,
    ambiguous:projects.length>1||workspace.length>1||sections.length>1});
 })()
 """
@@ -321,7 +336,7 @@ def read_codex_app_binding(expected, state_path=None):
         state_path = Path.home() / '.codex' / '.codex-global-state.json'
     try:
         path = Path(state_path)
-        if path.is_symlink() or not path.is_file() or path.stat().st_size > 2 * 1024 * 1024:
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > STATE_FILE_MAX_BYTES:
             return None
         raw = json.loads(path.read_text(encoding='utf-8'))
         if not isinstance(raw,dict): return None
@@ -337,7 +352,7 @@ def read_codex_app_binding(expected, state_path=None):
         if len(matches)!=1: return None
         project=matches[0]
         roots=project.get('rootPaths')
-        if not isinstance(roots,list) or not roots or len(roots)>32 or any(not isinstance(root,str) for root in roots): return None
+        if not isinstance(roots,list) or not roots or len(roots)>MAX_PATH_ROOTS or any(not isinstance(root,str) for root in roots): return None
         workspace = hints.get(expected['conversationId'])
         if workspace is None and len(roots)==1:
             workspace = roots[0]

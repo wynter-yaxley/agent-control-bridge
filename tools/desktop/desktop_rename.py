@@ -4,11 +4,11 @@ import json
 import sys
 import time
 
-from desktop_common import Cdp, ToolError, entry, find_target, guard_write, redact
+from desktop_common import Cdp, ToolError, entry, find_target, guard_write, redact, RENAME_WAIT_SECONDS
 
 
 def _js(target_id, operation, new_title=None):
-    """Build a target-ID-bound UI read, open, or native React value update."""
+    """Build a target-ID-bound UI read, open, or native value-setter + input-event sync."""
     value=json.dumps(target_id,separators=(',',':'))
     title=json.dumps(new_title,separators=(',',':'),ensure_ascii=False)
     body={
@@ -67,14 +67,14 @@ def _valid_title(title):
     return isinstance(title,str) and bool(title.strip()) and len(title)<=200 and '\x00' not in title and redact(title)==title
 
 
-def rename_session(connection, conversation_id, new_title, clipboard=None,
+def rename_session(connection, conversation_id, new_title,
                    state_reader=None, write_operation=None, action=None,
-                   max_wait_seconds=0.75):
+                   max_wait_seconds=RENAME_WAIT_SECONDS):
     """Prepare a rename and hand off its final physical-Enter commit to a human."""
     if not isinstance(conversation_id,str) or not conversation_id.strip():
         return {'status':'blocked','code':'TARGET_MISSING','renameState':'rename failed','error':'Target conversation identity is required'}
     if not _valid_title(new_title):
-        return {'status':'blocked','code':'TITLE_INVALID','renameState':'rename failed','error':'New title must contain 1..200 safe, non-whitespace characters'}
+        return {'status':'blocked','code':'TITLE_INVALID','renameState':'rename failed','error':'New title must contain 1..200 safe characters with non-blank content'}
 
     initial=_read_state(connection,conversation_id,state_reader)
     if initial.get('conversationId')!=conversation_id:
@@ -146,7 +146,7 @@ def verify_rename_session(connection, conversation_id, expected_title, state_rea
             'newTitle':expected_title,'confirmation':'two fresh application row-title reads after human submission'}
 
 
-def main(authority=None, approval=None, target_context=None, clipboard=None):
+def main(authority=None, approval=None, target_context=None):
     if '--help' in sys.argv:
         print('Prepare: gpt-rename <new-title>. Verify after the user presses physical Enter: gpt-rename --verify <expected-title>. The tool never generates Enter.')
         print('Chat renaming requires a human physical Enter keypress to commit. Automated, synthetic, CDP-generated, or SendKeys Enter events are not reliably accepted by the current ChatGPT desktop application. The tool prepares the rename UI and input value, then hands off the final commit to the user.')
@@ -161,7 +161,7 @@ def main(authority=None, approval=None, target_context=None, clipboard=None):
     else:
         raise ToolError('INPUT','Supply one new title, or --verify and the expected title',2)
     if not _valid_title(title):
-        raise ToolError('INPUT','New title must contain 1..200 safe, non-whitespace characters',2)
+        raise ToolError('INPUT','New title must contain 1..200 safe characters with non-blank content',2)
     digest=hashlib.sha256(title.encode('utf-8')).hexdigest()
     from desktop_guards import binding_fingerprint, guard_project_route, read_project_route
     if verify_mode:

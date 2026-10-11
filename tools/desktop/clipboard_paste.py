@@ -7,7 +7,7 @@ import ctypes
 import json
 import sys
 
-from desktop_common import ToolError
+from desktop_common import ToolError, MAX_TEXT_CHARS, CLIPBOARD_MAX_BYTES, CLIPBOARD_MAX_FORMATS, KEYCODE_A, KEYCODE_V
 
 
 class WindowsTextClipboard:
@@ -43,7 +43,7 @@ class WindowsTextClipboard:
                 current=self.user32.EnumClipboardFormats(current)
                 if not current: break
                 formats.append(current)
-                if len(formats)>32: raise ToolError('CLIPBOARD_UNSUPPORTED','Clipboard format count exceeded limit',6,status='unsupported')
+                if len(formats)>CLIPBOARD_MAX_FORMATS: raise ToolError('CLIPBOARD_UNSUPPORTED','Clipboard format count exceeded limit',6,status='unsupported')
             if any(fmt != self.CF_UNICODETEXT for fmt in formats):
                 raise ToolError('CLIPBOARD_UNSUPPORTED','Clipboard contains rich/non-text data that cannot be faithfully restored',6,status='unsupported')
             if not formats: return None
@@ -52,8 +52,8 @@ class WindowsTextClipboard:
             if not pointer: raise ToolError('CLIPBOARD_READ_FAILED','Could not preserve existing clipboard text')
             try:
                 size=self.kernel32.GlobalSize(handle)
-                if not size or size>131072: raise ToolError('CLIPBOARD_UNSUPPORTED','Clipboard text exceeds preservation limit',6,status='unsupported')
-                value=ctypes.wstring_at(pointer, min(size//ctypes.sizeof(ctypes.c_wchar),65536))
+                if not size or size>CLIPBOARD_MAX_BYTES: raise ToolError('CLIPBOARD_UNSUPPORTED','Clipboard text exceeds preservation limit',6,status='unsupported')
+                value=ctypes.wstring_at(pointer, min(size//ctypes.sizeof(ctypes.c_wchar),MAX_TEXT_CHARS))
                 return value.split('\x00',1)[0]
             finally:
                 self.kernel32.GlobalUnlock(handle)
@@ -61,7 +61,7 @@ class WindowsTextClipboard:
             self.user32.CloseClipboard()
 
     def write(self, value):
-        if value is not None and (not isinstance(value,str) or len(value)>65536 or '\x00' in value):
+        if value is not None and (not isinstance(value,str) or len(value)>MAX_TEXT_CHARS or '\x00' in value):
             raise ToolError('INPUT','Clipboard text is invalid or too long',2)
         data=(value or '').encode('utf-16-le')+b'\x00\x00'
         handle=self.kernel32.GlobalAlloc(self.GMEM_MOVEABLE,len(data))
@@ -99,11 +99,6 @@ def _target_script(target, action):
  let e=null;
  if(target.kind==='gpt-composer'){const all=[...document.querySelectorAll('#prompt-textarea, textarea, [contenteditable="true"]')].filter(visible);if(all.length===1)e=all[0];}
  else if(target.kind==='codex-composer'){const all=[...document.querySelectorAll('.ProseMirror[contenteditable="true"]')].filter(visible);if(all.length===1)e=all[0];}
- else if(target.kind==='rename'&&typeof target.conversationId==='string'){
-   const row=document.querySelector(`[data-conversation-id="${CSS.escape(target.conversationId)}"]`);
-   const all=row?[...row.querySelectorAll('input[aria-label="Rename"],input[aria-label="重命名"],input[data-rename-input]')].filter(visible):[];
-   if(all.length===1)e=all[0];
- }
  if(!e)return JSON.stringify({found:false});
  const editable=e.matches('input,textarea')||e.isContentEditable;
  const val=e.matches('input,textarea')?e.value:e.textContent;
@@ -126,8 +121,8 @@ def _read(connection,target):
 def _select_all(connection):
     events=[
       {'type':'keyDown','key':'Control','code':'ControlLeft','modifiers':2},
-      {'type':'keyDown','key':'a','code':'KeyA','modifiers':2,'windowsVirtualKeyCode':65,'nativeVirtualKeyCode':65},
-      {'type':'keyUp','key':'a','code':'KeyA','modifiers':2,'windowsVirtualKeyCode':65,'nativeVirtualKeyCode':65},
+      {'type':'keyDown','key':'a','code':'KeyA','modifiers':2,'windowsVirtualKeyCode':KEYCODE_A,'nativeVirtualKeyCode':KEYCODE_A},
+      {'type':'keyUp','key':'a','code':'KeyA','modifiers':2,'windowsVirtualKeyCode':KEYCODE_A,'nativeVirtualKeyCode':KEYCODE_A},
       {'type':'keyUp','key':'Control','code':'ControlLeft','modifiers':0},
     ]
     for event in events: connection.call('Input.dispatchKeyEvent',event)
@@ -136,15 +131,15 @@ def _select_all(connection):
 def _paste_keys(connection):
     events=[
       {'type':'keyDown','key':'Control','code':'ControlLeft','modifiers':2},
-      {'type':'keyDown','key':'v','code':'KeyV','modifiers':2,'windowsVirtualKeyCode':86,'nativeVirtualKeyCode':86},
-      {'type':'keyUp','key':'v','code':'KeyV','modifiers':2,'windowsVirtualKeyCode':86,'nativeVirtualKeyCode':86},
+      {'type':'keyDown','key':'v','code':'KeyV','modifiers':2,'windowsVirtualKeyCode':KEYCODE_V,'nativeVirtualKeyCode':KEYCODE_V},
+      {'type':'keyUp','key':'v','code':'KeyV','modifiers':2,'windowsVirtualKeyCode':KEYCODE_V,'nativeVirtualKeyCode':KEYCODE_V},
       {'type':'keyUp','key':'Control','code':'ControlLeft','modifiers':0},
     ]
     for event in events: connection.call('Input.dispatchKeyEvent',event)
 
 
 def paste_text(connection, target, text, clipboard=None):
-    if not isinstance(text,str) or not text or len(text)>65536 or '\x00' in text:
+    if not isinstance(text,str) or not text or len(text)>MAX_TEXT_CHARS or '\x00' in text:
         raise ToolError('INPUT','Text to paste is empty or exceeds the limit',2)
     clipboard=clipboard or WindowsTextClipboard()
     before=_read(connection,target)
@@ -176,5 +171,12 @@ def paste_text(connection, target, text, clipboard=None):
         try: clipboard.restore(original)
         except Exception: restore_error=True
     if restore_error:
+        # 安全清理：仅当剪贴板内容仍是本次写入的 text 时才清空（确认所有权），不误清用户新复制内容
+        try:
+            current = clipboard.snapshot()
+            if current == text:
+                clipboard.write('')
+        except Exception:
+            pass
         raise ToolError('CLIPBOARD_RESTORE_FAILED','Paste completed but the original clipboard could not be restored',6,status='verification_failed')
     return result

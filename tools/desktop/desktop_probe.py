@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""Read-only desktop evidence probe. It never grants authority or sends text."""
+"""Read-only desktop evidence probe (CLI). It never grants authority or sends text.
+
+与 desktop_guards.py（fail-closed guard 库）区分：本模块是只读探测 CLI 入口，
+输出观察结果；desktop_guards.py 是防护库，负责失败即拒绝的校验。
+"""
 import argparse
 import json
 import sys
 
-from desktop_common import Cdp, ToolError, entry, find_target
+from desktop_common import Cdp, entry, find_target
 from desktop_guards import classify_execution_target, read_execution_environment, read_project_route
 
 

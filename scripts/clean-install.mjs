@@ -1,4 +1,4 @@
-import { mkdtempSync, cpSync, mkdirSync, writeFileSync, rmSync, realpathSync } from 'node:fs';
+import { mkdtempSync, cpSync, mkdirSync, writeFileSync, readFileSync, rmSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname, basename } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
@@ -48,7 +48,16 @@ try {
  if(config.status!==0||JSON.parse(config.stdout).watcher.intervalMs!==60000)throw Error('Example configuration failed');
  const demo=await run(process.execPath,['dist/cli.js','demo'],env,30000);
  if(demo.status!==0)throw Error('Compiled demo failed');const result=JSON.parse(demo.stdout);if(result.realModelInvoked!==false||result.deliveryState!=='DELIVERED_PENDING_ACCEPTANCE')throw Error('Demo honesty contract failed');
- checks.push({step:'compiled config + isolated Mock workflow',result:'PASS'});console.log(JSON.stringify({ok:true,mode:'CLEAN_INSTALL',checks,realAgentInvoked:false}));
+ const mcpHelp=await run(process.execPath,['dist/mcp.js','--help'],env,30000);
+ if(mcpHelp.status!==0||!mcpHelp.stdout.includes('MCP (stdio)')||mcpHelp.stderr)throw Error('Compiled MCP help failed');
+ const codexHelp=await run(process.execPath,['dist/codex-interface.js','--help'],env,30000);
+ if(codexHelp.status!==0||!codexHelp.stdout.includes('Read-only official Codex app-server')||codexHelp.stderr)throw Error('Compiled Codex interface help failed');
+ const nativeHelp=await run(process.execPath,['dist/native-interface.js','--help'],env,30000);
+ if(nativeHelp.status!==0||!nativeHelp.stdout.includes('Read-only Windows desktop native')||nativeHelp.stderr)throw Error('Compiled native interface help failed');
+ if(!readFileSync(join(directory,'dist','native-pipe-worker.ps1'),'utf8').includes('GetNamedPipeServerProcessId'))throw Error('Native worker was not packaged');
+ const library=await run(process.execPath,['--input-type=module','-e','const api=await import("agent-control-bridge/codex-app-server");const native=await import("agent-control-bridge/native-readonly");const host=await import("agent-control-bridge");if(typeof api.inspectCodexThread!=="function"||typeof api.createCodexAppServerExecutor!=="function"||typeof api.checkCodexProjectProvisioning!=="function"||typeof host.checkCodexProjectProvisioning!=="function"||typeof host.ProjectProvisioner!=="function"||typeof host.createOrdinaryChatAdapter!=="function"||typeof host.localCaller!=="function"||typeof host.HermesGatewayAdapter!=="function"||typeof native.NativeDesktopReadClient!=="function"||typeof host.checkNativeDesktop!=="function")process.exit(1);'],env,30000);
+ if(library.status!==0)throw Error('Compiled app-server library export failed');
+ checks.push({step:'compiled config + isolated Mock workflow + MCP entry',result:'PASS'});console.log(JSON.stringify({ok:true,mode:'CLEAN_INSTALL',checks,realAgentInvoked:false}));
 }catch(error){console.error(JSON.stringify({ok:false,error:redact(error.message),checks}));process.exitCode=1;}
 finally{
  if(dirname(resolve(directory))!==resolve(temporaryRoot)||!basename(directory).startsWith('acb-clean-install-'))throw Error('Unsafe cleanup path');

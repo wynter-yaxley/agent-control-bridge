@@ -5,7 +5,7 @@ import json
 import sys
 
 from clipboard_paste import paste_text
-from desktop_common import Cdp, ToolError, entry, find_target, guard_write, validate_prompt
+from desktop_common import Cdp, DesktopLock, ToolError, entry, find_target, guard_write, validate_prompt
 from desktop_guards import binding_fingerprint, guard_project_route, read_project_route, repair_project_route
 
 
@@ -37,7 +37,8 @@ CLEAR_EDITOR = r"""
 SUBMIT_EDITOR = r"""
 (() => {
  const visible=e=>{if(!e)return false;const r=e.getBoundingClientRect();return e.offsetParent!==null&&r.width>0&&r.height>0;};
- const buttons=[...document.querySelectorAll('[data-testid="send-button"],button[aria-label*="发送"],button[aria-label*="Send"]')].filter(visible);
+ const candidates=[...document.querySelectorAll('[data-testid="send-button"],button[aria-label*="发送"],button[aria-label*="Send"]')];
+ const buttons=candidates.filter(b=>{const label=(b.getAttribute('aria-label')||b.textContent||'').trim();return !/停止|stop|Stop/i.test(label)&&visible(b);});
  if(buttons.length===1){buttons[0].click();return 'clicked';}
  return buttons.length>1?'ambiguous':'no-submit';
 })()
@@ -67,20 +68,27 @@ def main(authority=None, approval=None, bridge_receipt=None, target_context=None
         print('Use the trusted host API with a one-time target-bound approval; CLI sending is blocked.'); return 0
     if not isinstance(target_context,dict): raise ToolError('PROVENANCE','Trusted bridge session mapping required')
     if len(sys.argv)<2: raise ToolError('INPUT','Prompt is required',2)
-    args=sys.argv[1:];force_clear='--force-clear' in args
-    prompt=' '.join(arg for arg in args if arg!='--force-clear')
+    args=sys.argv[1:]
+    # --force-clear 仅在首参数位置作为命令选项；-- 之后的内容一律视为 prompt 正文
+    force_clear = bool(args) and args[0] == '--force-clear'
+    if force_clear: args = args[1:]
+    if args and args[0] == '--': args = args[1:]
+    prompt=' '.join(args)
     validate_prompt(prompt)
     digest=hashlib.sha256(prompt.encode()).hexdigest()
     if authority is None or bridge_receipt is None: raise ToolError('PROVENANCE','Host-verified prompt receipt required')
     authority.consume(bridge_receipt,'verified-chatgpt-prompt',digest)
     guard_write('gpt_send_cdp.py',authority,approval,digest,binding_fingerprint(target_context))
     connection=Cdp(find_target_compat())
+    lock=None
     try:
         # Project route is checked before touching the composer. Recent-list repair
         # is attempted only when the app exposes an ID-bound action and a separate grant.
         _require_route(connection,target_context,authority,route_repair_approval)
         if connection.evaluate(CHECK_EDITOR)!='found':
             raise ToolError('AGENT','Expected exactly one visible ChatGPT composer')
+        # 串行化共享 composer 的写操作（防并发 TOCTOU）
+        lock=DesktopLock(); lock.acquire()
         current=connection.evaluate(READ_EDITOR)
         if not isinstance(current,str): raise ToolError('INPUT','Composer contents could not be read safely')
         if current.strip():
@@ -99,6 +107,7 @@ def main(authority=None, approval=None, bridge_receipt=None, target_context=None
                           'executionVerified':False},ensure_ascii=False))
         return 0
     finally:
+        if lock: lock.release()
         connection.close()
 
 

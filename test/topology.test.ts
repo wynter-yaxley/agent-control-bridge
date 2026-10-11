@@ -5,7 +5,8 @@ import { CallerAuthority, type CallerContext } from '../src/caller.ts';
 import { ConversationRegistry } from '../src/topology.ts';
 import { TaskStore } from '../src/tasks.ts';
 import { assertLocalCodexEvidence, assertProjectRouteEvidence, PromptPipeline, type ExecutionEvidence } from '../src/prompts.ts';
-import { resolve } from 'node:path';
+import { resolve, join } from 'node:path';
+import { createOrdinaryChatAdapter, type OrdinaryChatHost } from '../src/ordinary-chat.ts';
 function fixture(t: {after:(fn:()=>void)=>void}) {
  const db=createDb({dbPath:':memory:'});t.after(()=>db.close());const authority=new CallerAuthority();
  const controller=authority.issue({principal:'test:controller',instance:'one',executor:'hermes',reviewer:true});
@@ -14,6 +15,36 @@ function fixture(t: {after:(fn:()=>void)=>void}) {
  const mapping={projectId:'project-a',workspacePath:resolve('project-a'),chatgptConversationId:'test-gpt-a',chatgptConversationName:'project-a',codexConversationId:'test-codex-a'};
  return {db,authority,controller,registry,store,mapping};
 }
+
+test('ordinary identity: fixed bridge association does not require a GPT native Codex project', async t => {
+ const f=fixture(t);f.registry.register(f.mapping,f.controller);
+ const task=f.store.createTask({kind:'test',title:'ordinary identity',projectId:'project-a',executor:'codex'},f.controller);
+ let generated=0;
+ const host:OrdinaryChatHost={inspect:async()=>({source:'application-host',ordinaryChat:true,background:true,exactConversation:true,completeMessages:true,actualGenerationParameters:true,createOrdinaryChat:false,createWorkspace:false,models:['fixture-model'],reasoningEfforts:['high']}),
+  inspectConversation:async()=>({source:'application-host',kind:'ordinary-chat',conversationId:'test-gpt-a',name:'project-a'}),
+  generate:async()=>{generated++;return{content:'[ISOLATED TEST] verified prompt',sourceConversationId:'test-gpt-a',sourceConversationName:'project-a',sourceMessageId:'fixture-message',actualModel:'fixture-model',actualReasoningEffort:'high',complete:true,evidenceSource:'application-host'};}};
+ const adapter=createOrdinaryChatAdapter(host,'test-gpt-a','project-a');
+ const pipeline=new PromptPipeline(f.db,f.authority,adapter,{model:'fixture-model',reasoningEffort:'high'},{deliver:async()=>({executionId:'unused'})});
+ const id=await pipeline.generate(task.id,'fixture requirement',f.controller);
+ assert.equal(generated,1);assert.equal(f.db.prepare('SELECT verified FROM prompts WHERE id=?').get(id)!.verified,1);
+ assert.equal(f.db.prepare('SELECT COUNT(*) n FROM execution_runs').get()!.n,0);
+});
+test('ordinary identity: foreign IDs, Work mode, unknown mode and inexact names remain refused',()=>{
+ const mapping={project_id:'bridge-project',app_project_id:'native-codex-project',workspace_path:resolve('fixture'),chatgpt_conversation_id:'gpt-a',chatgpt_conversation_name:'精确项目名',project_name:'精确项目名'};
+ const identity={source:'application-host' as const,kind:'ordinary-chat' as const,conversationId:'gpt-a',name:'精确项目名'};
+ assert.doesNotThrow(()=>assertProjectRouteEvidence(mapping,identity));
+ for(const change of [{conversationId:'gpt-b'},{name:'精确项目名 '},{name:'精確项目名'},{kind:'work' as const},{kind:'unknown' as const}])assert.throws(()=>assertProjectRouteEvidence(mapping,{...identity,...change}),{code:'PROVENANCE'});
+ assert.throws(()=>assertProjectRouteEvidence({...mapping,chatgpt_conversation_name:undefined},identity),{code:'PROVENANCE'});
+ assert.throws(()=>assertProjectRouteEvidence({...mapping,project_name:'foreign-project'},identity),{code:'PROVENANCE'});
+});
+test('ordinary identity: title changed between host capability check and generation is refused',async t=>{
+ const f=fixture(t);f.registry.register(f.mapping,f.controller);const task=f.store.createTask({kind:'test',title:'changed ordinary title',projectId:'project-a',executor:'codex'},f.controller);
+ let name='project-a',generated=0;
+ const adapter={source:'chatgpt' as const,conversationId:'test-gpt-a',conversationName:'project-a',preflight:async()=>({source:'application-host' as const,kind:'ordinary-chat' as const,conversationId:'test-gpt-a',name}),capabilities:async()=>{name='project-b';return{verified:true,models:['fixture'],reasoningEfforts:['high']};},generate:async()=>{generated++;return{content:'unsafe',sourceMessageId:'unused',actualModel:'fixture',actualReasoningEffort:'high'};}};
+ const pipeline=new PromptPipeline(f.db,f.authority,adapter,{model:'fixture',reasoningEffort:'high'},{deliver:async()=>({executionId:'unused'})});
+ await assert.rejects(pipeline.generate(task.id,'fixture requirement',f.controller),{code:'PROVENANCE'});assert.equal(generated,0);
+ assert.equal(f.db.prepare('SELECT COUNT(*) n FROM prompts').get()!.n,0);
+});
 test('topology: one workspace + one GPT conversation + N Codex conversations; immutable mapping',t=>{
  const f=fixture(t);f.registry.register(f.mapping,f.controller);f.registry.register({...f.mapping,codexConversationId:'test-codex-a2'},f.controller);
  assert.equal(f.db.prepare('SELECT COUNT(*) n FROM codex_conversations').get()!.n,2);
@@ -32,7 +63,7 @@ test('topology: production generation and delivery check both conversation endpo
  let conversation='wrong';const target={codexConversationId:'test-codex-a',workspacePath:resolve('project-a')};
  const evidence:ExecutionEvidence={surface:'codex-desktop',modeAttribute:'codex-local',conversationId:'test-codex-a',projectId:'project-a',workspacePath:resolve('project-a'),composerState:'ready',codexAppState:{source:'codex-app-state',threadId:'test-codex-a',projectId:'project-a',workspacePath:resolve('project-a')}};
  const pipeline=new PromptPipeline(f.db,f.authority,{source:'chatgpt',conversationId:'test-gpt-a',conversationName:'project-a',preflight:async()=>({source:'application-navigation',conversationId:'test-gpt-a',projectId:'project-a',workspacePath:resolve('project-a')}),capabilities:async()=>({verified:true,models:['test-model'],reasoningEfforts:['test-effort']}),generate:async()=>({content:'[TEST ADAPTER] prompt',sourceConversationId:conversation,sourceConversationName:'project-a',sourceMessageId:'test-message',actualModel:'test-model',actualReasoningEffort:'test-effort'})},{model:'test-model',reasoningEffort:'test-effort'},{target:async()=>target,preflight:async()=>evidence,deliver:async()=>({executionId:'test-receipt',codexConversationId:'test-codex-a',workspacePath:resolve('project-a')})});
- await assert.rejects(()=>pipeline.generate(task.id,'requirement',f.controller),/another GPT/);conversation='test-gpt-a';const id=await pipeline.generate(task.id,'requirement',f.controller);await pipeline.deliver(id,f.controller);
+ await assert.rejects(()=>pipeline.generate(task.id,'requirement',f.controller),/another GPT/);conversation='test-gpt-a';const fresh=f.store.createTask({kind:'test',title:'fresh trusted-host fixture',projectId:'project-a',executor:'codex'},f.controller);const id=await pipeline.generate(fresh.id,'requirement',f.controller);await pipeline.deliver(id,f.controller);
  assert.equal(f.db.prepare('SELECT source_conversation_id,codex_conversation_id FROM prompts WHERE id=?').get(id)!.source_conversation_id,'test-gpt-a');
  const unbound=f.store.createTask({kind:'test',title:'unbound',executor:'codex'},f.controller);await assert.rejects(()=>pipeline.generate(unbound.id,'requirement',f.controller),/registered/);
 });
@@ -88,4 +119,44 @@ test('topology: GPT prompt conversation must have the exact workspace project na
  assert.equal(f.db.prepare('SELECT COUNT(*) n FROM conversation_workspaces').get()!.n,0);
  f.registry.register(f.mapping,f.controller);
  assert.equal(f.db.prepare('SELECT chatgpt_conversation_name FROM conversation_workspaces').get()!.chatgpt_conversation_name,'project-a');
+});
+
+test('topology: native workspace IDs cannot be reused by different projects', t => {
+ const f=fixture(t);f.registry.register({...f.mapping,appProjectId:'native-a'},f.controller);
+ assert.throws(()=>f.registry.register({projectId:'project-b',workspacePath:resolve('project-b'),appProjectId:'native-a',chatgptConversationId:'gpt-b',chatgptConversationName:'project-b',codexConversationId:'codex-b'},f.controller),{code:'CONFLICT'});
+ assert.equal(f.db.prepare('SELECT COUNT(*) n FROM conversation_workspaces').get()!.n,1);
+ assert.equal(f.db.prepare('SELECT COUNT(*) n FROM codex_conversations').get()!.n,1);
+ assert.equal(f.db.prepare("SELECT COUNT(*) n FROM project_access WHERE project_id='project-b'").get()!.n,0);
+});
+
+test('topology: GPT IDs cannot be reused by a different project even with a different workspace', t => {
+ const f=fixture(t);f.registry.register(f.mapping,f.controller);
+ assert.throws(()=>f.registry.register({projectId:'project-b',workspacePath:resolve('project-b'),chatgptConversationId:f.mapping.chatgptConversationId,chatgptConversationName:'project-b',codexConversationId:'codex-b'},f.controller),{code:'CONFLICT'});
+ assert.equal(f.db.prepare('SELECT COUNT(*) n FROM codex_conversations').get()!.n,1);
+});
+
+for(const variant of ['same-id','gpt-as-codex','codex-as-gpt'] as const) test(`topology: conversation backing namespaces cannot overlap (${variant})`, t => {
+ const f=fixture(t);f.registry.register(f.mapping,f.controller);
+ const other={projectId:'project-b',workspacePath:resolve('project-b'),chatgptConversationId:'gpt-b',chatgptConversationName:'project-b',codexConversationId:'codex-b'};
+ if(variant==='same-id')other.codexConversationId=other.chatgptConversationId;
+ if(variant==='gpt-as-codex')other.codexConversationId=f.mapping.chatgptConversationId;
+ if(variant==='codex-as-gpt')other.chatgptConversationId=f.mapping.codexConversationId;
+ assert.throws(()=>f.registry.register(other,f.controller),{code:'CONFLICT'});
+ assert.equal(f.db.prepare('SELECT COUNT(*) n FROM conversation_workspaces').get()!.n,1);
+});
+
+test('topology: durable isolated registry keeps one GPT and a series of Codex IDs across reconnects', async t => {
+ const {isolatedDemo}=await import('../src/demo-scope.ts');const scope=isolatedDemo();
+ let read:import('node:sqlite').DatabaseSync|undefined;t.after(()=>{read?.close();scope.close();});
+ const authority=new CallerAuthority(),context=authority.issue({principal:'fixture:binding-controller',instance:'one',executor:'hermes',controller:true,reviewer:false});
+ const registry=new ConversationRegistry(scope.db,authority);
+ for(const project of ['fixture-a','fixture-b']) {
+  registry.registerProject(project,project,resolve(project),context);
+  for(let n=1;n<=3;n++)registry.register({projectId:project,workspacePath:resolve(project),appProjectId:`native-${project}`,chatgptConversationId:`gpt-${project}`,chatgptConversationName:project,codexConversationId:`codex-${project}-${n}`},context);
+ }
+ const {DatabaseSync}=await import('node:sqlite');read=new DatabaseSync(join(scope.root,'demo.sqlite'),{readOnly:true});
+ const bindings=read.prepare('SELECT w.project_id,w.app_project_id,w.chatgpt_conversation_id,c.conversation_id FROM conversation_workspaces w JOIN codex_conversations c ON c.project_id=w.project_id').all();
+ assert.equal(bindings.length,6);assert.equal(new Set(bindings.map(x=>x.conversation_id)).size,6);
+ for(const item of bindings){assert.equal(item.app_project_id,`native-${item.project_id}`);assert.equal(item.chatgpt_conversation_id,`gpt-${item.project_id}`);assert.ok(String(item.conversation_id).startsWith(`codex-${item.project_id}-`));}
+ assert.equal(read.prepare('SELECT COUNT(*) n FROM prompts').get()!.n,0);
 });

@@ -3,15 +3,30 @@ import json, os, sys, time, urllib.request, urllib.parse, weakref, re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+
+# —— 安全边界与共享常量（集中管理，避免散落魔法数字）——
+MAX_TEXT_CHARS = 65536             # 单次文本（prompt/剪贴板/config）长度上限，不得无理由提高
+CLIPBOARD_MAX_BYTES = 131072       # 剪贴板快照保留上限（128 KiB）
+CLIPBOARD_MAX_FORMATS = 32         # 剪贴板格式数量上限
+STATE_FILE_MAX_BYTES = 2 * 1024 * 1024  # 状态文件读取上限（2 MiB）
+MAX_PATH_ROOTS = 32                # 授权根目录数量上限
+RENAME_WAIT_SECONDS = 0.75         # 改名后 UI 稳定等待
+KEYCODE_A = 65                     # CDP 键码：Ctrl+A（全选）
+KEYCODE_V = 86                     # CDP 键码：Ctrl+V（粘贴）
+
 def config():
     try:
-        path = Path(os.environ.get('ACB_CONFIG', ROOT / '.bridge.config.json')).resolve()
-        if path.exists() and (not path.is_file() or path.is_symlink() or path.stat().st_size>65536):
+        raw = Path(os.environ.get('ACB_CONFIG', ROOT / '.bridge.config.json'))
+        # 先检查原始路径的 symlink（resolve 会丢失此信息；Windows junction 由 P2-05 路径核验覆盖）
+        if raw.is_symlink():
+            raise ToolError('CONFIG','Configuration must not be a symlink',2)
+        path = raw.resolve()
+        if path.exists() and (not path.is_file() or path.stat().st_size>MAX_TEXT_CHARS):
             raise ToolError('CONFIG','Configuration must be a bounded regular file',2)
         value = json.loads(path.read_text(encoding='utf-8')) if path.exists() else {}
         if os.environ.get('ACB_CONFIG') and not path.exists(): raise ToolError('CONFIG','Configuration file does not exist',2)
         if not isinstance(value,dict) or not isinstance(value.get('desktop',{}),dict): raise ToolError('CONFIG','Invalid configuration object',2)
-        settings = {'enabled':False,'cdpUrl':'http://127.0.0.1:9222','remoteAllowOrigins':'*','python':'python','allowForegroundAutomation':False,'allowPhysicalInput':False}
+        settings = {'enabled':False,'cdpUrl':'http://127.0.0.1:9222','remoteAllowOrigins':None,'python':'python','allowForegroundAutomation':False,'allowPhysicalInput':False}
         if set(value.get('desktop',{}))-set(settings): raise ToolError('CONFIG','Unknown desktop configuration field',2)
         settings.update(value.get('desktop',{}))
         settings['cdpUrl'] = os.environ.get('ACB_CDP_URL',settings['cdpUrl'])
@@ -21,13 +36,23 @@ def config():
             raise ToolError('CONFIG','CDP must be credential-free loopback HTTP',2)
         host='['+endpoint.hostname+']' if endpoint.hostname=='::1' else endpoint.hostname
         origin='http://'+host+(':'+str(port) if port not in (None,80) else '')
-        if settings['remoteAllowOrigins'] not in ('*',origin): raise ToolError('CONFIG','Invalid recovery origin',2)
+        if settings['remoteAllowOrigins'] != origin: raise ToolError('CONFIG','remoteAllowOrigins must be an explicit restricted loopback origin; wildcard rejected',2)
         if any(type(settings[k]) is not bool for k in ('enabled','allowForegroundAutomation','allowPhysicalInput')) or settings['allowPhysicalInput']:
             raise ToolError('CONFIG','Physical input is unsupported; desktop flags must be boolean',2)
         if not isinstance(settings['python'],str) or not settings['python'].strip(): raise ToolError('CONFIG','Invalid Python executable',2)
         return settings
     except ToolError: raise
     except (ValueError,OSError,TypeError): raise ToolError('CONFIG','Invalid desktop configuration',2)
+
+def read_bounded_json(path):
+    """有界 JSON 读取：拒绝 symlink、超 64KiB、非普通文件；解析失败返回结构化错误。"""
+    p = Path(path)
+    if p.is_symlink(): raise ToolError('CONFIG','Configuration must not be a symlink',2)
+    p = p.resolve()
+    if not p.exists(): return None
+    if not p.is_file() or p.stat().st_size > MAX_TEXT_CHARS: raise ToolError('CONFIG','Configuration must be a bounded regular file',2)
+    try: return json.loads(p.read_text(encoding='utf-8'))
+    except (ValueError,OSError): raise ToolError('CONFIG','Invalid configuration JSON',2)
 
 class ToolError(Exception):
     def __init__(self, code, message, exit_code=3, status='blocked', details=None):
@@ -41,6 +66,35 @@ class DesktopAuthority:
     def consume(self, handle, operation, prompt_hash=None, binding=None):
         if not isinstance(handle,Handle) or self._handles.pop(handle,None)!=(operation,prompt_hash,binding):
             raise ToolError('AUTH','One-time trusted host approval required')
+
+class DesktopLock:
+    """Windows 命名互斥体：串行化共享 composer/焦点/剪贴板的桌面写操作（防并发 TOCTOU）。
+    Worker 崩溃时互斥体自动释放（句柄随进程关闭），不会永久死锁。
+    非 Windows（测试/开发）环境降级为 no-op：跨进程互斥仅在真实 Windows 桌面有意义。"""
+    def __init__(self, name='ACB_Desktop_Write_Lock'):
+        self.acquired=False
+        self._noop = sys.platform != 'win32'
+        if self._noop:
+            return
+        import ctypes
+        self.kernel32=ctypes.windll.kernel32
+        self.handle=self.kernel32.CreateMutexW(None,False,name)
+        if not self.handle: raise ToolError('LOCK','Could not create desktop mutex',6)
+    def acquire(self, timeout_ms=5000):
+        if self._noop:
+            self.acquired=True; return
+        ret=self.kernel32.WaitForSingleObject(self.handle,int(timeout_ms))
+        # WAIT_OBJECT_0=0 正常获取；WAIT_ABANDONED=0x80 表示前任持有者崩溃，互斥体已归属当前线程
+        if ret not in (0, 0x80): raise ToolError('LOCK_TIMEOUT','Another desktop write is in progress',6)
+        self.acquired=True
+    def release(self):
+        if self.acquired and not self._noop:
+            self.kernel32.ReleaseMutex(self.handle)
+        self.acquired=False
+    def __enter__(self):
+        self.acquire(); return self
+    def __exit__(self,*exc):
+        self.release()
 
 CAPABILITIES = {
  'read': {'backgroundSafe': True,'requiresForeground':False,'usesPhysicalInput':False,'requiresUserApproval':False},
@@ -110,7 +164,7 @@ def redact(value):
     return re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\u202a-\u202e\u2066-\u2069]',lambda m:'\\u%04x'%ord(m[0]),value)
 
 def validate_prompt(prompt):
-    if not isinstance(prompt,str) or not prompt.strip() or len(prompt)>65536: raise ToolError('INPUT','Invalid prompt length',2)
+    if not isinstance(prompt,str) or not prompt.strip() or len(prompt)>MAX_TEXT_CHARS: raise ToolError('INPUT','Invalid prompt length',2)
     if redact(prompt)!=prompt: raise ToolError('INPUT','Authentication material is not accepted',2)
 
 def entry(fn):
@@ -121,28 +175,3 @@ def entry(fn):
         print(json.dumps(payload,ensure_ascii=False),file=sys.stderr); return error.exit_code
     except Exception:
         print(json.dumps({'ok':False,'code':'EXECUTION','error':'Tool failed; private response omitted'}),file=sys.stderr); return 3
-
-
-def guard_project_route(*args, **kwargs):
-    from desktop_guards import guard_project_route as implementation
-    return implementation(*args, **kwargs)
-
-
-def guard_local_codex_execution(*args, **kwargs):
-    from desktop_guards import guard_local_codex_execution as implementation
-    return implementation(*args, **kwargs)
-
-
-def paste_text(*args, **kwargs):
-    from clipboard_paste import paste_text as implementation
-    return implementation(*args, **kwargs)
-
-
-def rename_session(*args, **kwargs):
-    from desktop_rename import rename_session as implementation
-    return implementation(*args, **kwargs)
-
-
-def verify_rename_session(*args, **kwargs):
-    from desktop_rename import verify_rename_session as implementation
-    return implementation(*args, **kwargs)

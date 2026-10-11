@@ -47,7 +47,7 @@ D:\Agent control bridge
 │  ├─ chatgpt.ts                   公共服务状态、桌面元数据、人工导出导入
 │  └─ e2e.ts                      顺序自测，固定 /tmp 库，部分依赖真实环境
 ├─ data/bridge.db                   86,016 字节，8 表，运行台账
-└─ docs/[HOST]-research.md  外部桌面自动化方案和声称的实测记录
+└─ docs/desktop-automation-research.md  外部桌面自动化方案和声称的实测记录
 ```
 
 没有 API 服务、网关、IPC 监听端点、消息队列、守护循环、Provider 注册表、派发执行器、进程管理器、配置加载器或数据库迁移模块。没有 `.env` 文件或显式 `process.env` 读取。源码中的执行者联合类型是四个固定名称，增加新执行者需要修改类型和 CLI，而不是注册插件。
@@ -803,7 +803,7 @@ SQLite 承担本地持久台账、查询和审计；不是协调锁服务，也�
 | 3. 严重度 | P3 / Low |
 | 4. 问题类别 | 架构/文档一致性、部署可复现性 |
 | 5. 发现状态 | 项目内无所列外部脚本已确认；脚本可能在别处/实际部署待验证 |
-| 6. 受影响文件 | README.md、docs/[HOST]-research.md、src/codex-ops.ts、src/cli.ts |
+| 6. 受影响文件 | README.md、docs/desktop-automation-research.md、src/codex-ops.ts、src/cli.ts |
 | 7. 准确定位 | README.md:79–88；开发文档:74–117、121–159；codex-ops.ts:21–40；cli.ts:248–254 |
 | 8. 问题描述 | 文档声称CDP/relay/codex-send闭环实测、零凭据泄漏；源码没有relay.py/codex_send_cdp.py/cdp_messages.py、来源版本/路径/调用合约、CDP授权设计；fork仅审批申请，build函数不执行。不能据README复选框推断完整控制桥 |
 | 9. 证据/复现 | 全16文件目录及21命令分支；没有exec CodexOp或外部relay模块。未搜索无关目录/重启应用复测；未否定过去文档中的实测是否曾发生 |
@@ -961,7 +961,7 @@ SQLite 承担本地持久台账、查询和审计；不是协调锁服务，也�
 - [Schema](<D:/Agent control bridge/src/schema.sql:11>)；[数据库初始化](<D:/Agent control bridge/src/db.ts:14>)；[类型/转换表](<D:/Agent control bridge/src/types.ts:82>)。
 - [CLI参数与业务入口](<D:/Agent control bridge/src/cli.ts:13>)；[CLI导入登记](<D:/Agent control bridge/src/cli.ts:233>)；[ChatGPT导入与输出](<D:/Agent control bridge/src/chatgpt.ts:155>)。
 - [Codex观察/同步](<D:/Agent control bridge/src/codex.ts:30>)；[仅参数构造的Codex操作](<D:/Agent control bridge/src/codex-ops.ts:22>)；[Pi观察](<D:/Agent control bridge/src/pi.ts:16>)；[Hermes观察](<D:/Agent control bridge/src/hermes.ts:15>)。
-- [自检写默认库](<D:/Agent control bridge/src/index.ts:5>)；[e2e固定删除/测试库](<D:/Agent control bridge/src/e2e.ts:11>)；[运行脚本](<D:/Agent control bridge/package.json:7>)；[README声明](<D:/Agent control bridge/README.md:79>)；[外部调研记录](<D:/Agent control bridge/docs/[HOST]-research.md:74>)。
+- [自检写默认库](<D:/Agent control bridge/src/index.ts:5>)；[e2e固定删除/测试库](<D:/Agent control bridge/src/e2e.ts:11>)；[运行脚本](<D:/Agent control bridge/package.json:7>)；[README声明](<D:/Agent control bridge/README.md:79>)；[外部调研记录](<D:/Agent control bridge/docs/desktop-automation-research.md:74>)。
 
 DB证据是Schema、统计、integrity_check/foreign_key_check与文件头，不包含原任务标题、ID、会话正文、审计detail或秘密值。8张表统计：projects=3、sessions=14、tasks=5、events=17、approvals=1、deliverables=1、audit_log=8、alerts=1。
 
@@ -1018,7 +1018,7 @@ node --experimental-strip-types --experimental-sqlite --import './mock-runtime.m
 | L3 | SDK integration test_cancel源码，未运行后端/SDK取消测试 |
 | L4 | Pregel测试源码，未运行模型/框架测试 |
 | W1 | Windows PowerShell quickstart、Docker与WSL2差异（1–38） |
-| W2 | [HOST] workflow（38–39），windows-latest打包配置，未查看/运行通过记录 |
+| W2 | desktop-windows workflow（38–39），windows-latest打包配置，未查看/运行通过记录 |
 | W3 | agent-server conversation API（86–87、371–372、459），timeout/paused/confirmation/session key边界 |
 | W4 | runtime adapter（29–56），command timeout和HTTP timeout区分 |
 | W5 | docker-conversation-boundaries测试（54–55、159起），隔离conversation边界断言，未运行 |
@@ -1049,7 +1049,7 @@ node --experimental-strip-types --experimental-sqlite --import './mock-runtime.m
 | 项目内文件 | 字节 | SHA-256 |
 |---|---:|---|
 | data/bridge.db | 86016 | 6812204dac8ba4763b1f7e2997ae21183c523b8885402e8501a57e353a4245e9 |
-| docs/[HOST]-research.md | 12703 | 64c72fd77c30816e5204762d95ccb3f822666ed6ca1b0aa6b82d7a6ade65a632 |
+| docs/desktop-automation-research.md | 12703 | 64c72fd77c30816e5204762d95ccb3f822666ed6ca1b0aa6b82d7a6ade65a632 |
 | package.json | 484 | 13ca292ba3358740e77ee9c2e16a2c8fb3e505e9a0cdf1646356e8abe2f03e44 |
 | README.md | 4042 | 1c8072d14aaa3d0a48aa40d8987ebf590319683d1d3ae58a517872d887fc8185 |
 | src/chatgpt.ts | 9807 | 91647ddf09fad5b399ab8924a284a81be8b2d31a9c66abde5abe4a672c3bee4d |
@@ -1083,7 +1083,7 @@ node --experimental-strip-types --experimental-sqlite --import './mock-runtime.m
 [L3]: https://github.com/langchain-ai/langgraph/blob/6aa0afba682b0308fbcace31f66fb532978d4dca/libs/sdk-py/tests/integration/test_cancel.py
 [L4]: https://github.com/langchain-ai/langgraph/blob/6aa0afba682b0308fbcace31f66fb532978d4dca/libs/langgraph/tests/test_pregel.py
 [W1]: https://github.com/OpenHands/OpenHands/blob/03f356c5c81aefed7afad926c54e53f75230f5f6/README.windows.md
-[W2]: https://github.com/OpenHands/OpenHands/blob/03f356c5c81aefed7afad926c54e53f75230f5f6/.github/workflows/[HOST].yml
+[W2]: https://github.com/OpenHands/OpenHands/blob/03f356c5c81aefed7afad926c54e53f75230f5f6/.github/workflows/desktop-windows.yml
 [W3]: https://github.com/OpenHands/OpenHands/blob/03f356c5c81aefed7afad926c54e53f75230f5f6/src/api/conversation-service/agent-server-conversation-service.api.ts
 [W4]: https://github.com/OpenHands/OpenHands/blob/03f356c5c81aefed7afad926c54e53f75230f5f6/src/api/runtime-service/agent-server-runtime-service.ts
 [W5]: https://github.com/OpenHands/OpenHands/blob/03f356c5c81aefed7afad926c54e53f75230f5f6/__tests__/api/docker-conversation-boundaries.test.ts

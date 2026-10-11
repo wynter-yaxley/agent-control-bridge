@@ -39,7 +39,7 @@ class FakeGpt:
     def close(self):self.closed+=1
 
 class FakeCodex:
-    def __init__(self, mismatch=False, clipboard=None, execution_sequence=None, route=None):self.closed=0;self.calls=[];self.text='';self.mismatch=mismatch;self.clipboard=clipboard;self.execution_sequence=list(execution_sequence or []);self.route=route or {'conversationId':'thread-1','projectId':'project-a','workspacePath':PROJECT_PATH}
+    def __init__(self, mismatch=False, clipboard=None, execution_sequence=None, route=None, enter_behavior=None):self.closed=0;self.calls=[];self.text='';self.mismatch=mismatch;self.clipboard=clipboard;self.execution_sequence=list(execution_sequence or []);self.route=route or {'conversationId':'thread-1','projectId':'project-a','workspacePath':PROJECT_PATH};self.messages=[];self.enter_behavior=enter_behavior
     def evaluate(self,expression):
         if expression==ROUTE_SNAPSHOT_JS:return json.dumps(self.route)
         if expression==EXECUTION_SNAPSHOT_JS:
@@ -47,12 +47,20 @@ class FakeCodex:
             return json.dumps(state)
         if expression==codex.FIND_COMPOSER:return 'focused'
         if expression==codex.READ_COMPOSER:return self.text
+        if expression==codex.READ_MESSAGES_JS:return json.dumps({'messages':self.messages,'diagnostics':{'nodesScanned':len(self.messages),'messagesFound':len(self.messages)}})
         if 'ACB_FOCUS' in expression:return json.dumps({'found':True,'editable':True,'focused':True})
         if 'ACB_READ' in expression:return json.dumps({'found':True,'editable':True,'focused':True,'value':self.text})
         return json.dumps({'found':True,'editable':True,'focused':True})
     def call(self,method,params):
         self.calls.append((method,params))
         if method=='Input.dispatchKeyEvent' and params.get('code')=='KeyV' and params.get('type')=='keyDown':self.text='wrong content' if self.mismatch else self.clipboard.value
+        if method=='Input.dispatchKeyEvent' and params.get('code')=='Enter' and params.get('type')=='keyDown':
+            if self.enter_behavior=='ignored':
+                pass
+            elif self.enter_behavior=='mismatch':
+                self.messages.append({'role':'user','text':'DIFFERENT CONTENT','sourceMessageId':f'msg-{len(self.messages)+1}'})
+            else:
+                self.messages.append({'role':'user','text':self.text,'sourceMessageId':f'msg-{len(self.messages)+1}'})
         return {'result':{}}
     def close(self):self.closed+=1
 
@@ -82,6 +90,29 @@ class SenderContracts(unittest.TestCase):
             else:codex.main(authority,approval,receipt,mapping,clipboard=clipboard,codex_metadata=metadata)
         self.assertEqual(fake.closed,1)
         return fake,out.getvalue()
+
+    def codex_behavior_run(self,enter_behavior):
+        prompt='[TEST] trusted generated engineering prompt';digest=hashlib.sha256(prompt.encode()).hexdigest();mapping=context('codex','thread-1');clipboard=Clipboard()
+        metadata={'source':'codex-app-state','observed':True,'conversationId':'thread-1','projectId':'project-a','workspacePath':PROJECT_PATH}
+        authority=common.DesktopAuthority();approval=authority.approve('codex_send_cdp.py',digest,binding_fingerprint(mapping));receipt=authority.approve('verified-chatgpt-prompt',digest);fake=FakeCodex(False,clipboard,enter_behavior=enter_behavior);out=io.StringIO()
+        with patch.object(common,'config',return_value={'enabled':True,'allowForegroundAutomation':True}),patch.object(codex,'find_codex_shell_compat',return_value='mock'),patch.object(codex,'Cdp',return_value=fake),patch.object(sys,'argv',['codex-send',prompt]),redirect_stdout(out):
+            ret=codex.main(authority,approval,receipt,mapping,clipboard=clipboard,codex_metadata=metadata)
+        self.assertEqual(fake.closed,1)
+        return ret,out.getvalue(),fake
+
+    def test_codex_submit_verified_when_new_message_matches(self):
+        ret,out,_=self.codex_behavior_run(None)
+        self.assertEqual(ret,0);self.assertIn('"submissionVerified": true',out);self.assertIn('"ok": true',out)
+
+    def test_codex_submit_unverified_when_enter_ignored(self):
+        with patch('time.sleep',return_value=None),patch('time.monotonic',side_effect=[0,1,10000]):
+            ret,out,_=self.codex_behavior_run('ignored')
+        self.assertEqual(ret,6);self.assertIn('"submission_unverified"',out);self.assertIn('"submissionVerified": false',out)
+
+    def test_codex_submit_unverified_when_new_message_differs(self):
+        # 新 user 消息已出现但内容不精确匹配（DOM 渲染差异）→ 降级 unverified，不报 mismatch
+        ret,out,_=self.codex_behavior_run('mismatch')
+        self.assertEqual(ret,6);self.assertIn('"submission_unverified"',out)
 
     def test_codex_requires_provenance_then_matches_before_mock_submission(self):
         fake,out=self.codex_run();self.assertTrue(any(x[0]=='Input.dispatchKeyEvent' and x[1].get('code')=='KeyV' for x in fake.calls));self.assertIn('"executionVerified": false',out)

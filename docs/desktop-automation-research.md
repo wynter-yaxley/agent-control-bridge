@@ -14,7 +14,7 @@
 | 同上（备选，App Server 深集成） | tianniansz/feishu-codex-bridge (npm) | ★1 / 07-30 | 中（文档最全、安全设计最好） |
 | 同上（飞书+微信 双通道） | GavinYangAI/Comote | ★19 / 08-31 | 中 |
 | 实时读 ChatGPT 桌面对话 | **OpenCLI**（chatgpt-app 适配器 CDP 模式） | ★29,969 / 09-24 | 中-高（macOS 亲测路线，Win 需 POC） |
-| 向桌面应用注入提示词 | yorkartur/codex-[HOST]（CDP 注入桌面聊天） | ★10 / 07-16 | 中（手法可复用） |
+| 向桌面应用注入提示词 | yorkartur/codex-desktop（CDP 注入桌面聊天） | ★10 / 07-16 | 中（手法可复用） |
 | Windows GUI 通用读屏/操控 | **microsoft/UFO³** | ★9,972 / 10-07 | 中（兜底方案） |
 | Codex 进度/成果本地直读 | Codex CLI v0.145+ SQLite 会话档案 + App Server | 官方 | 高（零依赖） |
 
@@ -33,7 +33,7 @@
 
 - **A. CDP 直连（推荐 POC）**：ChatGPT.exe 是 Electron(Chromium 155)，带
   `--remote-debugging-port=9222` 启动即可用 Chrome DevTools Protocol 读 DOM/抓流式响应。
-  OpenCLI chatgpt-app 适配器与 grok-bot-cli 的 chatgpt-[HOST].md 均记录了此路线。
+  OpenCLI chatgpt-app 适配器与 grok-bot-cli 的 chatgpt-desktop.md 均记录了此路线。
   ★UWP/MSIX 变数：AUMID 启动不带自定义参数，需直接执行 WindowsApps 内 exe 带旗标——需 5 分钟实测。
 - **B. UI Automation 读屏**：microsoft/UFO³ / pywinauto / FlaUI 读无障碍树。Electron 应用暴露
   不稳定，兜底用。
@@ -65,7 +65,7 @@
 | dizzynote-cell/codex-remote-bridge | 101 | 2026-10-06 | 飞书+浏览器 遥控 Windows Codex |
 | henryjing96/feishu-codex-bridge | 17 | 2026-04-24 | 私聊/群聊/话题、流式卡片 |
 | GavinYangAI/Comote | 19 | 2026-08-31 | 飞书+微信×Codex Desktop |
-| yorkartur/codex-[HOST] | 10 | 2026-07-16 | CDP 注入 Codex 桌面聊天 |
+| yorkartur/codex-desktop | 10 | 2026-07-16 | CDP 注入 Codex 桌面聊天 |
 | toby1991/chatgpt-cli | 4 | 2026-03-14 | macOS 控 ChatGPT 桌面 + MCP |
 | tianniansz/feishu-codex-bridge | 1 | 2026-08-05 | App Server 深集成、安全设计最全 |
 
@@ -75,7 +75,7 @@
 
 ### P0 CDP 起 ChatGPT.exe —— 成功 ✅
 - 直接执行 `WindowsApps\OpenAI.Codex_26.1002.7124.0_x64__2p2nqsd0c76g0\app\ChatGPT.exe`，带参数启动成功。
-- **必须参数**：`--remote-debugging-port=9222 --remote-allow-origins=*`（缺 allow-origins 会 403 拒绝 WebSocket）。
+- **必须参数**：`--remote-debugging-port=9222` 与受限回环 origin（历史记录曾用 `--remote-allow-origins=*`；当前配置校验拒绝通配符，必须用与端点一致的受限 origin，如 `http://127.0.0.1:9222`）。
 - **无效参数**：`--remote-debugging-address=0.0.0.0` 不生效（CDP 仍监听 127.0.0.1）。
 - 验证：`curl http://127.0.0.1:9222/json/version` 返回 Chrome/155；`/json` 列出 7 个 target。
 

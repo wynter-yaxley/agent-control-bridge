@@ -9,6 +9,32 @@ import { createDb, transaction } from '../src/db.ts';
 import { fixture } from './helpers.ts';
 
 function temporary(t: {after:(fn:()=>void)=>void}) { const root=mkdtempSync(join(tmpdir(),'bridge-db-')); t.after(()=>rmSync(root,{recursive:true,force:true})); return root; }
+test('v3 notifications are preserved by an explicit v4 migration',t=>{
+ const root=temporary(t),path=join(root,'v3.db');let db=createDb({dbPath:path});
+ db.exec("INSERT INTO notification_outbox(id,dedupe_key,principal,payload,state,created_at) VALUES('kept-notice','kept-key','fixture:controller','{}','PENDING','2000-01-01'); DROP TABLE notification_delivery; PRAGMA user_version=3;");db.close();
+ const before=readFileSync(path);assert.throws(()=>createDb({dbPath:path}),/explicitly/);assert.deepEqual(readFileSync(path),before);
+ db=createDb({dbPath:path,allowMigrations:true});try{assert.equal(db.prepare('PRAGMA user_version').get()!.user_version,4);assert.equal(db.prepare('SELECT state FROM notification_outbox WHERE id=?').get('kept-notice')!.state,'PENDING');assert.equal(db.prepare('SELECT COUNT(*) n FROM notification_delivery').get()!.n,0);assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(),[]);}finally{db.close();}
+});
+test('v2 to current requires explicit migration and preserves existing project, mapping and task data',t=>{
+ const root=temporary(t),path=join(root,'v2.db');let db=createDb({dbPath:path});
+ try{
+  db.exec("INSERT INTO projects(id,name,root_path,kind,created_at,updated_at) VALUES('kept-project','Kept project','fixture-root','fixture','2000-01-01','2000-01-01'); INSERT INTO conversation_workspaces(project_id,workspace_path,workspace_key,chatgpt_conversation_id,chatgpt_conversation_name,registered_at) VALUES('kept-project','fixture-root','fixture-root','kept-gpt','Kept project','2000-01-01'); INSERT INTO codex_conversations(conversation_id,project_id) VALUES('kept-codex','kept-project'); INSERT INTO tasks(id,kind,title,status,project_id,created_at,updated_at) VALUES('kept-task','fixture','Kept task','QUEUED','kept-project','2000-01-01','2000-01-01');");
+  // Reduce this isolated fixture to the pre-existing v2 layout, never a business database.
+  db.exec('PRAGMA foreign_keys=OFF; ALTER TABLE tasks DROP COLUMN execution_prompt_id; ALTER TABLE conversation_workspaces DROP COLUMN app_project_id; ALTER TABLE watcher_notifications DROP COLUMN delivered_at;');
+  for(const table of ['notification_delivery','execution_events','execution_runs','background_requests','prompt_dispatches','prompt_generation_ops','project_access','project_operations','notification_outbox'])db.exec(`DROP TABLE ${table}`);
+  db.exec('PRAGMA user_version=2');
+ }finally{db.close();}
+ const before=readFileSync(path);assert.throws(()=>createDb({dbPath:path}),/explicitly/);assert.deepEqual(readFileSync(path),before);
+ db=createDb({dbPath:path,allowMigrations:true});
+ try{
+  assert.equal(db.prepare('PRAGMA user_version').get()!.user_version,4);
+  const task=db.prepare('SELECT * FROM tasks WHERE id=?').get('kept-task')!;
+  assert.equal(task.title,'Kept task');assert.equal(task.project_id,'kept-project');assert.equal(task.status,'QUEUED');assert.equal(task.execution_prompt_id,null);
+  const mapping=db.prepare('SELECT * FROM conversation_workspaces').get()!;assert.equal(mapping.chatgpt_conversation_id,'kept-gpt');assert.equal(mapping.app_project_id,null);
+  assert.equal(db.prepare('SELECT conversation_id FROM codex_conversations').get()!.conversation_id,'kept-codex');
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM project_access').get()!.n,0);assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(),[]);
+ }finally{db.close();}
+});
 test('v0 migration preserves original task data, adds fencing, and legacy ownership fails closed', t => {
   const root=temporary(t), path=join(root,'legacy.db'), legacy=new DatabaseSync(path);
   legacy.exec(readFileSync(new URL('./fixtures/schema-v0.sql',import.meta.url),'utf8'));
@@ -17,7 +43,7 @@ test('v0 migration preserves original task data, adds fencing, and legacy owners
   const f=fixture(path); let closed=false; t.after(()=>{if(!closed)f.db.close();}); const after=f.db.prepare('SELECT * FROM tasks').get()!;
   for (const [key,value] of Object.entries(before)) assert.equal(after[key],value,key);
   assert.equal(after.version,0); assert.equal(after.attempt,0); assert.equal(after.attempt_executor,null);
-  assert.equal(f.db.prepare('PRAGMA user_version').get()!.user_version,2);
+  assert.equal(f.db.prepare('PRAGMA user_version').get()!.user_version,4);
   assert.equal(f.store.executorFinished('legacy',f.worker,undefined,0).ok,false);
   assert.equal(f.store.cancel('legacy',f.worker,undefined,0).ok,false);
   f.db.close(); closed=true; const reopened=createDb({dbPath:path}); assert.equal(reopened.prepare('SELECT COUNT(*) n FROM tasks').get()!.n,1); reopened.close();
@@ -70,5 +96,5 @@ test('isolated subprocess retains OS ACL runtime while excluding arbitrary envir
  process.env[key]='synthetic-only';t.after(()=>{delete process.env[key];});
  writeFileSync(script,`import {createDb} from ${JSON.stringify(new URL('../src/db.ts',import.meta.url).href)};try{const db=createDb({dbPath:process.argv[2]});try{console.log(JSON.stringify({schema:db.prepare('PRAGMA user_version').get().user_version,extraEnvironmentAbsent:process.env[process.argv[3]]===undefined}));}finally{db.close();}}catch(error){console.log(JSON.stringify({aclError:/^Cannot restrict NTFS ACL; database access refused \\(phase=(startup|entered|read|rules|apply|verify|done)\\)$/.test(error.message)?error.message:'Isolated database probe failed'}));}`);
  const result=await silentProcess('isolated-acl',process.execPath,[script,path,key],{timeoutMs:30000});
- assert.ok(result.ok,result.summary);assert.deepEqual(JSON.parse(result.stdout!),{schema:2,extraEnvironmentAbsent:true});
+ assert.ok(result.ok,result.summary);assert.deepEqual(JSON.parse(result.stdout!),{schema:4,extraEnvironmentAbsent:true});
 });

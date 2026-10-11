@@ -1,0 +1,28 @@
+# Merge only this block into the active Hermes profile after deployment review.
+# The variables are non-secret paths. Use Node >=24.19.0 in that environment.
+# This configuration connects MCP; it does not install an ordinary GPT host.
+mcp_servers:
+  acb:
+    command: "${ACB_NODE_EXECUTABLE}"
+    args: ["${ACB_MCP_ENTRY}", "--config", "${ACB_CONFIG_PATH}"]
+    enabled: true
+    protocol: legacy
+    timeout: 150
+    connect_timeout: 30
+    supports_parallel_tool_calls: false
+    tools:
+      include:
+        - acb_capabilities
+        - acb_codex_target_check
+        - acb_project_prepare
+        - acb_project_get
+        - acb_request_submit
+        - acb_request_get
+        - acb_request_retry
+        - acb_notifications_pull
+        - acb_notifications_ack
+        - acb_notifications_status
+      resources: false
+      prompts: false
+# Independent reviewer uses a separate protected caller identity/connection.
+# Never expose acb_review_submit on the Hermes executor/controller connection.

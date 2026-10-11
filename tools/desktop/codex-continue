@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+"""Legacy raw resume stub; use the trusted bridge delivery adapter.
+
+Raw CLI prompts 和 --confirm 不建立 ChatGPT provenance，因此拒绝执行。
+"""
 import argparse, json, sys
 from desktop_common import entry, ToolError
 def main():

@@ -3,6 +3,13 @@ import assert from 'node:assert/strict';
 import { CallerAuthority, type CallerContext } from '../src/caller.ts';
 import { TASK_STATUSES, ALLOWED_TRANSITIONS } from '../src/types.ts';
 import { fixture, snapshot } from './helpers.ts';
+test('task creation rejects a session belonging to another project', t => {
+ const f=fixture();t.after(()=>f.db.close());
+ for(const id of ['fixture-project-a','fixture-project-b'])f.db.prepare('INSERT INTO projects VALUES(?,?,?,?,?,?)').run(id,id,id,'fixture','2000-01-01','2000-01-01');
+ f.db.prepare("INSERT INTO sessions(id,project_id,source,state) VALUES('fixture-session-b','fixture-project-b','manual','unknown')").run();
+ assert.throws(()=>f.store.createTask({projectId:'fixture-project-a',sessionId:'fixture-session-b',kind:'fixture',title:'foreign session'},f.worker),/same project/);
+ assert.equal(f.db.prepare('SELECT COUNT(*) n FROM tasks').get()!.n,0);
+});
 
 test('independent review is the only successful completion entrance', t => {
   const f = fixture(); t.after(() => f.db.close());

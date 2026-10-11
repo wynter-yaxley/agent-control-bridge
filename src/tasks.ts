@@ -79,6 +79,12 @@ export class TaskStore {
     if (input.executor != null && !EXECUTORS.includes(input.executor)) reject('INPUT', 'Invalid executor');
     if (!Number.isSafeInteger(input.priority ?? 0)) reject('INPUT', 'Invalid priority');
     return transaction(this.#db, () => {
+      if (input.sessionId != null) {
+        text(input.sessionId, 'session ID');
+        const session = this.#db.prepare('SELECT project_id FROM sessions WHERE id=?').get(input.sessionId);
+        if (!session) reject('NOT_FOUND', 'Session not found');
+        if (session.project_id !== (input.projectId ?? null)) reject('PROVENANCE', 'Task and session must belong to the same project');
+      }
       const id = uuid(), time = now();
       this.#db.prepare(`INSERT INTO tasks(id,project_id,session_id,kind,title,status,executor,priority,created_at,updated_at,created_by,created_instance)
         VALUES(?,?,?,?,?,'QUEUED',?,?,?,?,?,?)`).run(id, input.projectId ?? null, input.sessionId ?? null, input.kind, input.title,
@@ -100,19 +106,25 @@ export class TaskStore {
     if (!Number.isInteger(limit) || limit < 1 || limit > 200 || !Number.isInteger(offset) || offset < 0) reject('INPUT', 'Invalid pagination');
     return this.#db.prepare(`SELECT * FROM tasks ${clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''} ORDER BY priority DESC,created_at ASC,id ASC LIMIT ? OFFSET ?`).all(...values, limit, offset) as unknown as Task[];
   }
-  claim(id: string, context: CallerContext, leaseSeconds = 600, expectedVersion?: number): TaskResult {
+  claim(id: string, context: CallerContext, leaseSeconds = 600, expectedVersion?: number, preparedPromptId?: string): TaskResult {
     return this.#mutate(() => {
       const caller = this.#caller(context), task = this.#task(id, expectedVersion);
       if (!caller.executor || (task.executor !== null && task.executor !== caller.executor)) reject('OWNER', 'Executor is not assigned to this task');
       if (caller.executor === 'codex') {
-        const prompt = this.#db.prepare("SELECT source,content,prompt_hash FROM prompts WHERE task_id=? AND verified=1 AND delivery_status='DELIVERED' ORDER BY generated_at DESC LIMIT 1").get(id);
+        const prompt = preparedPromptId
+          ? this.#db.prepare("SELECT id,source,content,prompt_hash,source_conversation_id FROM prompts WHERE id=? AND task_id=? AND verified=1 AND delivery_status='PENDING'").get(preparedPromptId, id)
+          : this.#db.prepare("SELECT id,source,content,prompt_hash,source_conversation_id FROM prompts WHERE task_id=? AND verified=1 AND delivery_status='DELIVERED' ORDER BY generated_at DESC,id LIMIT 1").get(id);
         if (!prompt || (prompt.source !== 'chatgpt' && !isDemoDatabase(this.#db))) reject('PROVENANCE', 'A trusted ChatGPT prompt delivered through the bridge is required');
         if (createHash('sha256').update(String(prompt.content)).digest('hex') !== prompt.prompt_hash) reject('PROVENANCE', 'Prompt provenance hash no longer matches');
+        if (!isDemoDatabase(this.#db)) {
+          const mapping = this.#db.prepare('SELECT chatgpt_conversation_id FROM conversation_workspaces WHERE project_id=?').get(task.project_id);
+          if (!mapping || prompt.source_conversation_id !== mapping.chatgpt_conversation_id) reject('PROVENANCE', 'Prompt source does not belong to the task project');
+        }
       }
       if (task.status !== 'QUEUED' || task.claimed_by !== null || task.claimed_instance !== null) reject('STATE', 'Task is not unclaimed QUEUED');
       this.#cas(task, 'RUNNING', { claimed_by: caller.principal, claimed_instance: caller.instance,
         attempt_executor: caller.principal, attempt_instance: caller.instance, attempt: task.attempt + 1,
-        executor: caller.executor, claim_expires_at: lease(leaseSeconds), started_at: now() });
+        executor: caller.executor, claim_expires_at: lease(leaseSeconds), started_at: now(), execution_prompt_id: preparedPromptId ?? null });
       this.#event(id, 'claimed', { executor: caller.executor, instance: caller.instance, attempt: task.attempt + 1 }, caller);
       this.#audit(caller, 'task_claim', `task=${id}`);
       return this.getTask(id)!;
@@ -173,7 +185,8 @@ export class TaskStore {
       if (['SUCCEEDED','WAITING_APPROVAL','CANCELLED','RUNNING'].includes(to)) reject('STATE', 'Use claim/finish/verify/cancel/resume; direct transition forbidden');
       if (to === 'QUEUED') {
         if (!caller.reviewer) reject('AUTH', 'Only an authorized reviewer may requeue');
-        this.#cas(task, to, { claimed_by: null, claimed_instance: null, claim_expires_at: null, started_at: null, error: null, attempt_executor: null, attempt_instance: null });
+        if (this.#db.prepare("SELECT 1 FROM execution_runs WHERE task_id=? AND state IN ('RUNNING','UNCERTAIN')").get(id)) reject('CONFLICT', 'Resolve the external execution outcome before requeue');
+        this.#cas(task, to, { claimed_by: null, claimed_instance: null, claim_expires_at: null, started_at: null, error: null, attempt_executor: null, attempt_instance: null, execution_prompt_id: null });
       } else {
         this.#holder(task, caller);
         if (!['RUNNING','BLOCKED'].includes(task.status)) reject('STATE', 'Use independent verification for review decisions');

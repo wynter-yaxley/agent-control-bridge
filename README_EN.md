@@ -15,6 +15,7 @@ Each Agent retains its role: Hermes coordinates and reports to users; ChatGPT co
 - **Watcher**: event-triggered checks with periodic fallback, notification deduplication, restart recovery and overdue-blocking records.
 - **Desktop tools**: restricted CDP reads and authorized sending interfaces, writes disabled by default; no physical mouse or keyboard takeover.
 - **Credential-free Demo**: isolated Mocks demonstrate ChatGPT → Bridge → Codex → Watcher → independent review.
+- **Native background read diagnostic**: a verified Windows pipe worker reads existing Codex/ChatGPT conversation summaries without a browser, physical input or focus changes. Read success does not authorize production generation. See [native interface](docs/NATIVE_DESKTOP.md).
 
 **Current limits**: the desktop generation adapter cannot yet independently prove GPT-6/High, so production automatic prompt delivery is refused by default. Feishu sending needs a Hermes message adapter. Codex history is a snapshot and does not fully reveal background execution; ledger cancellation does not prove the actual Agent stopped. See [deployment](docs/DEPLOYMENT.md).
 
@@ -35,7 +36,9 @@ Each project registers **one Codex workspace + N Codex conversations in that wor
 
 ### Requirements
 
-The core CLI requires **Node.js >=24.19.0, npm and Git**. It uses Node's built-in SQLite, without third-party runtime dependencies or native SQLite extensions. Core targets Windows/Linux. Desktop integration targets Windows and needs Python >=3.10, optional `websocket-client`, installed and signed-in Agent applications, and controlled CDP. Demo needs none of these desktop prerequisites.
+The core CLI requires **Node.js >=24.19.0, npm and Git**. It uses Node's built-in SQLite without native SQLite extensions. The new MCP entry point uses the pinned official MCP SDK and Zod. Core targets Windows/Linux. The older desktop integration targets Windows and needs Python >=3.10, optional `websocket-client`, installed and signed-in Agent applications, and controlled CDP. Demo needs none of these desktop prerequisites.
+
+Version 0.2.0 adds an isolated background queue, MCP tools, source verification, project provisioning contracts, and receipt-based notifications. The ordinary desktop GPT host binding is still unavailable; standalone MCP reports this blocker and does not execute an unverified Prompt. See [background MCP deployment](docs/BACKGROUND_MCP.md) for the verified scope and remaining integration work.
 
 ```sh
 git clone https://github.com/wynter-yaxley/agent-control-bridge.git

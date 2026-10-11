@@ -1,6 +1,6 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { BridgeError } from './errors.ts';
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 4;
 export function schemaVersion(db: DatabaseSync): number { return Number(db.prepare('PRAGMA user_version').get()!.user_version); }
 export function migrateSchema(db: DatabaseSync, schema: string): void {
   let version = schemaVersion(db);
@@ -49,5 +49,63 @@ export function migrateSchema(db: DatabaseSync, schema: string): void {
       ALTER TABLE prompts ADD COLUMN source_conversation_id TEXT;
       ALTER TABLE prompts ADD COLUMN codex_conversation_id TEXT;
       PRAGMA user_version=2;`);
+    version = 2;
+  }
+  if (version === 2) {
+    db.exec(`
+      ALTER TABLE tasks ADD COLUMN execution_prompt_id TEXT REFERENCES prompts(id);
+      ALTER TABLE conversation_workspaces ADD COLUMN app_project_id TEXT;
+      CREATE TABLE project_access (
+        project_id TEXT NOT NULL REFERENCES projects(id), principal TEXT NOT NULL,
+        PRIMARY KEY(project_id,principal));
+      CREATE TABLE prompt_generation_ops (
+        task_id TEXT PRIMARY KEY REFERENCES tasks(id), request_hash TEXT NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('GENERATING','COMPLETE','UNCERTAIN')),
+        prompt_id TEXT REFERENCES prompts(id), error_code TEXT, created_at TEXT NOT NULL);
+      CREATE TABLE prompt_dispatches (
+        task_id TEXT NOT NULL REFERENCES tasks(id), attempt INTEGER NOT NULL,
+        prompt_id TEXT NOT NULL REFERENCES prompts(id), created_at TEXT NOT NULL,
+        PRIMARY KEY(task_id,attempt));
+      CREATE TABLE background_requests (
+        id TEXT PRIMARY KEY, principal TEXT NOT NULL, instance TEXT NOT NULL,
+        event_key TEXT NOT NULL, request_hash TEXT NOT NULL, task_id TEXT NOT NULL UNIQUE REFERENCES tasks(id),
+        requirement TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('QUEUED','GENERATING','RUNNING','WAITING_APPROVAL','BLOCKED','UNCERTAIN','FAILED')),
+        error_code TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        UNIQUE(principal,event_key));
+      CREATE UNIQUE INDEX one_active_background ON background_requests((1)) WHERE state IN ('GENERATING','RUNNING','UNCERTAIN');
+      CREATE TABLE execution_runs (
+        id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id), attempt INTEGER NOT NULL,
+        prompt_id TEXT NOT NULL REFERENCES prompts(id), project_id TEXT NOT NULL REFERENCES projects(id),
+        holder TEXT NOT NULL, instance TEXT NOT NULL, conversation_id TEXT NOT NULL, workspace_path TEXT NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('RUNNING','WAITING_APPROVAL','UNCERTAIN','FAILED')),
+        execution_id TEXT, error_code TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        UNIQUE(task_id,attempt));
+      CREATE UNIQUE INDEX active_workspace_run ON execution_runs(project_id) WHERE state IN ('RUNNING','UNCERTAIN');
+      CREATE TABLE execution_events (
+        run_id TEXT NOT NULL REFERENCES execution_runs(id), sequence INTEGER NOT NULL,
+        kind TEXT NOT NULL, observed_at TEXT NOT NULL, PRIMARY KEY(run_id,sequence));
+      CREATE TABLE notification_outbox (
+        id TEXT PRIMARY KEY, dedupe_key TEXT NOT NULL UNIQUE, principal TEXT NOT NULL,
+        payload TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('PENDING','INFLIGHT','ACKED')),
+        holder TEXT, instance TEXT, lease_until TEXT, attempts INTEGER NOT NULL DEFAULT 0,
+        receipt_id TEXT, created_at TEXT NOT NULL, acknowledged_at TEXT);
+      CREATE TABLE project_operations (
+        id TEXT PRIMARY KEY, principal TEXT NOT NULL, event_key TEXT NOT NULL,
+        request_hash TEXT NOT NULL, project_id TEXT NOT NULL UNIQUE, name TEXT NOT NULL, root_path TEXT NOT NULL UNIQUE,
+        state TEXT NOT NULL CHECK(state IN ('PROVISIONING','READY','BLOCKED','UNCERTAIN')),
+        error_code TEXT, resources TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        UNIQUE(principal,event_key));
+      CREATE UNIQUE INDEX one_project_provision ON project_operations((1)) WHERE state IN ('PROVISIONING','UNCERTAIN');
+      ALTER TABLE watcher_notifications ADD COLUMN delivered_at TEXT;
+      PRAGMA user_version=3;`);
+    version = 3;
+  }
+  if (version === 3) {
+    db.exec(`CREATE TABLE notification_delivery (
+      notification_id TEXT PRIMARY KEY REFERENCES notification_outbox(id),
+      principal TEXT NOT NULL, destination_hash TEXT NOT NULL, content_hash TEXT NOT NULL,
+      state TEXT NOT NULL CHECK(state IN ('SENDING','SENT','REJECTED','UNCERTAIN')),
+      receipt_id TEXT, error_code TEXT, updated_at TEXT NOT NULL);
+      PRAGMA user_version=4;`);
   }
 }
