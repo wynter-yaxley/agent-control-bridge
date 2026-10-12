@@ -28,7 +28,7 @@
 
 AppHost 的项目服务绑定 Electron WebContents 的 MessagePort；现有进程间 coordinator 注册的是线程 owner/follower 操作，没有发现项目或普通 Chat 创建请求。`ui/message` 在 MCP App iframe 宿主中处理，当前原生工具管道不提供该操作；新会话模式依赖已有 recipient，回执仍没有 server thread ID。`send: false` 只建立草稿。普通 GPT 的进程外创建入口、精确 ID 和 ordinary mode 回读仍未验证，因此生产 `ProjectHost` 未安装，不提供占位创建器或任意 RPC 代理。
 
-本次另从 PR 的 Windows CI 日志定位到原有无副作用 worker 测试的子进程超时。增加预算、固定内联源码及补齐 OS 元数据单独均未解决远端超时；首条命令标记已证明 PowerShell 启动成功，阻塞在脚本内部。OS 元数据实验已撤回。测试保留脱敏输出及 stdin 读取、JSON 解析阶段标记，不再丢弃 stderr；尚未认定根因。固定内联代码不改变脚本策略，预算不再增加。生产管道预算、环境、身份校验和固定只读请求均未变化。此前通过的测试无需据此推断原生创建可用。
+本次另从 PR 的 Windows CI 日志定位到原有无副作用 worker 测试的超时：PowerShell 启动及 stdin 读取完成，阻塞在 `ConvertFrom-Json`。worker 现从 `$PSHOME` 的固定 OS 路径显式加载 Utility 模块，避免依赖自动模块查找；结果以该版本 CI 为准。增加预算与 OS 元数据的实验未解决问题，OS 环境实验已撤回。测试保留脱敏输出及阶段标记，不再丢弃 stderr，不改变脚本策略。生产管道预算、环境、身份校验和固定只读请求均未变化。此前通过的测试无需据此推断原生创建可用。
 
 ## 使用
 

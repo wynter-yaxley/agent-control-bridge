@@ -16,6 +16,7 @@ function ExactBytes($stream,[int]$length) {
  return ,$buffer
 }
 try {
+ Import-Module ([System.IO.Path]::Combine($PSHOME,'Modules','Microsoft.PowerShell.Utility','Microsoft.PowerShell.Utility.psd1'))
  $builder=[System.Text.StringBuilder]::new();$chars=[char[]]::new(1024)
  while(($count=[Console]::In.Read($chars,0,$chars.Length)) -gt 0){if($builder.Length+$count -gt 16384){throw 'IO'};[void]$builder.Append($chars,0,$count)}
  $inputText=$builder.ToString()
