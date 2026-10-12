@@ -4,7 +4,7 @@ export interface OperationResult { operation: string; ok: boolean; code: string;
 export function controlledProcessEnv(): Record<string, string> {
   const env: Record<string, string> = {};
   // OS runtime metadata only; no model, npm authentication or arbitrary user variables.
-  for (const key of ['PATH','Path','SystemRoot','WINDIR','ComSpec','TEMP','TMP','HOME','USERPROFILE','HOMEDRIVE','HOMEPATH','APPDATA','LOCALAPPDATA','XDG_CONFIG_HOME','ProgramFiles','ProgramFiles(x86)','ProgramW6432','ProgramData','ALLUSERSPROFILE','USERNAME','USERDOMAIN']) if (process.env[key] !== undefined) env[key] = process.env[key];
+  for (const key of ['PATH','Path','SystemRoot','SystemDrive','WINDIR','ComSpec','OS','PROCESSOR_ARCHITECTURE','PROCESSOR_ARCHITEW6432','NUMBER_OF_PROCESSORS','TEMP','TMP','HOME','USERPROFILE','HOMEDRIVE','HOMEPATH','APPDATA','LOCALAPPDATA','XDG_CONFIG_HOME','ProgramFiles','ProgramFiles(x86)','ProgramW6432','ProgramData','ALLUSERSPROFILE','USERNAME','USERDOMAIN']) if (process.env[key] !== undefined) env[key] = process.env[key];
   // Built-in cmdlets must resolve from OS-owned modules, even in a sanitized runner.
   if(process.platform==='win32')env.PSModulePath='C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\Modules';
   return env;
