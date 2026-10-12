@@ -10,6 +10,9 @@ import { fileURLToPath } from 'node:url';
 import { NativeDesktopReadClient, checkNativeDesktop } from '../src/native-readonly.ts';
 import { defaults } from '../src/config.ts';
 import { checkNativeProvisioningCapabilities } from '../src/native-capabilities.ts';
+import { WINDOWS_POWERSHELL } from '../src/permissions.ts';
+import { controlledProcessEnv } from '../src/silent-process.ts';
+import { redact } from '../src/security.ts';
 
 const carrier = '00000000-0000-0000-0000-000000000001', target = '00000000-0000-0000-0000-000000000002';
 type Row = Record<string, any>;
@@ -185,10 +188,10 @@ test('native worker: rejects write, extra fields and invalid budgets before open
     { requestJson: '{}', timeoutMs: 0, maxFrameBytes: 4096, maxCandidates: 1, expectedProcessId: null },
     { requestJson: '{}', timeoutMs: 1000, maxFrameBytes: 4096, maxCandidates: 1, expectedProcessId: null, unsafe: true },
   ]) await new Promise<void>((resolve, reject) => {
-    const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn(WINDOWS_POWERSHELL, ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], { env: controlledProcessEnv(), windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
     // Execute fixed inline source without changing Windows script policy.
-    let output = ''; const timer = setTimeout(() => { child.kill(); reject(Error('Owned worker test exceeded its budget')); }, 15000);
-    child.stdout.on('data', data => { output += data.toString(); }); child.stderr.resume(); child.on('error', error => { clearTimeout(timer); reject(error); });
+    let output = '', stderr = ''; const timer = setTimeout(() => { child.kill(); reject(Error(redact(`Owned worker test exceeded its budget (exit=${child.exitCode}, stdout=${output}, stderr=${stderr})`))); }, 15000);
+    child.stdout.on('data', data => { output += data.toString(); }); child.stderr.on('data', data => { stderr += data.toString(); }); child.on('error', error => { clearTimeout(timer); reject(error); });
     child.on('close', code => { clearTimeout(timer); try { const result = JSON.parse(output); assert.equal(code, 0); assert.equal(result.ok, false); assert.equal(result.stage, 'input'); resolve(); } catch (e) { reject(e); } });
     child.stdin.end(JSON.stringify(input));
   });
