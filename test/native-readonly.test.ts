@@ -181,7 +181,8 @@ test('native provisioning diagnostic: changed inventory schema is reviewed befor
 
 test('native worker: rejects write, extra fields and invalid budgets before opening any pipe', { skip: process.platform !== 'win32' }, async () => {
   const helper = fileURLToPath(new URL('../src/native-pipe-worker.ps1', import.meta.url));
-  const encoded = Buffer.from(`[Console]::Error.WriteLine('worker-started');\n${readFileSync(helper, 'utf8')}`, 'utf16le').toString('base64');
+  const script = readFileSync(helper, 'utf8').replace('$inputText=$builder.ToString()', "[Console]::Error.WriteLine('input-read');$inputText=$builder.ToString()").replace('$inputData=$inputText | ConvertFrom-Json', "$inputData=$inputText | ConvertFrom-Json;[Console]::Error.WriteLine('json-parsed')");
+  const encoded = Buffer.from(`[Console]::Error.WriteLine('worker-started');\n${script}`, 'utf16le').toString('base64');
   for (const input of [
     { requestJson: JSON.stringify({ jsonrpc: '2.0', id: carrier, method: 'tools/call', params: { namespace: 'codex_app', callerSource: 'codex', threadId: carrier, tool: 'list_projects', arguments: { create: true }, callId: 'acb-readonly-' + carrier, turnId: 'acb-readonly-' + carrier } }), timeoutMs: 1000, maxFrameBytes: 4096, maxCandidates: 1, expectedProcessId: null },
     { requestJson: JSON.stringify({ jsonrpc: '2.0', id: carrier, method: 'tools/call', params: { tool: 'send_message_to_thread' } }), timeoutMs: 1000, maxFrameBytes: 4096, maxCandidates: 1, expectedProcessId: null },
