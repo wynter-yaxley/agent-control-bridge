@@ -15,6 +15,7 @@ import { requireNoSecrets } from './security.ts';
 import { resolve } from 'node:path';
 import { inspectCodexThread } from './codex-app-server.ts';
 import { checkNativeDesktop } from './native-readonly.ts';
+import type { NativeChatMessageHost } from './native-messages.ts';
 
 export interface BackgroundHostBindings {
   ordinaryChat?: OrdinaryChatHost;
@@ -23,6 +24,7 @@ export interface BackgroundHostBindings {
   executorContext?: CallerContext;
   /** Trusted host may route this read diagnostic to its Windows process. */
   nativeInspector?: typeof checkNativeDesktop;
+  chatgptMessages?: NativeChatMessageHost;
 }
 export class BackgroundBridge {
   readonly outbox: NotificationOutbox;
@@ -91,6 +93,14 @@ export class BackgroundBridge {
     const actual = await withDeadline(signal => (this.host.nativeInspector ?? checkNativeDesktop)({ carrierThreadId: conversationId,
       conversationId: String(mapping.chatgpt_conversation_id), expectedTitle: String(mapping.chatgpt_conversation_name), ...this.config.nativeInterface, signal }), this.config.nativeInterface.timeoutMs);
     return { ...actual, executionAuthorized: false, fullWorkflowReady: false };
+  }
+  async sendChatgptMessage(projectId: string, message: string) {
+    const caller = this.controller();
+    const mapping = this.db.prepare('SELECT w.chatgpt_conversation_id,w.chatgpt_conversation_name FROM conversation_workspaces w JOIN project_access a ON a.project_id=w.project_id WHERE w.project_id=? AND a.principal=?').get(projectId, caller.principal);
+    if (!mapping) throw new BridgeError('AUTH', 'ChatGPT target is not registered to this controller/project');
+    if (!this.host.chatgptMessages) throw new BridgeError('UNSUPPORTED', 'Authorized native ChatGPT message tools are not installed');
+    requireNoSecrets(message);
+    return this.host.chatgptMessages.sendAndWait({ conversationId: String(mapping.chatgpt_conversation_id), name: String(mapping.chatgpt_conversation_name) }, message, this.config.background);
   }
   submit(input: { eventKey: string; projectId: string; title: string; requirement: string; priority?: number }): ReturnType<BackgroundBridge['get']> {
     const caller = this.controller();

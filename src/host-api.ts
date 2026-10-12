@@ -12,6 +12,8 @@ export { ProjectProvisioner } from './project-provisioner.ts';
 export type { ProjectHost, ProjectHostCapabilities, ProjectBundleEvidence, ProjectResources, ProjectOperation } from './project-provisioner.ts';
 export { createOrdinaryChatAdapter } from './ordinary-chat.ts';
 export type { OrdinaryChatHost, OrdinaryChatCapabilities } from './ordinary-chat.ts';
+export { NativeChatMessageHost, observeNativeChatMessage } from './native-messages.ts';
+export type { NativeChatTools, NativeChatPage, NativeChatMessageResult } from './native-messages.ts';
 export { TaskStore } from './tasks.ts';
 export { HermesGatewayAdapter } from './hermes-gateway.ts';
 export { NotificationDispatcher } from './notification-delivery.ts';

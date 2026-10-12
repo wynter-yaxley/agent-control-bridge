@@ -9,6 +9,7 @@ import { defaults } from '../src/config.ts';
 import { BackgroundBridge, type BackgroundHostBindings } from '../src/background.ts';
 import type { OrdinaryChatCapabilities, OrdinaryChatHost } from '../src/ordinary-chat.ts';
 import type { BackgroundExecutor } from '../src/background-runner.ts';
+import { NativeChatMessageHost, type NativeChatPage } from '../src/native-messages.ts';
 
 export const hostCapabilities: OrdinaryChatCapabilities = { source: 'application-host', ordinaryChat: true, background: true, exactConversation: true, completeMessages: true, actualGenerationParameters: true, createOrdinaryChat: true, createWorkspace: true, models: ['fixture-model'], reasoningEfforts: ['fixture-effort'] };
 function setup(t: { after: (fn: () => void) => void }, install = true) {
@@ -98,4 +99,23 @@ test('background: starting another observer never changes a possibly live task h
   const f = setup(t), request = f.submit(); f.db.prepare("UPDATE background_requests SET state='RUNNING' WHERE id=?").run(request.requestId);
   f.bridge.start(); await f.bridge.shutdown();
   assert.equal(f.bridge.get(request.requestId).state, 'RUNNING'); assert.equal(f.executed(), 0);
+});
+
+test('background: native message host uses the registered GPT and never executes the reply', async t => {
+  const f = setup(t, false); let reads = 0, sends = 0;
+  f.host.chatgptMessages = new NativeChatMessageHost({
+    readThread: async input => {
+      assert.equal(input.threadId, 'fixture-gpt'); assert.equal(input.maxOutputCharsPerItem, 20000);
+      const result: NativeChatPage = { thread: { id: 'fixture-gpt', kind: 'chatgpt', title: 'fixture-project', status: { type: 'idle' } }, turns: [] };
+      if (++reads > 1) result.turns.push({ id: 'fixture-turn', status: 'completed', error: null, items: [
+        { type: 'userMessage', id: 'fixture-turn', content: [{ type: 'text', text: '[TEST] marker' }] },
+        { type: 'agentMessage', id: 'fixture-reply', text: '[TEST] reply' },
+      ] });
+      return result;
+    },
+    sendMessage: async input => { sends++; assert.deepEqual(input, { threadId: 'fixture-gpt', prompt: '[TEST] marker' }); return { threadId: input.threadId }; },
+  });
+  const result = await f.bridge.sendChatgptMessage('project', '[TEST] marker');
+  assert.equal(result.status, 'completed'); assert.equal(sends, 1); assert.equal(f.executed(), 0);
+  assert.equal(f.db.prepare('SELECT COUNT(*) n FROM prompts').get()!.n, 0);
 });

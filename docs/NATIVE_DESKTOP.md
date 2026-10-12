@@ -95,7 +95,29 @@ Windows Appx 清单未注册 `windows.appService`；已有协议、执行别名�
 
 可保留全部约束的实现方向仍是由可信桌面宿主开放两个专用操作：调用原生项目服务并明确禁止切换当前项目，返回可由 `list_projects` 核对的 ID；创建普通 Chat，返回精确会话 ID、模式与同名标题。已有内部函数是宿主侧的实现基础，不是桥可以直接调用的公开接口。当前未找到受支持的外部入口，两个创建器和完整 workflow 仍未完成；没有增加占位创建器、任意 RPC 代理或额外生产校验逻辑，也未重复已有测试。新增静态文件哈希和只读检查证据保存在本次 `creation-research-20261012` 目录。
 
-## 资料
+## 原生消息接口开发（2026-10-12，PR #2）
+
+本轮阅读三个项目的实际源码并固定版本：
+
+| 项目/源码 | 可借鉴内容 | 当前边界 |
+|---|---|---|
+| [kajmahal message-service](https://github.com/kajmahal/chatgpt-conversations-mcp/blob/4c2640d88cc95df1fa3d4d1c60f433d452c97351/src/message-service.mjs) | 发送前记录轮次、只发送一次、精确匹配新用户消息 | 使用内部 `codex-browser-use-*` 管道；`kind=chatgpt` 不能独立证明普通 Chat，非空回复也不能证明完整正文 |
+| [Ares codex-desktop](https://github.com/AresQQQQQ/ChatGPT-MCP-Bridge/blob/bf1f502e88186efa5ffca807b904dda06b1961fb/src/codex/codex-desktop.ts) | `codex-ipc` 的 Owner/Follower 目标路由、按 thread/turn 关联事件 | 路由面向 Codex；没有普通 GPT 创建/发送服务；其 deep-link 激活与恢复前台不符合本项目约束 |
+| [kxn private stdio](https://github.com/kxn/codex-remote-feishu/blob/4522572415ae3defb648c3c4efe1a4c675c0c815/internal/app/appserverargs/private_stdio.go)及 [event_coalescer](https://github.com/kxn/codex-remote-feishu/blob/4522572415ae3defb648c3c4efe1a4c675c0c815/internal/app/wrapper/event_coalescer.go) | Daemon 自己管理子进程；事件按 thread/turn/item 关联 | 明确隔离于共享 daemon；创建自己的 stdio App Server，不能代表桌面原生 workspace |
+
+未确认 OpenAI 对第三方使用这两条内部命名管道执行写入的公开授权依据。社区许可仅覆盖社区源码。当前不增加管道写入，也不把签名、同用户身份、工具目录或成功响应当作授权证明。
+
+新增 `NativeChatMessageHost`，通过 [host-api](../src/host-api.ts) 安装两个精确类型的宿主工具回调 `readThread` 与 `sendMessage`；回调必须由受信任的宿主通过已授权的工具渠道提供，并负责目标操作的真实用户授权和取消。JSON/MCP 输入不能安装回调或授予写权限。它使用 [native-messages](../src/native-messages.ts) 实现一次发送、预算内回读、新用户轮次与对应回复 ID 关联。`BackgroundBridge.sendChatgptMessage(projectId, message)` 只解析已授权控制者在登记表中的固定 GPT 目标，预算取统一 `background` 配置。未新增模型可调用的消息工具；未自动给独立进程开放桌面服务。
+
+读回只接受精确 ID/名称、完整新用户文本；回复需线程 idle、轮次 completed、有正文且没有截断或 `chatgpt-content-reference`。已安装版本的 ChatGPT 轮次 completed 是合成值，不能单独作为生成完成证明。发送异常不重发，读/写错误返回阶段与结构化错误码；预算超时抛出 TIMEOUT 并要求原目标回读核验。`delivery_uncertain` 或 `sent_reply_pending` 均不能自动重新发送。
+
+真实测试通过当前任务**正式提供**的 `send_message_to_thread` 和 `read_thread` 工具进行，用户明确指定已有“测试消息”聊天授权一次发送。精确控制文本落入一个新用户轮次，宿主随后返回同轮次的助手消息 ID；只读前台窗口检查未见变化。初始回读返回旧快照，后续回读才出现新轮次，因此发送收据本身不算投递确认。回复文本仅为原生内容引用，即使 `includeOutputs=true` 也未得到正文。新增观察器在该真实响应上返回 `reply_content_unavailable`，未伪造回声匹配或工程 Prompt 成功。本轮不重发，不改该聊天标题或删除已有聊天。
+
+这是**已有 ChatGPT 聊天投递和回复记录确认**的验证，仍不证明普通 Chat/Work 模式、回复完整正文或实际模型/思考强度。不能将 `NativeChatMessageHost` 自动安装为 `OrdinaryChatHost`，既有生产 Prompt 来源门禁继续有效。独立常驻 Bridge 尚无受支持的宿主工具回调注入通道，所以上述库能力不等于 standalone 进程已打通。
+
+三个参考实现均未提供受支持的普通 GPT 创建或原生 saved workspace 静默创建接口。本轮没有新的创建能力证据：`projects.createLocal` 的目录信任/选中项目约束、`projectToolsEnabled` 的目录发现差异、`createChatGptMcpAppThread` 的内部上下文、`ui/message` 无精确创建回执仍是原先阻断。公开 [消息扩展](https://developers.openai.com/plugins/build/extensions)支持当前/新对话；[MCP Events](https://developers.openai.com/plugins/build/mcp-events)的支持面仍是 Work/Cloud/dots，不能替代普通 GPT 后台创建授权或精确 ID 回读。
+
+### 资料
 
 - [OpenAI 插件扩展](https://developers.openai.com/plugins/build/extensions)及其[消息扩展规范](https://github.com/openai/mcp-extensions/blob/main/docs/spec.md#uimessage-extensions)。
 - [OpenAI MCP Events 支持范围](https://developers.openai.com/plugins/build/mcp-events)。
