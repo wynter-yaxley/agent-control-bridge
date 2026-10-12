@@ -28,7 +28,7 @@
 
 AppHost 的项目服务绑定 Electron WebContents 的 MessagePort；现有进程间 coordinator 注册的是线程 owner/follower 操作，没有发现项目或普通 Chat 创建请求。`ui/message` 在 MCP App iframe 宿主中处理，当前原生工具管道不提供该操作；新会话模式依赖已有 recipient，回执仍没有 server thread ID。`send: false` 只建立草稿。普通 GPT 的进程外创建入口、精确 ID 和 ordinary mode 回读仍未验证，因此生产 `ProjectHost` 未安装，不提供占位创建器或任意 RPC 代理。
 
-本次另从 PR 的 Windows CI 日志定位到原有无副作用 worker 测试的冷启动超时，将测试子进程预算从 5 秒改为 15 秒；生产管道预算、身份校验和固定只读请求均未变化。此前通过的测试无需据此推断原生创建可用。
+本次另从 PR 的 Windows CI 日志定位到原有无副作用 worker 测试的子进程超时。仅将 5 秒改为 15 秒后，本机干净安装通过，但 Windows CI 仍在同处超时，冷启动解释不充分。`-File` 在本机默认脚本策略下不可用；没有放宽该策略。测试改为直接编码固定 worker 源码，移除运行时读取文件并创建 `ScriptBlock` 的包装，沿用既有 ACL helper 的固定内联代码方式，不再继续增加预算。生产管道预算、身份校验和固定只读请求均未变化。此前通过的测试无需据此推断原生创建可用。
 
 ## 使用
 
