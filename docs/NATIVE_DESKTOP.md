@@ -12,11 +12,23 @@
 
 `checkNativeProvisioningCapabilities` 只返回诊断证据与 `BLOCKED`，不能充当创建宿主。未来新增工具、未知目标、引用 schema 需要审核；schema 广告、Work 目标、改名能力和实验 App Server 项目均不能将普通 GPT 或原生 workspace 创建标为已验证。目录不存在某能力不是该产品永久不支持的证明。
 
-继续核对已安装的 `26.1007.2314.0` 应用静态代码后，发现桌面确有 `projects.createLocal`，内部支持 `setActive: false`；MCP 包装工具名为 `create_project`，其目录注册受 `projectToolsEnabled` 控制。本机实际目录没有开放该工具；包装实现也未传入 `setActive`，不能据内部参数推断外部工具支持后台创建。没有调用未开放的工具或修改功能开关。
+继续核对已安装的 `26.1007.2314.0` 应用静态代码后，发现桌面确有 `projects.createLocal`，内部支持 `setActive: false`；MCP 包装工具名为 `create_project`，其目录注册受 `projectToolsEnabled` 控制。本机实际目录没有广告该工具；包装实现也未传入 `setActive`，不能据内部参数推断外部工具支持后台创建。后续真实调用修正了“目录未广告即不可调用”的推断，见下文。
 
 同一签名宿主的管道还注册了 `taskWorkspace/prepare`、`taskProject/list`、`taskProject/assign`，它们要求选中的桌面 executor environment。`prepare` 只分配目录并检查已有 projectId，不创建桌面项目。桌面 App Server 后端的 `storeProject` 更新映射与既有项目元数据，没有把未知外部项目写入桌面项目缓存；因此单独 `project/create` 仍不能充当原生 workspace 创建器。
 
 普通 Chat 的实际创建函数为 `createChatGptMcpAppThread`；扩展 `ui/message` 的新会话分支按宿主 recipient 的 conversationOrigin 选择落点，内部取得的 server thread ID 没有通过该扩展返回（结果为 `{}`）。这证明存在内部实现，尚未证明桥能后台选择普通模式并获取精确 ID。没有执行安装包代码、注入脚本、修改桌面状态或读取凭据；本轮仅记录六个相关静态文件的哈希与上述调用关系。
+
+## PR #2 原生调用验证（2026-10-12）
+
+同一 OpenAI 签名桌面宿主、同用户及同系统会话下，向静态代码中已确认的 `create_project` 处理器发送空参数，收到 `create_project received invalid arguments.`。随后固定 `list_hosts({})` 调用成功，返回 local host 及当前已批准的 workspace root。两次调用均未观察到前台窗口改变，没有创建资源或运行模型。开发验证仅证明处理器及只读目录调用可达，不能证明有效创建成功。
+
+`projectToolsEnabled` 在本版本控制 `list_hosts` / `create_project` 的目录注册；执行器保留了创建分支，未发现该分支再次检查同一门控。没有修改功能开关，也没有把这个版本观察当成稳定公开 API。
+
+有效创建仍存在具体静默阻断：`projects.createLocal` 调用精确路径的 folder consent，未知信任的新目录会进入 `BrowserWindow.show()` 和桌面确认回调；父目录的批准不能替代新目录确认。该调用没有传入自动新建目录的例外参数，MCP 包装也没有传入 `setActive: false`。选中项目变化是否影响编辑焦点尚未实测，不能承诺静默。托管 worktree 的创建和附件登记没有补齐这些条件；没有发出可能打开确认窗口的有效创建请求。
+
+AppHost 的项目服务绑定 Electron WebContents 的 MessagePort；现有进程间 coordinator 注册的是线程 owner/follower 操作，没有发现项目或普通 Chat 创建请求。`ui/message` 在 MCP App iframe 宿主中处理，当前原生工具管道不提供该操作；新会话模式依赖已有 recipient，回执仍没有 server thread ID。`send: false` 只建立草稿。普通 GPT 的进程外创建入口、精确 ID 和 ordinary mode 回读仍未验证，因此生产 `ProjectHost` 未安装，不提供占位创建器或任意 RPC 代理。
+
+本次另从 PR 的 Windows CI 日志定位到原有无副作用 worker 测试的冷启动超时，将测试子进程预算从 5 秒改为 15 秒；生产管道预算、身份校验和固定只读请求均未变化。此前通过的测试无需据此推断原生创建可用。
 
 ## 使用
 

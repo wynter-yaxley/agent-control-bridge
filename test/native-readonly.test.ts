@@ -186,7 +186,8 @@ test('native worker: rejects write, extra fields and invalid budgets before open
     { requestJson: '{}', timeoutMs: 1000, maxFrameBytes: 4096, maxCandidates: 1, expectedProcessId: null, unsafe: true },
   ]) await new Promise<void>((resolve, reject) => {
     const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
-    let output = ''; const timer = setTimeout(() => { child.kill(); reject(Error('Owned worker test exceeded its budget')); }, 5000);
+    // Cold PowerShell startup under the parallel Windows CI suite can exceed 5s.
+    let output = ''; const timer = setTimeout(() => { child.kill(); reject(Error('Owned worker test exceeded its budget')); }, 15000);
     child.stdout.on('data', data => { output += data.toString(); }); child.stderr.resume(); child.on('error', error => { clearTimeout(timer); reject(error); });
     child.on('close', code => { clearTimeout(timer); try { const result = JSON.parse(output); assert.equal(code, 0); assert.equal(result.ok, false); assert.equal(result.stage, 'input'); resolve(); } catch (e) { reject(e); } });
     child.stdin.end(JSON.stringify(input));
