@@ -9,11 +9,12 @@ mcp_servers:
     args: ["${ACB_MCP_ENTRY}", "--config", "${ACB_CONFIG_PATH}", "--read-only"]
     enabled: true
     protocol: legacy
-    # Sample budget: inspect + 4 provisioning phases, each bounded by
-    # background.timeoutMs, plus a 30-second client margin.
-    # 630 matches config.example.json (120000 ms); use 3030 for 600000 ms.
-    # Derive this value again when the unified configuration budget changes.
-    timeout: 630
+    # Longest read: CDP + UIA fallback (2 * background.timeoutMs),
+    # then nativeInterface.timeoutMs, plus 30 seconds client margin.
+    # config.example.json: 2 * 120 + 30 + 30 = 300 seconds.
+    # Recalculate if those operation budgets change. Ordinary ledger reads are
+    # immediate; durable engineering uses requestId + the separate worker.
+    timeout: 300
     connect_timeout: 30
     supports_parallel_tool_calls: false
     tools:

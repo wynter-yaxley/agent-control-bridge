@@ -2,7 +2,7 @@
 
 A configurable Windows 10/11 local stdio MCP tool. Hermes/Feishu is the preferred controller; other compatible MCP clients can use the same protocol. GPT produces engineering prompts; the bridge verifies conversation/message provenance and hashes; Codex executes; GPT reviews results; an independent authorized reviewer accepts delivery. No extra token-billed inference API is introduced.
 
-Each project has a native Codex workspace, one same-name ordinary GPT chat, and registered Codex chats. Version 0.2.0 remains pending independent acceptance. A historical isolated loop needed UI intervention and recovery; it does not establish acceptance of the current stricter path. Workspace/GPT creation may change pages and editor focus with trusted approval. Current live checks found no CDP endpoint and UIA returned titleOnly. No live GUI writes or Hermes/Feishu loop were performed in this round. Unknown GPT model/effort values stay null.
+Each project has a native Codex workspace, one same-name ordinary GPT chat, and registered Codex chats. Version 0.2.0 remains pending independent acceptance. A historical isolated loop needed UI intervention and recovery; it does not establish acceptance of the current stricter path. Workspace/GPT creation may change pages and editor focus with trusted approval. The latest read-only check found no configured CDP listener and UIA returned unavailable; an earlier titleOnly observation does not establish current availability. No live GUI writes or Hermes/Feishu loop were performed. Unknown GPT model/effort values stay null.
 
 ## Install
 
@@ -25,6 +25,10 @@ No second instance/profile/browser/WebView, application restart/termination, inj
 Execution-result MCP calls now return IDs/hashes/lengths by default. Add includeContent:true for complete output/feedback. Project operations return recorded resources directly. Prefer notifications; reconcile uncertain original generation/execution/feedback without resending/rerunning.
 
 Only independent acceptance produces SUCCEEDED. Controller, Codex executor and reviewer do not overlap. No policy hot reload or authority from config/env/MCP text. Same-OS malicious code is outside the strong-isolation claim. Crash recovery preserves original IDs/phases and observes original turns without rerun; uncertainty in one project no longer freezes unrelated prepared background work. Tasks use an explicit registered Codex target/default rather than lexical ordering.
+
+Recovered RUNNING_OBSERVED executions synchronize task/run/request completion and send feedback once; ordinary RUNNING work is not eligible. A saved verified PENDING prompt resumes without GPT regeneration only after proven process exit, with COMPLETE generation, a queued task and no dispatch/execution evidence. Known Windows PID absence is distinct from query failure. Native Codex creation does not promise a recoverable operationKey/initialization marker: missing original IDs require a real host receipt, otherwise remain uncertain without probes or replacement creation. CDP fallback retains cdpError.
+
+The read-only Hermes sample uses a 300-second timeout: two 120-second CDP/UIA budgets, 30-second native verification and 30-second client margin. Recalculate from unified configuration when budgets change; engineering runs in the independent worker, not a longer MCP request.
 
 ## Data and deployment
 

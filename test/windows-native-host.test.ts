@@ -45,6 +45,16 @@ test('windows native host: enabled configuration cannot grant UI initialization'
   await assert.rejects(host.createWorkspace('fixture-project','D:\\fixture',new AbortController().signal),{code:'AUTH'});
   assert.equal(writes,0);
 });
+
+test('windows native host: Codex recovery needs a recorded formal ID, not a fabricated initialization marker',async()=>{
+ const config=defaults();let bodies=0,creates=0;
+ const native:WindowsNativeTools={listProjects:async()=>({projects:[]}),listThreads:async()=>({pinnedThreads:[],threads:[{id:'fixture-original',kind:'codex',title:'same title',projectId:'native-fixture',cwd:'D:\\fixture'},{id:'fixture-other',kind:'codex',title:'same title',projectId:'native-fixture',cwd:'D:\\fixture'}]}),readThread:async()=>{bodies++;throw new Error('No probe body should be read');},createCodexThread:async()=>{creates++;return {threadId:'unused'};}};
+ const host=createWindowsNativeProjectHost({config,native,authorizeInitialization:async()=>false});
+ const resources={appProjectId:'native-fixture',name:'fixture',workspacePath:'D:\\fixture',chatgptConversationId:'fixture-gpt',initializationKey:'fixture-operation'};
+ await assert.rejects(host.observePartial!(resources,'codex',new AbortController().signal),{code:'UNSUPPORTED'});
+ const result=await host.observePartial!({...resources,codexConversationId:'fixture-original'},'codex',new AbortController().signal);
+ assert.equal(result.codexConversationId,'fixture-original');assert.equal(bodies,0);assert.equal(creates,0);
+});
 // Component fixtures prove ordering and identity gates, not a live desktop send.
 test('windows native host: same title with a different UI conversation ID is rejected',async()=>{
   const config=defaults();

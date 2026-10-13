@@ -72,7 +72,7 @@ export function uuid(): string { return randomUUID(); }
 let ownProcessToken: string | undefined;
 function processToken(pid: number): string | null {
   if(process.platform==='win32') {
-    const script=`$ErrorActionPreference='Stop';$p=Get-Process -Id ${pid} -ErrorAction SilentlyContinue;if($p){[Console]::Out.Write($p.StartTime.ToUniversalTime().Ticks)}`;
+    const script=`$ErrorActionPreference='Stop';$p=Get-Process | Where-Object Id -eq ${pid};if($p){[Console]::Out.Write($p.StartTime.ToUniversalTime().Ticks)}`;
     const token=execFileSync(WINDOWS_POWERSHELL,['-NoProfile','-NonInteractive','-Command',script],{windowsHide:true,timeout:10000,encoding:'utf8',stdio:['ignore','pipe','pipe']}).trim();
     return token || null;
   }

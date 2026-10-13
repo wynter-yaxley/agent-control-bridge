@@ -8,7 +8,7 @@
              ↑                    Bridge / SQLite          ↓
              └──── 通知、实际交付、独立验收 ←───────────────┘
 
-0.2.0 为待独立验收开发版本。历史隔离 GPT → 原生 Codex → GPT 闭环曾需要人工页面定位和恢复，不能替代当前更严格写链路的验收。**创建 Workspace 和普通 GPT 允许正常 UIA、目录确认和页面/编辑焦点变化，不要求完全静默。** 当前实机 CDP 不可用，UIA 只读返回 titleOnly；现有聊天写入仍被精确身份要求阻断。本轮未执行真实 GUI 写入或 Hermes/飞书闭环。实际 GPT 模型/思考强度未知记录 null，不阻断真实来源。
+0.2.0 为待独立验收开发版本。历史隔离 GPT → 原生 Codex → GPT 闭环曾需要人工页面定位和恢复，不能替代当前更严格写链路的验收。**创建 Workspace 和普通 GPT 允许正常 UIA、目录确认和页面/编辑焦点变化，不要求完全静默。** 最新只读检测中配置的 CDP 端点没有监听，UIA 返回 unavailable、未取得可信名称；此前曾实测 titleOnly，不能当作当前状态。现有聊天写入仍被精确身份要求阻断。本轮未执行真实 GUI 写入或 Hermes/飞书闭环。实际 GPT 模型/思考强度未知记录 null，不阻断真实来源。
 
 ## 能力与自动化边界
 
@@ -114,7 +114,7 @@ stdout 只承载 MCP，安全错误写 stderr。默认入口只注册 8 个只�
 
 Controller、Executor、Reviewer 必须是不同的受保护主体/连接，Reviewer 不兼任 Controller 或 Codex。普通 Controller 不能提交最终验收或执行 Reviewer 专属恢复。策略与代码在受控启动时加载，不热更新授权；改源码不能提升运行中的权限。同 OS 用户恶意代码仍可破坏本机运行时，不能声称强隔离。实际本机策略已取消 Controller/Reviewer 重叠，独立 Reviewer 仍需部署者提供。
 
-[Hermes MCP 样例](config/hermes-mcp.example.yaml) 开放 8 个查询/诊断工具；可信写入口有 20 个工具，包括设置默认 Codex。Reviewer 使用单独受保护连接。路径变量替换为实际非秘密路径。项目创建调用有界；工程任务提交立即返回 ID，执行与客户端预算分离；超时不能盲目重发。
+[Hermes MCP 样例](config/hermes-mcp.example.yaml) 开放 8 个查询/诊断工具；可信写入口有 20 个工具，包括设置默认 Codex。Reviewer 使用单独受保护连接。路径变量替换为实际非秘密路径。只读示例 timeout 为 300 秒：最长 GPT 诊断顺序为 CDP 120 秒、UIA 回退 120 秒、原生核验 30 秒，加 30 秒客户端余量；预算变化时按统一配置重新计算，普通台账查询通常立即返回。同步项目创建另按实际阶段设置预算；工程任务提交立即返回 ID，由独立 worker 执行，不能用延长 MCP 超时替代它，也不能因客户端断开重新发送。
 
 WSL Hermes 使用可执行的 Windows Node 绝对路径（WSL 下为 /mnt/c/.../node.exe），入口/配置/库参数使用 Windows 绝对路径，Node >=24.19.0；不要把 Linux Node 当作 Windows UIA 宿主。tools/hermes/mcp_probe.py 只验证隔离协议，不是真实写宿主。HermesGatewayAdapter 复用已验证飞书事件和可信项目路由；NotificationDispatcher 持久保存回执，不另起事件消费者。
 
@@ -124,7 +124,7 @@ Hermes 虚拟环境 MCP SDK 已连接 Windows 编译入口与真实 OS 策略，
 
 ## 精确会话与完成边界
 
-CDP 优先复用当前实例已有端点，先校验端口所属签名进程与唯一已有 ChatGPT WebView，再比对 /c/UUID 和 Native 登记 ID。不能连接即回退 UIA Document.Current.Name，返回 titleOnly、conversationId:null 和空消息，不反复扫描 UUID；连名称也不可得则 unavailable。identityVerified 与标题证据严格区分。
+CDP 优先复用当前实例已有端点，先校验端口所属签名进程与唯一已有 ChatGPT WebView，再比对 /c/UUID 和 Native 登记 ID。不能连接或无法证明唯一目标即回退 UIA Document.Current.Name，返回 titleOnly、conversationId:null 和空消息，不反复扫描 UUID；连名称也不可得则 unavailable。诊断保留 cdpError，不把回退当作 CDP 成功。identityVerified 与标题证据严格区分。
 
 现有聊天写入仍需在同一桌面操作中、修改草稿前和提交前核对精确身份，并在提交后验证原生回执。当前 UIA URI 只有通用 index.html，跨 CDP/UIA 的原子目标保证也未打通，故拒绝工程写入。新聊天仅在本次可信创建批准下有例外：确认新建空白普通聊天，以唯一 ACB_INIT 标识发送不含工程任务的初始化消息，关联原生新增 ID/精确用户消息/类型/同名标题；不确定即保留原阶段，不重发。Codex 不使用 GPT 页面 URI，也没有 UIA Work 工程发送兜底。
 
@@ -184,6 +184,12 @@ CDP 优先复用当前实例已有端点，先校验端口所属签名进程与�
 恢复应用先报告、确认退出、取得事件批准、核对原映射；不可结束仍运行的应用。页面不稳定/账户挑战须如实报告，不能保证零风控。
 
 worker 启动按 PID/进程启动标识核对原持有者。已退出/状态未知的生成、执行、反馈和项目操作保留 ID 转入 UNCERTAIN 并通知；不会把存活持有者的工作抢走。未知任务只限制同项目及有关 GUI 阶段，其他项目已准备好的可信 Prompt 可继续后台执行；真实 RUNNING 后台任务仍遵守单并发。锁屏或非可交互桌面拒绝 GUI 副作用，已授权 App Server 执行继续。持久执行的 RPC 有单次预算，整个工程轮次不使用十分钟总超时。
+
+Prompt 已完整保存但尚未投递时，只有原进程确定退出、来源/会话/正文 Hash 有效、生成 COMPLETE、Prompt PENDING、Task QUEUED 且没有 dispatch/execution 证据，才恢复原请求继续投递；不重新调用 GPT。已经 UNCERTAIN 的此类旧记录也可用 reconcile_generation 恢复，未知投递保留原证据。Windows 不存在 PID 的正常查询不再被误判为未知；实际查询错误仍是未知。
+
+原执行从 UNCERTAIN 观察为 RUNNING_OBSERVED 后，再取得原完成回执时同步 Task、Execution 与 Request 到 WAITING_APPROVAL，并检查更新行数。普通 RUNNING 不接受这一恢复入口；重复完成对账不重复通知、工程执行或 GPT 反馈。
+
+正式原生 Codex 创建回调只保证 threadId，以及可能提供的 projectId；当前没有可回读的 operationKey 契约。恢复不再搜索从未发送的 ACB_CODEX_INIT。已记录的原 threadId 必须回读原生项目/目录；如果创建成功但 ID 未保存，只有宿主另有真实原操作回执才能恢复，否则保持 UNCERTAIN，不按同名清单猜测、不探针发送、不重新创建。保留已建 Workspace、GPT 和路径。
 
 ## 数据管理
 

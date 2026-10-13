@@ -7,6 +7,8 @@ import { ConversationRegistry } from '../src/topology.ts';
 import { TaskStore } from '../src/tasks.ts';
 import { defaults } from '../src/config.ts';
 import {processOwner} from '../src/db.ts';
+import {PromptPipeline,promptHash} from '../src/prompts.ts';
+import {createOrdinaryChatAdapter} from '../src/ordinary-chat.ts';
 import { BackgroundBridge, type BackgroundHostBindings } from '../src/background.ts';
 import type { OrdinaryChatCapabilities, OrdinaryChatHost } from '../src/ordinary-chat.ts';
 import type { BackgroundExecutor } from '../src/background-runner.ts';
@@ -167,6 +169,55 @@ test('background: lost execution receipt is read back without rerunning and comp
   assert.equal(f.bridge.executionResult(request.requestId).feedbackState,'COMPLETE');
 });
 
+test('background: original RUNNING_OBSERVED completion synchronizes all states and feedback once',async t=>{
+ const f=setup(t),execute=f.executor.execute;let receipt:Awaited<ReturnType<typeof execute>>,observations=0;
+ f.executor.execute=async(...args)=>{args[4]?.({type:'turn.started',turnId:'fixture-execution'});receipt={...await execute(...args),output:{content:'[TEST] original final output',messageIds:['fixture-final']}};throw new BridgeError('IO','receipt lost');};
+ f.executor.observeExecution=async(_content,_target,_started,_signal,original)=>{assert.equal(original?.executionId,'fixture-execution');observations++;return observations===1?{...receipt,running:true,output:undefined}:receipt;};
+ const request=f.submit();await f.bridge.tick();
+ f.db.prepare("UPDATE background_requests SET state='RUNNING' WHERE id=?").run(request.requestId);
+ await assert.rejects(f.bridge.reconcileExecution(request.requestId),{code:'STATE'});assert.equal(observations,0);
+ f.db.prepare("UPDATE background_requests SET state='UNCERTAIN' WHERE id=?").run(request.requestId);
+ assert.equal((await f.bridge.reconcileExecution(request.requestId)).state,'RUNNING');
+ assert.equal(f.db.prepare('SELECT error_code FROM execution_runs').get()!.error_code,'RUNNING_OBSERVED');
+ assert.equal((await f.bridge.reconcileExecution(request.requestId)).state,'WAITING_APPROVAL');
+ assert.equal(f.db.prepare('SELECT state FROM background_requests').get()!.state,'WAITING_APPROVAL');
+ assert.equal(f.store.getTask(request.taskId)!.status,'WAITING_APPROVAL');
+ assert.equal(f.bridge.executionResult(request.requestId).state,'WAITING_APPROVAL');
+ assert.equal(f.bridge.executionResult(request.requestId).executionId,'fixture-execution');
+ assert.deepEqual(f.bridge.executionResult(request.requestId).output?.messageIds,['fixture-final']);
+ assert.equal(f.bridge.executionResult(request.requestId).output?.content,'[TEST] original final output');
+ await f.bridge.reconcileExecution(request.requestId);
+ assert.equal(f.executed(),1);assert.equal(f.generated(),2);assert.equal(observations,2);
+ assert.equal(f.db.prepare("SELECT COUNT(*) n FROM notification_outbox WHERE dedupe_key=?").get(`request:${request.requestId}:waiting`)!.n,1);
+});
+
+test('background: completed Prompt survives the pre-dispatch crash window without regeneration',async t=>{
+ const {spawnSync}=await import('node:child_process');
+ const child=spawnSync(process.execPath,['--input-type=module','-e',`import {processOwner} from ${JSON.stringify(new URL('../src/db.ts',import.meta.url).href)};console.log(processOwner());`],{encoding:'utf8',windowsHide:true});assert.equal(child.status,0);
+ for(const state of ['GENERATING','RUNNING','UNCERTAIN','DISPATCH']) {
+  const f=setup(t),request=f.submit('pre-dispatch');
+  const pipeline=new PromptPipeline(f.db,f.authority,createOrdinaryChatAdapter(f.ordinaryChat,'fixture-gpt','fixture-project'),f.config.agents.chatgpt,{deliver:async()=>{throw new Error('unused');}});
+  const id=await pipeline.generate(request.taskId,'[TEST] create the feature',f.controller);
+  const hash=f.db.prepare('SELECT prompt_hash FROM prompts WHERE id=?').get(id)!.prompt_hash;
+  f.db.prepare('UPDATE background_requests SET state=?,owner_token=? WHERE id=?').run(state==='DISPATCH'?'RUNNING':state,child.stdout.trim(),request.requestId);
+  if(state==='DISPATCH')f.db.prepare("INSERT INTO prompt_dispatches(task_id,attempt,prompt_id,created_at) VALUES(?,1,?,'2000')").run(request.taskId,id);
+  delete f.host.ordinaryChat;
+  f.bridge.start();await f.bridge.shutdown();
+  if(state==='DISPATCH') {
+   assert.equal(f.bridge.get(request.requestId).state,'UNCERTAIN');
+   await assert.rejects(f.bridge.reconcileGeneration(request.requestId),{code:'STATE'});assert.equal(f.executed(),0);assert.equal(f.generated(),1);
+   assert.equal(f.db.prepare('SELECT COUNT(*) n FROM prompt_dispatches').get()!.n,1);continue;
+  }
+  if(state==='UNCERTAIN')await f.bridge.reconcileGeneration(request.requestId);
+  assert.equal(f.bridge.get(request.requestId).state,'QUEUED');
+  await f.bridge.tick();assert.equal(f.bridge.get(request.requestId).state,'WAITING_APPROVAL');
+  assert.equal(f.generated(),1);assert.equal(f.executed(),1);
+  assert.equal(f.db.prepare('SELECT prompt_hash FROM prompts WHERE id=?').get(id)!.prompt_hash,hash);
+  assert.equal(hash,promptHash('[ISOLATED TEST] engineering prompt'));
+  assert.equal(f.db.prepare('SELECT COUNT(*) n FROM execution_runs').get()!.n,1);
+ }
+});
+
 test('background: scoped UI text is captured before pair diagnostics without generation authority',async t=>{
   const f=setup(t,false);
   const order:string[]=[];
@@ -175,11 +226,13 @@ test('background: scoped UI text is captured before pair diagnostics without gen
   f.host.gptUiReader=async(id,name,carrier)=>{
     order.push('ui');
     assert.equal(id,'fixture-gpt');assert.equal(name,'fixture-project');assert.equal(carrier,'fixture-codex');
-    return {source:'windows-uia',conversationId:id,browserTitle:name,kind:'unknown',completionVerified:true,actualModel:null,actualReasoningEffort:null,responseInProgress:false,messages:[{role:'assistant',text:'fixture reply',sourceMessageId:'fixture-message',hash:'fixture'}]};
+    return {source:'windows-uia',identityStatus:'titleOnly',conversationId:null,browserTitle:name,kind:'unknown',completionVerified:false,actualModel:null,actualReasoningEffort:null,responseInProgress:true,messages:[]};
   };
   const observed=await f.bridge.readGptMessages('project','fixture-codex');
   assert.deepEqual(order,['ui','diagnostic']);
   assert.equal(observed.visible.source,'windows-uia');assert.equal(observed.executionAuthorized,false);assert.equal(f.executed(),0);
+  assert.equal(observed.visible.identityStatus,'titleOnly');assert.equal(observed.visible.conversationId,null);assert.deepEqual(observed.visible.messages,[]);
+  assert.equal(observed.cdpError?.code,'UNSUPPORTED');
 });
 
 test('background: dead generation/project owners become reconcilable and another workspace continues',async t=>{

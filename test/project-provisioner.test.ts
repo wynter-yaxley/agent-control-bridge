@@ -7,6 +7,7 @@ import { isolatedDemo } from '../src/demo-scope.ts';
 import { CallerAuthority } from '../src/caller.ts';
 import { ProjectProvisioner, type ProjectHost } from '../src/project-provisioner.ts';
 import { assertOrdinaryChatCapabilities } from '../src/ordinary-chat.ts';
+import {BridgeError} from '../src/errors.ts';
 
 function fixture(t: { after: (fn: () => void) => void }) {
   const scope = isolatedDemo(), root = mkdtempSync(join(tmpdir(), 'acb-project-fixture-'));
@@ -139,4 +140,22 @@ test('project reconciliation: original GPT receipt resumes only the missing Code
   const p=new ProjectProvisioner(f.db,f.authority,{root:join(f.root,'workspaces'),timeoutMs:100,host:f.host});
   const first=await p.prepare('recover-project','recover-event',f.context);assert.equal(first.phase,'gpt');
   assert.equal((await p.reconcile(first.id,f.context)).state,'READY');assert.equal(gpt,1);assert.equal(codex,1);assert.equal(f.creates(),1);
+});
+
+test('project reconciliation: lost Codex receipt uses only original host evidence and never creates again',async t=>{
+ for(const readable of [true,false]) {
+  const f=fixture(t);let codex=0,gpt=0,key:string|undefined;
+  f.host.createOrdinaryChat=async()=>{gpt++;return {conversationId:'fixture-gpt'};};
+  f.host.createCodexConversation=async(_project,_path,_signal,operationKey)=>{codex++;key=operationKey;throw new BridgeError('IO','[TEST] formal creation receipt lost');};
+  // Only this isolated host fixture has retained original-operation evidence.
+  f.host.observePartial=async(resources,phase)=>{assert.equal(phase,'codex');assert.equal(resources.initializationKey,key);if(!readable)throw new BridgeError('UNSUPPORTED','Original formal receipt is unavailable');return {...resources,codexConversationId:'fixture-original-codex'};};
+  const p=new ProjectProvisioner(f.db,f.authority,{root:join(f.root,'workspaces'),timeoutMs:100,host:f.host});
+  const first=await p.prepare('codex-recovery','codex-recovery-event',f.context);
+  assert.equal(first.state,'UNCERTAIN');assert.equal(first.phase,'codex');
+  if(readable) {const recovered=await p.reconcile(first.id,f.context);assert.equal(recovered.state,'READY');assert.equal(recovered.resources!.codexConversationId,'fixture-original-codex');await p.reconcile(first.id,f.context);}
+  else {await assert.rejects(p.reconcile(first.id,f.context),{code:'UNSUPPORTED'});assert.equal(p.get(first.id,f.context).state,'UNCERTAIN');}
+  assert.equal(codex,1);assert.equal(gpt,1);assert.equal(f.creates(),1);
+  assert.equal(p.get(first.id,f.context).resources!.appProjectId,first.resources!.appProjectId);
+  assert.equal(p.get(first.id,f.context).resources!.workspacePath,first.resources!.workspacePath);
+ }
 });

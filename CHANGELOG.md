@@ -4,6 +4,10 @@ Versions follow Semantic Versioning. Development delivery remains pending indepe
 
 ## Unreleased
 
+- Synchronize original RUNNING_OBSERVED completion across task/run/request, check affected rows, and make completed reconciliation avoid duplicate feedback/notifications. Reject unrelated normal RUNNING recovery.
+- Resume complete, unchanged, verified PENDING prompts after proven owner exit only when no dispatch/run exists; reuse the original prompt. Fix Windows missing-PID lookup so normal absence is not misclassified as query failure.
+- Remove the fictitious Codex initialization-marker recovery contract. Preserve known formal thread IDs and native membership; lost IDs without a real original host receipt remain uncertain without probes or recreation.
+- Retain CDP failure reasons during title-only UIA fallback and reduce the read-only Hermes sample timeout to its actual serial read budget (300 seconds). Latest live UIA observation was unavailable; no new live writes claimed.
 - Add a minimal Windows composition entry: read-only MCP by default, protected ledger writes, and one separate durable worker. No implicit executor/GUI delegation or approval; missing real host bindings remain explicit blockers.
 - Prefer current-instance CDP identity/body observation after listener/process/unique-target checks. Fall back to UIA titleOnly with null ID and no body, without repeated UUID scans. Existing-chat writes remain rejected where atomic exact targeting is unavailable.
 - Permit only trusted-approved new blank ordinary-chat identity initialization with a unique non-engineering marker, native baseline/message/type/title correlation, and no retry on unknown outcome. Remove the unusable Codex UIA engineering fallback; native Codex creation requires a formal host callback.

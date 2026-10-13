@@ -91,7 +91,7 @@ export class BackgroundRunner {
   }
   async reconcile(runId:string,context:CallerContext):Promise<boolean> {
     const caller=this.authority.resolve(context),run=this.db.prepare('SELECT * FROM execution_runs WHERE id=?').get(runId);
-    if(!run || !['UNCERTAIN','RUNNING'].includes(String(run.state)) || caller?.executor!=='codex' || caller.controller || caller.reviewer || run.holder!==caller.principal || run.instance!==caller.instance)throw new BridgeError('AUTH','The original trusted executor must reconcile this uncertain run');
+    if(!run || !(run.state==='UNCERTAIN' || (run.state==='RUNNING' && run.error_code==='RUNNING_OBSERVED')) || caller?.executor!=='codex' || caller.controller || caller.reviewer || run.holder!==caller.principal || run.instance!==caller.instance)throw new BridgeError('AUTH','The original trusted executor must reconcile this uncertain or previously observed run');
     if(run.owner_token!==processOwner() && ownerAlive(run.owner_token as string | null)===true)throw new BridgeError('CONFLICT','The original executor process is still alive');
     if(!this.executor.observeExecution)throw new BridgeError('UNSUPPORTED','Executor cannot observe completion without sending');
     const prompt=this.db.prepare('SELECT content,prompt_hash,verified FROM prompts WHERE id=?').get(run.prompt_id)!;
@@ -99,7 +99,7 @@ export class BackgroundRunner {
     const receipt=await withDeadline(signal=>this.executor.observeExecution!(String(prompt.content),{codexConversationId:String(run.conversation_id),workspacePath:String(run.workspace_path)},String(run.created_at),signal,{executionId:run.execution_id==null?undefined:String(run.execution_id),dispatchId:runId}),this.options.timeoutMs);
     new ConversationRegistry(this.db,this.authority).assertExecution(String(run.task_id),receipt.codexConversationId,receipt.workspacePath);
     if(run.execution_id!=null && receipt.executionId!==run.execution_id)throw new BridgeError('PROVENANCE','Original execution ID changed');
-    if(receipt.running){this.db.prepare("UPDATE execution_runs SET state='RUNNING',execution_id=?,error_code='RUNNING_OBSERVED',updated_at=? WHERE id=?").run(receipt.executionId,now(),runId);return false;}
+    if(receipt.running){if(this.db.prepare("UPDATE execution_runs SET state='RUNNING',execution_id=?,error_code='RUNNING_OBSERVED',updated_at=? WHERE id=? AND (state='UNCERTAIN' OR (state='RUNNING' AND error_code='RUNNING_OBSERVED'))").run(receipt.executionId,now(),runId).changes!==1)throw new BridgeError('CONFLICT','Original execution changed during observation');return false;}
     this.finishRun(runId,context,receipt);return true;
   }
   private finishRun(runId:string,context:CallerContext,receipt:Awaited<ReturnType<BackgroundExecutor['execute']>>):void {

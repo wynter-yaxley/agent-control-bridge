@@ -18,6 +18,7 @@ import { checkNativeDesktop } from './native-readonly.ts';
 import type { NativeChatMessageHost } from './native-messages.ts';
 import type { DesktopGptReader } from './desktop-gpt-reader.ts';
 import type { createWindowsNativeGptReader } from './windows-native-host.ts';
+import { isDemoDatabase } from './demo-scope.ts';
 
 export interface BackgroundHostBindings {
   manageQueue?: boolean;
@@ -134,16 +135,16 @@ export class BackgroundBridge {
     const mapping=this.db.prepare('SELECT w.chatgpt_conversation_id,w.chatgpt_conversation_name FROM conversation_workspaces w JOIN codex_conversations c ON c.project_id=w.project_id JOIN project_access a ON a.project_id=w.project_id WHERE w.project_id=? AND c.conversation_id=? AND a.principal=?').get(projectId,conversationId,caller.principal);
     if(!mapping)throw new BridgeError('AUTH','GPT read target is not registered to this controller/project');
     if (!this.host.gptReader && !this.host.gptUiReader) throw new BridgeError('UNSUPPORTED', 'Current-instance GPT reader is not installed');
-    let visible;
+    let visible,cdpError:{code:string;message:string}|null=null;
     if(this.host.gptReader) {
       try {visible=await this.host.gptReader(String(mapping.chatgpt_conversation_id));}
-      catch(error){if(!(error instanceof BridgeError) || !['UNSUPPORTED','DEPENDENCY'].includes(error.code) || !this.host.gptUiReader)throw error;}
+      catch(error){if(!(error instanceof BridgeError) || !this.host.gptUiReader)throw error;cdpError={code:error.code,message:error.message};}
     }
     if(!visible && this.host.gptUiReader)visible=await this.host.gptUiReader(String(mapping.chatgpt_conversation_id),String(mapping.chatgpt_conversation_name),conversationId);
     if(!visible)throw new BridgeError('UNSUPPORTED','No current-instance identity observer is installed');
     const native = await this.inspectNativeTarget(projectId, conversationId);
     if (!native.target?.identityMatches || native.target.backingKind !== 'chatgpt' || native.target.titleMatches !== true) throw new BridgeError('PROVENANCE', 'Native GPT identity or registered name differs');
-    return {native,visible,executionAuthorized:false};
+    return {native,visible,cdpError,executionAuthorized:false};
   }
   setDefaultCodex(projectId:string,conversationId:string):void {this.controller();new ConversationRegistry(this.db,this.authority).setDefault(projectId,conversationId,this.context);}
   submit(input: { eventKey: string; projectId: string; title: string; requirement: string; priority?: number; codexConversationId?: string }): ReturnType<BackgroundBridge['get']> {
@@ -253,8 +254,13 @@ export class BackgroundBridge {
     this.wake(); return this.get(id);
   }
   async reconcileGeneration(id: string) {
-    const request=this.get(id),row=this.db.prepare('SELECT requirement,state FROM background_requests WHERE id=?').get(id)!;
-    if(row.state!=='UNCERTAIN' || this.db.prepare('SELECT 1 FROM execution_runs WHERE task_id=?').get(request.taskId))throw new BridgeError('STATE','Only an uncertain GPT generation before execution can be reconciled');
+    this.controller();
+    const request=this.get(id),row=this.db.prepare('SELECT requirement,state,owner_token FROM background_requests WHERE id=?').get(id)!;
+    if(row.state!=='UNCERTAIN' || this.db.prepare('SELECT 1 FROM execution_runs WHERE task_id=?').get(request.taskId) || this.db.prepare('SELECT 1 FROM prompt_dispatches WHERE task_id=?').get(request.taskId))throw new BridgeError('STATE','Only an uncertain GPT generation without external dispatch can be reconciled');
+    if(this.db.prepare("SELECT 1 FROM prompt_generation_ops WHERE task_id=? AND state='COMPLETE'").get(request.taskId)) {
+      if(ownerAlive(row.owner_token as string|null)!==false || !transaction(this.db,()=>this.resumePreparedPrompt(id,row.owner_token as string|null)))throw new BridgeError('CONFLICT','Proven owner exit and an unchanged, undispatched verified Prompt are required');
+      this.wake();return this.get(id);
+    }
     if(!this.host.ordinaryChat)throw new BridgeError('UNSUPPORTED','Authorized GPT generation reader is not installed');
     const mapping=new ConversationRegistry(this.db,this.authority).forTask(request.taskId);
     const source=createOrdinaryChatAdapter(this.host.ordinaryChat,mapping.chatgpt_conversation_id,mapping.project_name);
@@ -264,14 +270,35 @@ export class BackgroundBridge {
     this.wake();return this.get(id);
   }
   async reconcileExecution(id:string) {
-    const request=this.get(id),run=this.db.prepare("SELECT id FROM execution_runs WHERE task_id=? AND state IN ('UNCERTAIN','RUNNING') ORDER BY attempt DESC LIMIT 1").get(request.taskId);
-    if(!['UNCERTAIN','RUNNING'].includes(request.state) || !run || !this.host.executor || !this.host.executorContext)throw new BridgeError('STATE','An uncertain execution and its original trusted executor are required');
-    const done=await new BackgroundRunner(this.db,this.authority,this.host.executor,this.config.background).reconcile(String(run.id),this.host.executorContext);
-    if(!done){this.db.prepare("UPDATE background_requests SET state='RUNNING',gui=0,error_code='RUNNING_OBSERVED',updated_at=? WHERE id=?").run(now(),id);return this.get(id);}
-    this.db.prepare("UPDATE background_requests SET state='WAITING_APPROVAL',error_code=NULL,updated_at=? WHERE id=? AND state='UNCERTAIN'").run(now(),id);
-    enqueueNotification(this.db,this.controller().principal,`request:${id}:waiting`,{requestId:id,taskId:request.taskId,state:'WAITING_APPROVAL'});
-    if(this.executionResult(id).output)await this.reviewExecution(id);
+    const caller=this.controller(),request=this.get(id),run=this.db.prepare("SELECT * FROM execution_runs WHERE task_id=? AND state IN ('UNCERTAIN','RUNNING','WAITING_APPROVAL') ORDER BY attempt DESC LIMIT 1").get(request.taskId);
+    const row=this.db.prepare('SELECT state,error_code FROM background_requests WHERE id=?').get(id)!;
+    if(!run || !this.host.executor || !this.host.executorContext || !(row.state==='UNCERTAIN' || (row.state==='RUNNING' && row.error_code==='RUNNING_OBSERVED') || (row.state==='WAITING_APPROVAL' && run.state==='WAITING_APPROVAL')))throw new BridgeError('STATE','An uncertain or previously observed execution and its original trusted executor are required');
+    const worker=this.authority.resolve(this.host.executorContext);
+    if(worker?.executor!=='codex' || worker.controller || worker.reviewer || worker.principal!==run.holder || worker.instance!==run.instance)throw new BridgeError('AUTH','The original trusted executor must reconcile this run');
+    const done=run.state==='WAITING_APPROVAL' || await new BackgroundRunner(this.db,this.authority,this.host.executor,this.config.background).reconcile(String(run.id),this.host.executorContext);
+    if(!done){if(this.db.prepare("UPDATE background_requests SET state='RUNNING',gui=0,error_code='RUNNING_OBSERVED',updated_at=? WHERE id=? AND (state='UNCERTAIN' OR (state='RUNNING' AND error_code='RUNNING_OBSERVED'))").run(now(),id).changes!==1)throw new BridgeError('CONFLICT','Request changed during original execution observation');return this.get(id);}
+    transaction(this.db,()=>{
+      const task=new TaskStore(this.db,this.authority).getTask(request.taskId)!;
+      if(task.attempt!==run.attempt || task.execution_prompt_id!==run.prompt_id || task.status!=='WAITING_APPROVAL')throw new BridgeError('CONFLICT','Original completed execution attempt changed');
+      if(this.db.prepare('SELECT state FROM background_requests WHERE id=?').get(id)!.state==='WAITING_APPROVAL')return;
+      if(this.db.prepare("UPDATE background_requests SET state='WAITING_APPROVAL',gui=0,error_code=NULL,updated_at=? WHERE id=? AND (state='UNCERTAIN' OR (state='RUNNING' AND error_code='RUNNING_OBSERVED'))").run(now(),id).changes!==1)throw new BridgeError('CONFLICT','Request changed during original execution completion');
+      enqueueNotification(this.db,caller.principal,`request:${id}:waiting`,{requestId:id,taskId:request.taskId,state:'WAITING_APPROVAL'});
+    });
+    const result=this.executionResult(id);
+    if(result.output && result.feedbackState===null)await this.reviewExecution(id);
     return this.get(id);
+  }
+  /** Called in a transaction only after the original process is proven dead. */
+  private resumePreparedPrompt(id:string,originalOwner:string|null):boolean {
+    const prompt=this.db.prepare(`SELECT p.* FROM prompts p JOIN prompt_generation_ops g ON g.task_id=p.task_id AND g.prompt_id=p.id JOIN tasks t ON t.id=p.task_id
+      JOIN background_requests r ON r.task_id=p.task_id WHERE r.id=? AND g.state='COMPLETE' AND p.delivery_status='PENDING' AND p.verified=1 AND t.status='QUEUED'
+      AND NOT EXISTS(SELECT 1 FROM execution_runs e WHERE e.task_id=p.task_id) AND NOT EXISTS(SELECT 1 FROM prompt_dispatches d WHERE d.task_id=p.task_id)`).get(id);
+    if(!prompt || (prompt.source!=='chatgpt' && !isDemoDatabase(this.db)) || !prompt.source_message_id || promptHash(String(prompt.content))!==prompt.prompt_hash)return false;
+    const mapping=new ConversationRegistry(this.db,this.authority).forTask(String(prompt.task_id));
+    if(prompt.source_conversation_id!==mapping.chatgpt_conversation_id)return false;
+    if(this.db.prepare("UPDATE background_requests SET state='QUEUED',gui=0,error_code=NULL,updated_at=? WHERE id=? AND owner_token IS ? AND state IN ('GENERATING','RUNNING','UNCERTAIN')").run(now(),id,originalOwner).changes!==1)return false;
+    enqueueNotification(this.db,this.controller().principal,`request:${id}:prompt-ready`,{requestId:id,taskId:prompt.task_id,promptId:prompt.id,state:'QUEUED'});
+    return true;
   }
   start(): void {
     this.controller();
@@ -287,6 +314,7 @@ export class BackgroundBridge {
     transaction(this.db,()=>{
       for(const row of this.db.prepare("SELECT id,task_id,owner_token FROM background_requests WHERE principal=? AND state IN ('GENERATING','RUNNING')").all(caller.principal)) {
         if(alive(row.owner_token)!==true) {
+          if(alive(row.owner_token)===false && this.resumePreparedPrompt(String(row.id),row.owner_token as string|null))continue;
           this.db.prepare("UPDATE background_requests SET state='UNCERTAIN',gui=0,error_code=?,updated_at=? WHERE id=?").run(alive(row.owner_token)===false?'HOST_EXITED':'HOST_STATUS_UNKNOWN',now(),row.id);
           this.db.prepare("UPDATE prompt_generation_ops SET state='UNCERTAIN',error_code='HOST_EXITED' WHERE task_id=? AND state='GENERATING'").run(row.task_id);
           this.db.prepare("UPDATE execution_runs SET state='UNCERTAIN',error_code='HOST_EXITED',updated_at=? WHERE task_id=? AND state='RUNNING'").run(now(),row.task_id);
@@ -322,7 +350,7 @@ export class BackgroundBridge {
     let id: string | undefined;
     try {
       if(this.host.executor?.durable && this.host.executor.observeExecution && this.host.executorContext) {
-        const pending=this.db.prepare("SELECT r.id FROM background_requests r JOIN execution_runs e ON e.task_id=r.task_id WHERE r.principal=? AND (e.state='UNCERTAIN' OR e.error_code='RUNNING_OBSERVED') ORDER BY e.created_at LIMIT 1").get(caller.principal);
+        const pending=this.db.prepare("SELECT r.id FROM background_requests r JOIN execution_runs e ON e.task_id=r.task_id WHERE r.principal=? AND (e.state='UNCERTAIN' OR e.error_code='RUNNING_OBSERVED' OR (e.state='WAITING_APPROVAL' AND r.state='UNCERTAIN')) ORDER BY e.created_at LIMIT 1").get(caller.principal);
         if(pending) {
           try{await this.reconcileExecution(String(pending.id));}
           catch(error){const code=classifyError(error).code;enqueueNotification(this.db,caller.principal,`request:${pending.id}:observe:${code}`,{requestId:pending.id,state:'UNCERTAIN',errorCode:code,action:'Original execution readback unavailable; no rerun'});}

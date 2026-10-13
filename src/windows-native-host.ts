@@ -16,9 +16,11 @@ import type { BackgroundExecutor } from './background-runner.ts';
 
 export interface WindowsNativeTools {
   listProjects(signal: AbortSignal): Promise<{ projects: { projectId: string; projectKind: string; label: string; path: string; hostId: string }[] }>;
-  listThreads(signal: AbortSignal): Promise<{ threads: { id: string; kind: string; title: string; projectId?: string | null; cwd?: string }[]; pinnedThreads: { id: string; kind: string; title: string }[] }>;
+  listThreads(signal: AbortSignal): Promise<{ threads: { id: string; kind: string; title: string; projectId?: string | null; cwd?: string }[]; pinnedThreads: { id: string; kind: string; title: string; projectId?: string | null; cwd?: string }[] }>;
   readThread(id: string, signal: AbortSignal): Promise<NativeChatPage>;
-  createCodexThread?(projectId: string, name: string, signal: AbortSignal): Promise<{ threadId: string }>;
+  // Formal creator returns a thread receipt; its API does not guarantee an
+  // operationKey or initialization message that can recover a lost receipt.
+  createCodexThread?(projectId: string, name: string, signal: AbortSignal): Promise<{ threadId: string; projectId?: string }>;
 }
 export interface WindowsUiSnapshot { title: string; text: string; ordinaryComposer: boolean; pid: number; conversationId: string | null }
 interface UiResult { ok: boolean; code?: string; stage?: string; errorType?: string; line?: number; ordinaryModeObserved?: boolean; snapshot?: WindowsUiSnapshot; body?: string; conversationId?: string; completionVerified?: boolean; timings?: { initMs: number; actionMs: number } }
@@ -145,11 +147,12 @@ export function createWindowsNativeProjectHost(options: { config: BridgeConfig; 
       },signal);
       ordinaryIds.add(id); return {conversationId:id};
     },
-    async createCodexConversation(appProjectId,_path,signal,operationKey) {
+    async createCodexConversation(appProjectId,_path,signal) {
       const project=(await native.listProjects(signal)).projects.find(item=>item.projectId===appProjectId)!;
       const name=`${project.label} Codex`;
       if(native.createCodexThread) {
         const created=await native.createCodexThread(appProjectId,name,signal);
+        if(created.projectId!==undefined && created.projectId!==appProjectId)throw new BridgeError('PROVENANCE','Formal Codex receipt belongs to a different native project');
         return {conversationId:created.threadId};
       }
       throw new BridgeError('UNSUPPORTED','A formal native Codex creation callback is required; GPT URI cannot prove Work identity');
@@ -160,17 +163,23 @@ export function createWindowsNativeProjectHost(options: { config: BridgeConfig; 
         if(matches.length!==1)throw new BridgeError('PROVENANCE','Original native workspace receipt is unavailable or ambiguous');
         return {...resources,appProjectId:matches[0].projectId};
       }
+      if(phase==='codex') {
+        if(!resources.codexConversationId)throw new BridgeError('UNSUPPORTED','Formal Codex creation has no durable operation-to-thread receipt; do not infer an ID from titles or resend');
+        const inventory=await native.listThreads(signal),thread=[...inventory.threads,...inventory.pinnedThreads].find(item=>item.id===resources.codexConversationId);
+        if(!thread || thread.kind!=='codex' || thread.projectId!==resources.appProjectId || !thread.cwd || pathKey(thread.cwd)!==pathKey(resources.workspacePath!))throw new BridgeError('PROVENANCE','Recorded Codex receipt has different native membership');
+        return resources;
+      }
       if(!resources.initializationKey)throw new BridgeError('PROVENANCE','Original initialization identity was not recorded');
-      const marker=`ACB_${phase==='gpt'?'INIT':'CODEX_INIT'}_${resources.initializationKey}`;
+      const marker=`ACB_INIT_${resources.initializationKey}`;
       const candidates=[];
       const inventory=await native.listThreads(signal);
       for(const item of [...inventory.threads,...inventory.pinnedThreads]) {
-        if(item.kind!==(phase==='gpt'?'chatgpt':'codex'))continue;
+        if(item.kind!=='chatgpt')continue;
         const page=await native.readThread(item.id,signal);
         if(page.turns.some(turn=>turn.items.some(message=>message.type==='userMessage' && message.content.some(part=>part.type==='text' && !part.truncated && part.text?.endsWith(`请只回复：${marker}。`)))))candidates.push(item.id);
       }
       if(candidates.length!==1)throw new BridgeError('PROVENANCE','Original initialization receipt is unavailable or ambiguous; do not repeat');
-      return {...resources,[phase==='gpt'?'chatgptConversationId':'codexConversationId']:candidates[0]};
+      return {...resources,chatgptConversationId:candidates[0]};
     },
     async verifyBundle(resources,signal) {
       const snapshot = ordinaryIds.has(resources.chatgptConversationId) ? undefined : (await ui.call('snapshot',{name:resources.name,conversationId:resources.chatgptConversationId},signal)).snapshot!;
