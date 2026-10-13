@@ -1,12 +1,13 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import { BridgeError, classifyError, type ErrorCode } from './errors.ts';
 import { withDeadline } from './deadline.ts';
+import type { DesktopGptReader } from './desktop-gpt-reader.ts';
 
 export interface NativeChatPage {
   thread: { id: string; kind: string; title: string; status: { type: string } };
-  turns: { id: string; status: string; error: unknown; items: (
+  turns: { id: string; status: string; error: unknown; startedAt?: number; items: (
     { type: 'userMessage'; id: string; content: { type: string; text?: string; truncated?: boolean }[] } |
-    { type: 'agentMessage'; id: string; text: string; truncated?: boolean }
+    { type: 'agentMessage'; id: string; text: string; truncated?: boolean; phase?: string }
   )[] }[];
 }
 /** Installed by a trusted host using its authorized native tools, never JSON or a private pipe. */
@@ -20,6 +21,8 @@ export interface NativeChatMessageResult {
   turnId: string | null;
   replyMessageId: string | null;
   reply: string | null;
+  replySource: 'native' | 'visible-dom' | null;
+  generationParametersVerified: false;
   errors: { stage: 'send' | 'read'; code: ErrorCode }[];
 }
 
@@ -30,7 +33,7 @@ export function observeNativeChatMessage(before: NativeChatPage, current: Native
   const baseline = new Set(before.turns.map(turn => turn.id));
   const turn = current.turns.find(turn => !baseline.has(turn.id) && turn.items.some(item => item.type === 'userMessage' &&
     item.content.some(part => part.type === 'text' && part.truncated !== true && part.text === prompt)));
-  const result: NativeChatMessageResult = { conversationId: before.thread.id, status: 'delivery_uncertain', turnId: turn?.id ?? null, replyMessageId: null, reply: null, errors: [] };
+  const result: NativeChatMessageResult = { conversationId: before.thread.id, status: 'delivery_uncertain', turnId: turn?.id ?? null, replyMessageId: null, reply: null, replySource: null, generationParametersVerified: false, errors: [] };
   if (!turn) return result;
   result.status = 'sent_reply_pending';
   if (turn.error != null || turn.status === 'failed' || turn.status === 'interrupted') { result.status = 'turn_failed'; return result; }
@@ -42,7 +45,7 @@ export function observeNativeChatMessage(before: NativeChatPage, current: Native
   if (replies.some(item => item.truncated === true || !item.text.trim() || item.text.includes('::chatgpt-content-reference{'))) {
     result.status = 'reply_content_unavailable'; return result;
   }
-  result.status = 'completed'; result.reply = replies.map(item => item.text).join('\n\n');
+  result.status = 'completed'; result.reply = replies.map(item => item.text).join('\n\n'); result.replySource = 'native';
   return result;
 }
 
@@ -50,7 +53,7 @@ export class NativeChatMessageHost {
   private readonly active = new Set<string>();
   private readonly tools: NativeChatTools;
   constructor(tools: NativeChatTools) { this.tools = tools; }
-  async sendAndWait(target: { conversationId: string; name: string }, prompt: string, budget: { timeoutMs: number; intervalMs: number }): Promise<NativeChatMessageResult> {
+  async sendAndWait(target: { conversationId: string; name: string }, prompt: string, budget: { timeoutMs: number; intervalMs: number }, replyReader?: DesktopGptReader): Promise<NativeChatMessageResult> {
     if (!prompt.trim()) throw new BridgeError('INPUT', 'A non-empty ChatGPT message is required');
     if (budget.intervalMs < 1) throw new BridgeError('CONFIG', 'Invalid message observation interval');
     if (this.active.has(target.conversationId)) throw new BridgeError('CONFLICT', 'ChatGPT message is already in progress');
@@ -70,7 +73,22 @@ export class NativeChatMessageHost {
           if (receipt.threadId !== target.conversationId) throw new BridgeError('PROVENANCE', 'Native send receipt targets another conversation');
         } catch (error) { errors.push({ stage: 'send', code: classifyError(error).code }); }
         do {
-          try { result = observeNativeChatMessage(before, await read(), prompt); }
+          try {
+            const current = await read();
+            result = observeNativeChatMessage(before, current, prompt);
+            if (result.status === 'reply_content_unavailable' && replyReader) {
+              const visible = await replyReader(target.conversationId);
+              if (visible.conversationId !== target.conversationId || visible.source !== 'visible-dom') throw new BridgeError('PROVENANCE', 'Visible reply belongs to another conversation or source');
+              if (visible.responseInProgress) result.status = 'sent_reply_pending';
+              else {
+                const replies = current.turns.find(turn => turn.id === result.turnId)!.items.filter(item => item.type === 'agentMessage');
+                const bodies = replies.map(reply => visible.messages.find(message => message.role === 'assistant' && message.sourceMessageId === reply.id));
+                if (bodies.every(body => body?.text.trim() && !body.text.includes('::chatgpt-content-reference{'))) {
+                  result.status = 'completed'; result.reply = bodies.map(body => body!.text).join('\n\n'); result.replySource = visible.source;
+                }
+              }
+            }
+          }
           catch (error) {
             if (error instanceof BridgeError && error.code === 'PROVENANCE') throw error;
             errors.push({ stage: 'read', code: classifyError(error).code });

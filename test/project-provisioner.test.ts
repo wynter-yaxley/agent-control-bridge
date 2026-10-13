@@ -58,7 +58,7 @@ test('project provisioning: two calls cannot mutate the shared host concurrently
 });
 
 test('project provisioning: identity setup can precede GPT model evidence, but generation stays blocked', async t => {
-  const f = fixture(t), capabilities = { ...(await f.host.inspect(new AbortController().signal)), actualGenerationParameters: false, completeMessages: false, models: [], reasoningEfforts: [] };
+  const f = fixture(t), capabilities = { ...(await f.host.inspect(new AbortController().signal)), background: false, actualGenerationParameters: false, completeMessages: false, models: [], reasoningEfforts: [] };
   f.host.inspect = async () => capabilities;
   const project = new ProjectProvisioner(f.db, f.authority, { root: join(f.root, 'workspaces'), timeoutMs: 100, host: f.host });
   assert.equal((await project.prepare('fixture-project', 'fixture-event', f.context)).state, 'READY');
@@ -67,7 +67,7 @@ test('project provisioning: identity setup can precede GPT model evidence, but g
   assert.equal(f.db.prepare('SELECT COUNT(*) n FROM execution_runs').get()!.n, 0);
 });
 
-for (const change of [{ source: 'unknown' }, { ordinaryChat: false }, { background: false }, { exactConversation: false }, { createOrdinaryChat: false }, { createWorkspace: false }, { ordinaryChat: 'true' }, { workspaceSurface: 'isolated-app-server' }, { workspaceSurface: 'unknown' }, { workspaceSurface: undefined }]) {
+for (const change of [{ source: 'unknown' }, { ordinaryChat: false }, { exactConversation: false }, { createOrdinaryChat: false }, { createWorkspace: false }, { ordinaryChat: 'true' }, { workspaceSurface: 'isolated-app-server' }, { workspaceSurface: 'unknown' }, { workspaceSurface: undefined }]) {
   test(`project provisioning: missing trusted creation capability ${JSON.stringify(change)} creates no resources`, async t => {
     const f = fixture(t), capabilities = await f.host.inspect(new AbortController().signal);
     f.host.inspect = async () => ({ ...capabilities, ...change }) as typeof capabilities;

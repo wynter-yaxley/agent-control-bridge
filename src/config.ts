@@ -11,7 +11,7 @@ export interface BridgeConfig {
   feishu: { apiOrigin: string; timeoutMs: number };
   background: { intervalMs: number; timeoutMs: number; leaseSeconds: number; workspaceRoot: string; maxConcurrent: number; notificationLeaseMs: number };
   agents: { chatgpt: { enabled: boolean; model: string; reasoningEffort: string }; codex: { enabled: boolean; statePath: string; executable: string | null }; hermes: { enabled: boolean; metadataPath: string | null }; pi: { enabled: boolean; locksPath: string | null } };
-  desktop: { enabled: boolean; cdpUrl: string; remoteAllowOrigins: string; python: string; allowForegroundAutomation: boolean; allowPhysicalInput: boolean };
+  desktop: { enabled: boolean; cdpUrl: string; remoteAllowOrigins: string; python: string; allowForegroundAutomation: boolean; allowPhysicalInput: boolean; uiPollMs: number };
   logging: { level: 'info' | 'warn' | 'error'; redactSecrets: true };
 }
 export function defaults(base = process.cwd()): BridgeConfig {
@@ -20,7 +20,7 @@ export function defaults(base = process.cwd()): BridgeConfig {
     feishu: { apiOrigin: 'https://open.feishu.cn', timeoutMs: 15000 },
     background: { intervalMs: 60000, timeoutMs: 120000, leaseSeconds: 600, workspaceRoot: join(base, 'workspaces'), maxConcurrent: 1, notificationLeaseMs: 30000 },
     agents: { chatgpt: { enabled: false, model: 'gpt-6', reasoningEffort: 'high' }, codex: { enabled: false, statePath: join(homedir(), '.codex', '.codex-global-state.json'), executable: null }, hermes: { enabled: false, metadataPath: null }, pi: { enabled: false, locksPath: null } },
-    desktop: { enabled: false, cdpUrl: 'http://127.0.0.1:9222', remoteAllowOrigins:'http://127.0.0.1:9222', python: 'python', allowForegroundAutomation: false, allowPhysicalInput: false }, logging: { level: 'info', redactSecrets: true } };
+    desktop: { enabled: false, cdpUrl: 'http://127.0.0.1:9222', remoteAllowOrigins:'http://127.0.0.1:9222', python: 'python', allowForegroundAutomation: false, allowPhysicalInput: false, uiPollMs: 100 }, logging: { level: 'info', redactSecrets: true } };
 }
 function merge(target: Record<string, unknown>, source: unknown, prefix = ''): void {
   if (!source || typeof source !== 'object' || Array.isArray(source)) throw new BridgeError('CONFIG', `Invalid configuration object ${prefix}`);
@@ -57,6 +57,7 @@ export function loadConfig(options: { configPath?: string; dbPath?: string; cwd?
   integer(config.nativeInterface.timeoutMs, 'nativeInterface.timeoutMs', 1, 60000);
   integer(config.nativeInterface.maxFrameBytes, 'nativeInterface.maxFrameBytes', 4096, 4194304);
   integer(config.nativeInterface.maxCandidates, 'nativeInterface.maxCandidates', 1, 32);
+  integer(config.desktop.uiPollMs, 'desktop.uiPollMs', 1, 10000);
   integer(config.failureReporting.blockedAfterMs,'failureReporting.blockedAfterMs',1,86400000);
   integer(config.database.busyTimeoutMs, 'database.busyTimeoutMs', 0, 30000);
   integer(config.feishu.timeoutMs, 'feishu.timeoutMs', 1, 60000);

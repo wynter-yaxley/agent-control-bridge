@@ -11,9 +11,10 @@ import { isDemoDatabase } from './demo-scope.ts';
 import { requireNoSecrets } from './security.ts';
 
 export interface BackgroundExecutor {
-  readonly mode: 'codex-exec' | 'codex-app-server' | 'mock';
+  readonly mode: 'codex-exec' | 'codex-app-server' | 'codex-desktop' | 'mock';
   inspect(target: DeliveryTarget, signal: AbortSignal): Promise<{ source: 'codex-app-state'; conversationId: string; appProjectId: string; workspacePath: string; local: boolean }>;
-  execute(content: string, key: string, target: DeliveryTarget, signal: AbortSignal, onEvent?: (event: Record<string, unknown>) => void): Promise<{ executionId: string; codexConversationId: string; workspacePath: string }>;
+  execute(content: string, key: string, target: DeliveryTarget, signal: AbortSignal, onEvent?: (event: Record<string, unknown>) => void): Promise<{ executionId: string; codexConversationId: string; workspacePath: string; output?: { content: string; messageIds: string[] } }>;
+  observeExecution?(content: string, target: DeliveryTarget, startedAfter: string, signal: AbortSignal): ReturnType<BackgroundExecutor['execute']>;
 }
 function samePath(a: string, b: string): boolean {
   const first = resolve(a), second = resolve(b);
@@ -48,7 +49,7 @@ export class BackgroundRunner {
       const current = store.getTask(taskId);
       if (!current || current.status !== 'QUEUED') throw new BridgeError('STATE', 'Task is not queued');
       if (this.db.prepare("SELECT 1 FROM project_operations WHERE state IN ('PROVISIONING','UNCERTAIN')").get()) throw new BridgeError('CONFLICT', 'Native project operation is active or awaiting reconciliation');
-      if (this.db.prepare("SELECT 1 FROM execution_runs WHERE state IN ('RUNNING','UNCERTAIN')").get()) throw new BridgeError('CONFLICT', 'Background execution is occupied or awaiting reconciliation');
+      if (this.db.prepare("SELECT 1 FROM execution_runs WHERE state IN ('RUNNING','UNCERTAIN') OR feedback_state IN ('SENDING','UNCERTAIN')").get()) throw new BridgeError('CONFLICT', 'Background execution or GPT feedback is occupied or awaiting reconciliation');
       const claimed = store.claim(taskId, context, this.options.leaseSeconds, current.version, promptId);
       if (!claimed.ok) throw new BridgeError(claimed.code as import('./errors.ts').ErrorCode, claimed.error);
       if (this.db.prepare('SELECT 1 FROM prompt_dispatches WHERE task_id=? AND attempt=?').get(taskId, claimed.task.attempt)) throw new BridgeError('CONFLICT', 'This attempt already owns an external dispatch');
@@ -66,17 +67,7 @@ export class BackgroundRunner {
         this.db.prepare('INSERT INTO execution_events(run_id,sequence,kind,observed_at) VALUES(?,?,?,?)').run(runId, ++sequence, kind, now());
       };
       const receipt = await withDeadline(signal => this.executor.execute(String(prompt.content), runId, target, signal, onEvent), this.options.timeoutMs);
-      registry.assertExecution(taskId, receipt.codexConversationId, receipt.workspacePath);
-      if (receipt.codexConversationId !== target.codexConversationId || typeof receipt.executionId !== 'string' || !receipt.executionId.trim() || receipt.executionId.length > 4096) throw new BridgeError('PROVENANCE', 'Codex execution receipt has a different identity');
-      requireNoSecrets(receipt.executionId);
-      transaction(this.db, () => {
-        const current = store.getTask(taskId);
-        if (!current || current.attempt !== attempt || current.execution_prompt_id !== promptId) throw new BridgeError('CONFLICT', 'Execution attempt changed');
-        const finished = store.executorFinished(taskId, context, 'Background execution completed; independent acceptance required', current.version);
-        if (!finished.ok) throw new BridgeError(finished.code as import('./errors.ts').ErrorCode, finished.error);
-        this.db.prepare("UPDATE prompts SET delivery_status='DELIVERED',codex_execution_id=?,codex_conversation_id=?,error_code=NULL WHERE id=? AND delivery_status='DELIVERING'").run(receipt.executionId, receipt.codexConversationId, promptId);
-        this.db.prepare("UPDATE execution_runs SET state='WAITING_APPROVAL',execution_id=?,updated_at=? WHERE id=? AND state='RUNNING'").run(receipt.executionId, now(), runId);
-      });
+      this.finishRun(runId,context,receipt);
       return runId;
     } catch (error) {
       transaction(this.db, () => {
@@ -85,5 +76,29 @@ export class BackgroundRunner {
       });
       throw error;
     }
+  }
+  async reconcile(runId:string,context:CallerContext):Promise<void> {
+    const caller=this.authority.resolve(context),run=this.db.prepare('SELECT * FROM execution_runs WHERE id=?').get(runId);
+    if(!run || run.state!=='UNCERTAIN' || caller?.executor!=='codex' || caller.controller || caller.reviewer || run.holder!==caller.principal || run.instance!==caller.instance)throw new BridgeError('AUTH','The original trusted executor must reconcile this uncertain run');
+    if(!this.executor.observeExecution)throw new BridgeError('UNSUPPORTED','Executor cannot observe completion without sending');
+    const prompt=this.db.prepare('SELECT content,prompt_hash,verified FROM prompts WHERE id=?').get(run.prompt_id)!;
+    if(prompt.verified!==1 || promptHash(String(prompt.content))!==prompt.prompt_hash)throw new BridgeError('PROVENANCE','Original execution prompt changed');
+    const receipt=await withDeadline(signal=>this.executor.observeExecution!(String(prompt.content),{codexConversationId:String(run.conversation_id),workspacePath:String(run.workspace_path)},String(run.created_at),signal),this.options.timeoutMs);
+    this.finishRun(runId,context,receipt);
+  }
+  private finishRun(runId:string,context:CallerContext,receipt:Awaited<ReturnType<BackgroundExecutor['execute']>>):void {
+    const run=this.db.prepare('SELECT * FROM execution_runs WHERE id=?').get(runId)!;
+    new ConversationRegistry(this.db,this.authority).assertExecution(String(run.task_id),receipt.codexConversationId,receipt.workspacePath);
+    if(receipt.codexConversationId!==run.conversation_id || !receipt.executionId.trim() || receipt.executionId.length>4096)throw new BridgeError('PROVENANCE','Codex execution receipt has a different identity');
+    requireNoSecrets(receipt.executionId);
+    if(receipt.output){if(!receipt.output.content.trim() || receipt.output.content.length>65536 || !receipt.output.messageIds.length)throw new BridgeError('PROVENANCE','Completed execution output is incomplete');requireNoSecrets(JSON.stringify(receipt.output));}
+    transaction(this.db,()=>{
+      const store=new TaskStore(this.db,this.authority),current=store.getTask(String(run.task_id));
+      if(!current || current.attempt!==run.attempt || current.execution_prompt_id!==run.prompt_id)throw new BridgeError('CONFLICT','Execution attempt changed');
+      const finished=store.executorFinished(current.id,context,'Background execution completed; independent acceptance required',current.version);
+      if(!finished.ok)throw new BridgeError(finished.code as import('./errors.ts').ErrorCode,finished.error);
+      this.db.prepare("UPDATE prompts SET delivery_status='DELIVERED',codex_execution_id=?,codex_conversation_id=?,error_code=NULL WHERE id=? AND delivery_status='DELIVERING'").run(receipt.executionId,receipt.codexConversationId,run.prompt_id);
+      this.db.prepare("UPDATE execution_runs SET state='WAITING_APPROVAL',execution_id=?,result_json=?,error_code=NULL,updated_at=? WHERE id=? AND state IN ('RUNNING','UNCERTAIN')").run(receipt.executionId,receipt.output?JSON.stringify({...receipt.output,hash:promptHash(receipt.output.content)}):null,now(),runId);
+    });
   }
 }

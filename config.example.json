@@ -46,6 +46,7 @@
     "python": "python",
     "allowForegroundAutomation": false,
     "allowPhysicalInput": false,
+    "uiPollMs": 100,
     "remoteAllowOrigins": "http://127.0.0.1:9222"
   },
   "logging": {

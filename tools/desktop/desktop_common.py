@@ -26,7 +26,7 @@ def config():
         value = json.loads(path.read_text(encoding='utf-8')) if path.exists() else {}
         if os.environ.get('ACB_CONFIG') and not path.exists(): raise ToolError('CONFIG','Configuration file does not exist',2)
         if not isinstance(value,dict) or not isinstance(value.get('desktop',{}),dict): raise ToolError('CONFIG','Invalid configuration object',2)
-        settings = {'enabled':False,'cdpUrl':'http://127.0.0.1:9222','remoteAllowOrigins':None,'python':'python','allowForegroundAutomation':False,'allowPhysicalInput':False}
+        settings = {'enabled':False,'cdpUrl':'http://127.0.0.1:9222','remoteAllowOrigins':None,'python':'python','allowForegroundAutomation':False,'allowPhysicalInput':False,'uiPollMs':100}
         if set(value.get('desktop',{}))-set(settings): raise ToolError('CONFIG','Unknown desktop configuration field',2)
         settings.update(value.get('desktop',{}))
         settings['cdpUrl'] = os.environ.get('ACB_CDP_URL',settings['cdpUrl'])
@@ -114,8 +114,11 @@ def targets():
     # Refuse redirects; never follow a loopback URL onto another host.
     class NoRedirect(urllib.request.HTTPRedirectHandler):
         def redirect_request(self,*args,**kwargs): return None
-    with urllib.request.build_opener(NoRedirect).open(request,timeout=5) as response:
-        data=response.read(1048577)
+    try:
+        with urllib.request.build_opener(NoRedirect).open(request,timeout=5) as response:
+            data=response.read(1048577)
+    except urllib.error.URLError as error:
+        raise ToolError('CDP_UNAVAILABLE','Configured current-instance CDP endpoint is unavailable',6,status='blocked') from error
     if len(data)>1048576: raise ToolError('INPUT','Target listing exceeded limit',2)
     value=json.loads(data)
     if not isinstance(value,list) or len(value)>200: raise ToolError('INPUT','Invalid target listing',2)

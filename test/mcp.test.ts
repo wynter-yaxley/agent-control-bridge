@@ -15,6 +15,19 @@ import { fileURLToPath } from 'node:url';
 import { controlledProcessEnv } from '../src/silent-process.ts';
 import { ConversationRegistry } from '../src/topology.ts';
 
+test('MCP: closing waits for an active host operation before the database is closed',async t=>{
+  const scope=isolatedDemo(),authority=new CallerAuthority(),context=authority.issue({principal:'fixture:hermes',instance:'fixture',executor:'hermes',controller:true,reviewer:false});
+  const bridge=new BackgroundBridge(scope.db,authority,context,defaults()),server=createBridgeMcpServer({bridge,db:scope.db,authority,context,notificationLeaseMs:30000,version:'0.2.0'}),client=new Client({name:'fixture-client',version:'0.0.0'});
+  let release!:()=>void,started!:()=>void;
+  const gate=new Promise<void>(done=>release=done),ready=new Promise<void>(done=>started=done);
+  bridge.capabilities=async()=>{started();await gate;scope.db.prepare('SELECT COUNT(*) FROM tasks').get();return {fullWorkflowReady:false,ordinaryChatInstalled:false,projectHostInstalled:false,codexExecutorInstalled:false,uiInteractionRequired:false,blockers:[]};};
+  t.after(async()=>{release();await client.close();await server.close();scope.close();});
+  const [ct,st]=InMemoryTransport.createLinkedPair();await server.connect(st);await client.connect(ct);
+  const request=client.callTool({name:'acb_capabilities',arguments:{}}).catch(()=>undefined);await ready;
+  let closed=false;const closing=server.close().then(()=>{closed=true;});await new Promise<void>(done=>setImmediate(done));assert.equal(closed,false);
+  release();await closing;await request;assert.equal(closed,true);
+});
+
 test('MCP: actual client handshake, tools discovery, blocked creation and strict source/role rejection', async t => {
   const scope = isolatedDemo(), authority = new CallerAuthority();
   const context = authority.issue({ principal: 'fixture:hermes', instance: 'fixture', executor: 'hermes', controller: true, reviewer: false });
@@ -28,6 +41,7 @@ test('MCP: actual client handshake, tools discovery, blocked creation and strict
   assert.ok(tools.includes('acb_request_submit')); assert.ok(tools.includes('acb_notifications_ack')); assert.ok(!tools.some(name => /prompt_import|source_register|browser/.test(name)));
   assert.ok(tools.includes('acb_codex_target_check'));
   assert.ok(tools.includes('acb_native_target_check'));
+  assert.ok(tools.includes('acb_gpt_read')); assert.ok(tools.includes('acb_execution_result')); assert.ok(tools.includes('acb_execution_review'));
   assert.ok(tools.includes('acb_project_reconcile'));
   const status = await client.callTool({ name: 'acb_capabilities', arguments: {} });
   const text = status.content as { type: string; text: string }[];
@@ -69,8 +83,8 @@ test('MCP: native reads are scoped to the registered carrier/GPT pair and grant 
   let called=0;
   const host:import('../src/background.ts').BackgroundHostBindings={nativeInspector:async options=>{
     called++;assert.equal(options.carrierThreadId,'fixture-codex');assert.equal(options.conversationId,'fixture-gpt');assert.equal(options.expectedTitle,'fixture-native-pair');assert.ok(options.signal);
-    return {ok:true,readOnly:true,peer:undefined,catalogTools:[],carrier:{identityMatches:true,backingKind:'codex',titleMatches:null,threadFields:[],turnFields:[],itemFields:[],turnCount:0,ordinaryChatVerified:false,actualGenerationParametersVerified:false,projectMappingVerified:false},inventory:{currentCarrierVisible:true,chatgptBackingVisible:true},target:null,messagesSent:false,realModelInvoked:false,credentialsRead:false,executionAuthorized:false,fullWorkflowReady:false};
-  }};
+    return {ok:true,readOnly:true,peer:undefined,catalogTools:[],carrier:{identityMatches:true,backingKind:'codex',titleMatches:null,threadFields:[],turnFields:[],itemFields:[],turnCount:0,ordinaryChatVerified:false,actualGenerationParametersVerified:false,projectMappingVerified:false},inventory:{currentCarrierVisible:true,chatgptBackingVisible:true},target:{identityMatches:true,backingKind:'chatgpt',titleMatches:true,threadFields:[],turnFields:[],itemFields:[],turnCount:0,ordinaryChatVerified:false,actualGenerationParametersVerified:false,projectMappingVerified:false},messagesSent:false,realModelInvoked:false,credentialsRead:false,executionAuthorized:false,fullWorkflowReady:false};
+  },gptReader:async id=>({source:'visible-dom',conversationId:id,browserTitle:'fixture-native-pair',kind:'unknown',completionVerified:false,actualModel:null,actualReasoningEffort:null,responseInProgress:false,messages:[{role:'assistant',text:'[TEST] visible reply',sourceMessageId:'fixture-message',hash:'fixture-hash'}]})};
   const bridge=new BackgroundBridge(scope.db,authority,context,defaults(),host),other=new BackgroundBridge(scope.db,authority,foreign,defaults(),host);
   await assert.rejects(other.inspectNativeTarget('native-project','fixture-codex'),{code:'AUTH'});
   await assert.rejects(bridge.inspectNativeTarget('native-project','foreign-codex'),{code:'AUTH'});assert.equal(called,0);
@@ -81,6 +95,8 @@ test('MCP: native reads are scoped to the registered carrier/GPT pair and grant 
   assert.equal(read.isError,undefined);assert.equal(JSON.parse((read.content as {text:string}[])[0].text).fullWorkflowReady,false);assert.equal(called,1);
   const spoof=await client.callTool({name:'acb_native_target_check',arguments:{projectId:'native-project',conversationId:'fixture-codex',gptConversationId:'foreign-gpt',callerSource:'chatgpt'}});
   assert.equal(spoof.isError,true);assert.equal(called,1);assert.equal((await bridge.capabilities()).ordinaryChatInstalled,false);
+  const visible=await client.callTool({name:'acb_gpt_read',arguments:{projectId:'native-project',conversationId:'fixture-codex'}});
+  const snapshot=JSON.parse((visible.content as {text:string}[])[0].text);assert.equal(visible.isError,undefined);assert.equal(snapshot.visible.conversationId,'fixture-gpt');assert.equal(snapshot.visible.completionVerified,false);assert.equal(snapshot.executionAuthorized,false);
   for(const table of ['tasks','execution_runs','prompts'])assert.equal(scope.db.prepare(`SELECT COUNT(*) n FROM ${table}`).get()!.n,0);
 });
 
@@ -116,4 +132,26 @@ test('MCP: isolated stdio installation starts and closes without a browser, Agen
   const denied=await client.callTool({name:'acb_project_prepare',arguments:{name:'fixture',eventKey:'fixture'}});
   assert.equal(denied.isError,true);assert.equal(JSON.parse((denied.content as {text:string}[])[0].text).code,'AUTH');
   assert.ok(!/Unhandled|TypeError|SyntaxError/.test(errors));
+});
+
+test('MCP: result summary omits bodies and complete evidence remains available', async t => {
+  const scope=isolatedDemo(),authority=new CallerAuthority();
+  const context=authority.issue({principal:'fixture:result-reader',instance:'fixture',executor:'hermes',controller:true,reviewer:false});
+  const bridge=new BackgroundBridge(scope.db,authority,context,defaults(scope.root));
+  const content='fixture-output-'.repeat(2048);
+  const saved={runId:'fixture-run',executionId:'fixture-execution',state:'WAITING_APPROVAL',output:{content,messageIds:['fixture-message'],hash:'fixture-output-hash'},
+    feedbackState:'COMPLETE',feedback:{content,sourceConversationId:'fixture-gpt',sourceMessageId:'fixture-feedback',hash:'fixture-feedback-hash',actualModel:null,actualReasoningEffort:null},feedbackError:null};
+  bridge.executionResult=()=>saved;
+  const server=createBridgeMcpServer({bridge,db:scope.db,authority,context,notificationLeaseMs:30000,version:'0.2.0'}),client=new Client({name:'fixture-reader',version:'0.0.0'});
+  t.after(async()=>{await client.close();await server.close();scope.close();});
+  const [ct,st]=InMemoryTransport.createLinkedPair();await server.connect(st);await client.connect(ct);
+  const summary=await client.callTool({name:'acb_execution_result',arguments:{requestId:'fixture-request'}});
+  const full=await client.callTool({name:'acb_execution_result',arguments:{requestId:'fixture-request',includeContent:true}});
+  const read=(result:typeof full)=>JSON.parse((result.content as {text:string}[])[0].text);
+  assert.equal(read(summary).output.content,undefined);
+  assert.equal(read(summary).output.characters,content.length);
+  assert.deepEqual(read(summary).output.messageIds,saved.output.messageIds);
+  assert.equal(read(summary).feedback.hash,saved.feedback.hash);
+  assert.deepEqual(read(full),saved);
+  assert.ok(JSON.stringify(summary).length<1024);
 });

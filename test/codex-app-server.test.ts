@@ -37,7 +37,7 @@ function fixture(mode: Mode = 'normal') {
         else if (message.method === 'thread/read') {
           if (mode === 'corrupt') child.stdout!.emit('data', Buffer.from('{invalid}\n'));
           else if (mode === 'oversize') child.stdout!.emit('data', Buffer.alloc(1024 * 1024 + 1, 65));
-          else emit({ id: message.id, result: { thread: thread() } });
+          else emit({ id: message.id, result: { thread: message.params.includeTurns ? { ...thread(), turns: [{ id: 'fixture-turn', status: 'completed', error: null, items: [{ type: 'agentMessage', id: 'fixture-commentary', text: 'Working...', phase: 'commentary' }, { type: 'agentMessage', id: 'fixture-answer', text: '[ISOLATED TEST] final output', phase: 'final_answer' }] }] } : thread() } });
         } else if (message.method === 'thread/resume') emit({ id: message.id, result: { thread: thread(), cwd: workspace, model: mode === 'wrong-model' ? 'gpt-foreign' : 'gpt-fixture', reasoningEffort: 'high', approvalPolicy: 'untrusted', sandbox: { type: 'workspaceWrite', writableRoots: mode === 'broad-sandbox' ? [workspace, resolve('foreign')] : [workspace], networkAccess: false } } });
         else if (message.method === 'turn/start') {
           if (mode === 'silent-start') return;
@@ -77,6 +77,7 @@ for (const mode of ['normal', 'early', 'null-project'] as const) test(`app-serve
   assert.equal((await executor.inspect(target, new AbortController().signal)).appProjectId, 'native-project');
   const receipt = await executor.execute('[ISOLATED TEST] 中文 engineering prompt', 'fixture-dispatch', target, new AbortController().signal, event => events.push(event));
   assert.equal(receipt.executionId, 'fixture-turn'); assert.equal(receipt.codexConversationId, target.codexConversationId);
+  assert.deepEqual(receipt.output, { content: '[ISOLATED TEST] final output', messageIds: ['fixture-answer'] });
   assert.equal(f.requests.filter(r => r.method === 'turn/start').length, 1); assert.equal(f.exclusive(), 2);
   const start = f.requests.find(r => r.method === 'turn/start')!.params as Record<string, unknown>;
   assert.equal(start.model, 'gpt-fixture'); assert.equal(start.effort, 'high'); assert.equal(start.clientUserMessageId, 'fixture-dispatch');

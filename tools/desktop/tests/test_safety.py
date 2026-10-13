@@ -60,7 +60,7 @@ class DesktopSafetyTests(unittest.TestCase):
 
     def test_all_compatibility_tools_help_without_network(self):
         root=Path(__file__).resolve().parents[1]
-        for name in ['gpt-read','gpt-send','gpt-rename','route-execution-guard','codex-send','codex-status','codex-continue','relay.py','cdp_messages.py','probe_targets.py']:
+        for name in ['gpt-read','gpt-send','gpt-rename','route-execution-guard','codex-send','codex-status','codex-continue','cdp_messages.py','probe_targets.py']:
             result=subprocess.run([sys.executable,str(root/name),'--help'],capture_output=True,text=True,timeout=5,env={**os.environ,'PYTHONDONTWRITEBYTECODE':'1'})
             self.assertEqual(result.returncode,0,(name,result.stderr))
 
@@ -69,9 +69,6 @@ class DesktopSafetyTests(unittest.TestCase):
         for command in [[str(root/'codex-send'),'self-declared ChatGPT prompt'],[str(root/'codex-continue'),'thread','raw prompt','--confirm']]:
             result=subprocess.run([sys.executable,*command],capture_output=True,text=True,timeout=5,env={**os.environ,'PYTHONDONTWRITEBYTECODE':'1'})
             self.assertNotEqual(result.returncode,0);self.assertIn('PROVENANCE',result.stderr)
-        # relay gpt2codex 现在只读候选（REVIEW_REQUIRED，不自动发送）；裸 CLI 无 CDP/凭证时失败
-        result=subprocess.run([sys.executable,str(root/'relay.py'),'gpt2codex'],capture_output=True,text=True,timeout=5,env={**os.environ,'PYTHONDONTWRITEBYTECODE':'1'})
-        self.assertNotEqual(result.returncode,0)
 
     def test_no_os_input_or_global_focus_apis(self):
         root=Path(__file__).resolve().parents[1]

@@ -1,6 +1,6 @@
 # 贡献指南
 
-开始前阅读 [项目规范](AGENTS.md)、[通用协作规则](docs/PROJECT_RULES.md)与 [开发说明](docs/DEVELOPMENT.md)。开发执行、测试和交付在登记的 Codex workspace 对话中进行；GPT 对话只沟通和生成工程 Prompt。执行者提交待独立验收，不自行宣布最终成功。
+开始前阅读 [项目规范](AGENTS.md)、[通用协作规则](docs/PROJECT_RULES.md)与 [开发说明](README.md#性能生命周期与验证)。开发执行、测试和交付在登记的 Codex workspace 对话中进行；GPT 对话只沟通和生成工程 Prompt。执行者提交待独立验收，不自行宣布最终成功。
 
 ## 开发与验证
 
@@ -16,4 +16,4 @@
 
 ## 交付与独立验收
 
-开发交付记录放 docs/audit/，修复证据放 [REMEDIATION](docs/audit/REMEDIATION.md)，不把过程记录塞进 README。独立验收者使用固定 [结论 / 证据 / 遗留模板](docs/ACCEPTANCE_TEMPLATE.md)。执行者可以建议验收命令，不可填写虚假的独立结论。
+必要产品和部署说明维护在 [README](README.md)，不积累历史研究或一次性审查文档。独立验收者使用固定 [结论 / 证据 / 遗留模板](docs/ACCEPTANCE_TEMPLATE.md)。执行者只报告实际修改、测量和验证结果，不可填写虚假的独立结论。

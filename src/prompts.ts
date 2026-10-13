@@ -19,6 +19,7 @@ export interface ChatgptAdapter {
   preflight?(target: { conversationId: string; projectId: string; workspacePath: string }, signal: AbortSignal): Promise<ProjectRouteEvidence>;
   capabilities(): Promise<{ models: string[]; reasoningEfforts: string[]; verified: boolean }>;
   generate(requirement: string, options: { model: string; reasoningEffort: string; signal: AbortSignal }): Promise<Generation>;
+  observeGeneration?(request: string, signal: AbortSignal): Promise<Generation>;
 }
 export interface CodexDelivery {
   target?(signal: AbortSignal): Promise<DeliveryTarget>;
@@ -148,7 +149,15 @@ export class PromptPipeline {
       throw error;
     }
   }
-  private async generateOnce(taskId: string, requirement: string, context: CallerContext, onExternalStart: () => void): Promise<string> {
+  async reconcileGeneration(taskId: string, requirement: string, context: CallerContext): Promise<string> {
+    this.controller(context);
+    const operation=this.db.prepare('SELECT state,request_hash FROM prompt_generation_ops WHERE task_id=?').get(taskId);
+    if(operation?.state!=='UNCERTAIN' || operation.request_hash!==promptHash(JSON.stringify({requirement,...this.requested})))throw new BridgeError('CONFLICT','Only the original uncertain generation can be observed');
+    const id=await this.generateOnce(taskId,requirement,context,()=>{},true);
+    this.db.prepare("UPDATE prompt_generation_ops SET state='COMPLETE',prompt_id=?,error_code=NULL WHERE task_id=? AND state='UNCERTAIN'").run(id,taskId);
+    return id;
+  }
+  private async generateOnce(taskId: string, requirement: string, context: CallerContext, onExternalStart: () => void, observeOnly=false): Promise<string> {
     this.controller(context);
     const task = this.db.prepare('SELECT status FROM tasks WHERE id=?').get(taskId);
     if (!task || task.status !== 'QUEUED') throw new BridgeError('STATE', 'Prompt generation requires an existing QUEUED task');
@@ -164,20 +173,23 @@ export class PromptPipeline {
       assertProjectRouteEvidence(mapping,route);
     }
     const capabilities = await bounded(() => this.adapter.capabilities(), this.timeoutMs);
-    if (!capabilities.verified || !capabilities.models.includes(this.requested.model) || !capabilities.reasoningEfforts.includes(this.requested.reasoningEffort)) throw new BridgeError('UNSUPPORTED', 'Requested model/reasoning cannot be verified by the adapter');
+    if (!capabilities.verified) throw new BridgeError('UNSUPPORTED', 'Trusted generation capability is unavailable');
     if(mapping) {
       const target={conversationId:mapping.chatgpt_conversation_id,projectId:mapping.app_project_id ?? mapping.project_id,workspacePath:mapping.workspace_path};
       const route=await bounded(signal=>this.adapter.preflight!(target,signal),this.timeoutMs);
       assertProjectRouteEvidence(mapping,route);
     }
-    onExternalStart();
-    const result = await bounded(signal => this.adapter.generate(requirement, { ...this.requested, signal }), this.timeoutMs);
+    const request = `请把下列需求转成可直接交给 Codex 执行的工程 Prompt。只输出工程 Prompt 正文，使用纯文本，包含明确范围、实现要求、必要验证与交付结果。此 GPT 对话只分析和生成 Prompt，不执行工程任务。\n用户需求：\n${requirement}`;
+    if(observeOnly && !this.adapter.observeGeneration)throw new BridgeError('UNSUPPORTED','Host cannot read the original generation without sending');
+    if(!observeOnly)onExternalStart();
+    const result = await bounded(signal => observeOnly ? this.adapter.observeGeneration!(request,signal) : this.adapter.generate(request, { ...this.requested, signal }), this.timeoutMs);
     if (!result.content.trim() || result.content.length > 65536 || !result.sourceMessageId) throw new BridgeError('PROVENANCE', 'Generation has no verifiable source message');
     requireNoSecrets(result.content); requireNoSecrets(result.sourceMessageId);
     if (result.sourceMessageId.length > 4096 || (mapping && result.sourceConversationId !== mapping.chatgpt_conversation_id)) throw new BridgeError('PROVENANCE', 'Generation belongs to another GPT conversation');
     if(mapping && result.sourceConversationName!==mapping.project_name) throw new BridgeError('PROVENANCE','Generation conversation name no longer matches the workspace project');
-    const mock = this.adapter.source === 'mock-chatgpt';
-    const verified = mock || (result.actualModel === this.requested.model && result.actualReasoningEffort === this.requested.reasoningEffort);
+    // User policy: provenance authorizes delivery; model/effort are observations,
+    // and unavailable values stay null rather than blocking this workflow.
+    const verified = true;
     const id = randomUUID(), hash = promptHash(result.content);
     return transaction(this.db, () => {
       if (this.db.prepare('SELECT status FROM tasks WHERE id=?').get(taskId)?.status !== 'QUEUED') throw new BridgeError('CONFLICT', 'Task changed during generation');

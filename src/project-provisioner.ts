@@ -32,7 +32,7 @@ export interface ProjectHost {
   verifyBundle(resources: ProjectResources, signal: AbortSignal): Promise<ProjectBundleEvidence>;
 }
 export interface ProjectResources { appProjectId: string; workspacePath: string; name: string; chatgptConversationId: string; codexConversationId: string }
-export interface ProjectOperation { id: string; projectId: string; name: string; workspacePath: string; state: string; errorCode: string | null }
+export interface ProjectOperation { id: string; projectId: string; name: string; workspacePath: string; state: string; errorCode: string | null; resources: Partial<ProjectResources> | null }
 
 export class ProjectProvisioner {
   private readonly db: DatabaseSync;
@@ -48,7 +48,7 @@ export class ProjectProvisioner {
     if (!caller?.controller) throw new BridgeError('AUTH', 'Trusted controller required');
     const row = this.db.prepare('SELECT * FROM project_operations WHERE id=? AND principal=?').get(id, caller.principal);
     if (!row) throw new BridgeError('NOT_FOUND', 'Project operation not found');
-    return { id: String(row.id), projectId: String(row.project_id), name: String(row.name), workspacePath: String(row.root_path), state: String(row.state), errorCode: row.error_code === null ? null : String(row.error_code) };
+    return { id: String(row.id), projectId: String(row.project_id), name: String(row.name), workspacePath: String(row.root_path), state: String(row.state), errorCode: row.error_code === null ? null : String(row.error_code), resources: row.resources === null ? null : JSON.parse(String(row.resources)) };
   }
   async reconcile(id: string, context: CallerContext): Promise<ProjectOperation> {
     const caller = this.authority.resolve(context);
@@ -94,7 +94,7 @@ export class ProjectProvisioner {
     if (existing && !(existing.state === 'BLOCKED' && existing.resources === null && this.host)) return this.get(String(existing.id), context);
     const id = existing ? String(existing.id) : uuid();
     transaction(this.db, () => {
-      if (this.db.prepare("SELECT 1 FROM background_requests WHERE state IN ('GENERATING','RUNNING','UNCERTAIN')").get() || this.db.prepare("SELECT 1 FROM execution_runs WHERE state IN ('RUNNING','UNCERTAIN')").get()) throw new BridgeError('CONFLICT', 'Background host is occupied or awaiting reconciliation');
+      if (this.db.prepare("SELECT 1 FROM background_requests WHERE state IN ('GENERATING','RUNNING','UNCERTAIN')").get() || this.db.prepare("SELECT 1 FROM execution_runs WHERE state IN ('RUNNING','UNCERTAIN') OR feedback_state IN ('SENDING','UNCERTAIN')").get()) throw new BridgeError('CONFLICT', 'Background host is occupied or awaiting reconciliation');
       if (this.db.prepare("SELECT 1 FROM project_operations WHERE state IN ('PROVISIONING','UNCERTAIN') AND id!=?").get(id)) throw new BridgeError('CONFLICT', 'Another native project operation is active or awaiting reconciliation');
       if (!existing) {
         const pathKey = process.platform === 'win32' ? path.toLowerCase() : path;

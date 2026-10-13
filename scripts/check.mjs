@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
 const git=(...args)=>{const r=spawnSync('git',args,{encoding:'utf8',maxBuffer:32*1024*1024,windowsHide:true});if(r.status!==0)throw Error('Git check failed');return r.stdout;};
 const split=text=>text.split('\0').filter(Boolean);
-const files=split(git('ls-files','--cached','--others','--exclude-standard','-z'));
+const files=split(git('ls-files','--cached','--others','--exclude-standard','-z')).filter(file=>existsSync(file));
 const patterns={
  privateKey:/-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----/,
  githubToken:/\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{40,})\b/,

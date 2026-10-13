@@ -38,3 +38,6 @@ cdp-cache/
 *.sqlite3
 *.sqlite3-wal
 *.sqlite3-shm
+/docs/local-history/
+
+/workspaces/

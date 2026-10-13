@@ -1,10 +1,11 @@
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)
 $pipe = $null
 $script:deadline = [DateTime]::UtcNow
 $script:stage = 'input'
-function Fail([string]$code) { [Console]::Out.WriteLine((@{ok=$false;code=$code;stage=$script:stage;privateDiagnosticsOmitted=$true} | ConvertTo-Json -Compress)); exit 0 }
+function Fail([string]$code) { [Console]::Out.WriteLine((@{ok=$false;code=$code;stage=$script:stage;privateDiagnosticsOmitted=$true} | ConvertTo-Json -Compress)) }
 function Budget { $left=[int][Math]::Ceiling(($script:deadline-[DateTime]::UtcNow).TotalMilliseconds); if($left -lt 1){throw 'TIMEOUT'}; return $left }
 function Fields($value, [string[]]$allowed) {
  if($null -eq $value -or $value -isnot [pscustomobject]){throw 'IO'}
@@ -15,11 +16,13 @@ function ExactBytes($stream,[int]$length) {
  while($offset -lt $length){$task=$stream.ReadAsync($buffer,$offset,$length-$offset);if(-not $task.Wait((Budget))){throw 'TIMEOUT'};if($task.Result -le 0){throw 'IO'};$offset+=$task.Result}
  return ,$buffer
 }
-try {
- Import-Module ([System.IO.Path]::Combine($PSHOME,'Modules','Microsoft.PowerShell.Utility','Microsoft.PowerShell.Utility.psd1'))
- $builder=[System.Text.StringBuilder]::new();$chars=[char[]]::new(1024)
- while(($count=[Console]::In.Read($chars,0,$chars.Length)) -gt 0){if($builder.Length+$count -gt 16384){throw 'IO'};[void]$builder.Append($chars,0,$count)}
- $inputText=$builder.ToString()
+Import-Module ([System.IO.Path]::Combine($PSHOME,'Modules','Microsoft.PowerShell.Utility','Microsoft.PowerShell.Utility.psd1'))
+$owners=@{}
+$hostIdentity=$null
+while ($null -ne ($inputText=[Console]::In.ReadLine())) {
+ $pipe=$null;$script:stage='input'
+ try {
+ if($inputText.Length -gt 16384){throw 'IO'}
  $inputData=$inputText | ConvertFrom-Json
  Fields $inputData @('requestJson','timeoutMs','maxFrameBytes','maxCandidates','expectedProcessId','expectedProcessStartedAt')
  foreach($spec in @(@('timeoutMs',1,60000),@('maxFrameBytes',4096,4194304),@('maxCandidates',1,32))){$value=$inputData.($spec[0]);if($value -isnot [int] -or $value -lt $spec[1] -or $value -gt $spec[2]){throw 'IO'}}
@@ -38,15 +41,16 @@ try {
   Fields $params @('arguments','callId','namespace','threadId','tool','turnId','callerSource')
   foreach($key in @('namespace','callerSource','threadId','callId','turnId','tool')){if($params.($key) -isnot [string]){throw 'IO'}}
   if($params.namespace -ne 'codex_app' -or $params.callerSource -ne 'codex' -or $params.threadId -notmatch '^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$' -or $params.callId -notmatch '^acb-readonly-[a-f0-9-]{36}$' -or $params.turnId -notmatch '^acb-readonly-[a-f0-9-]{36}$'){throw 'IO'}
-  if($params.tool -eq 'list_threads'){Fields $params.arguments @('limit');if($params.arguments.limit -isnot [int] -or $params.arguments.limit -ne 1){throw 'IO'}}
+  if($params.tool -eq 'list_threads'){Fields $params.arguments @('limit');if($params.arguments.limit -isnot [int] -or $params.arguments.limit -notin @(1,30)){throw 'IO'}}
   elseif($params.tool -eq 'read_thread'){
    Fields $params.arguments @('threadId','turnLimit','includeOutputs','maxOutputCharsPerItem')
-   if($params.arguments.threadId -isnot [string] -or $params.arguments.threadId -notmatch '^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$' -or $params.arguments.turnLimit -isnot [int] -or $params.arguments.turnLimit -ne 1 -or $params.arguments.includeOutputs -isnot [bool] -or $params.arguments.includeOutputs -cne $false -or $params.arguments.maxOutputCharsPerItem -isnot [int] -or $params.arguments.maxOutputCharsPerItem -ne 0){throw 'IO'}
+   if($params.arguments.threadId -isnot [string] -or $params.arguments.threadId -notmatch '^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$' -or $params.arguments.turnLimit -isnot [int] -or $params.arguments.turnLimit -ne 1 -or $params.arguments.includeOutputs -isnot [bool] -or $params.arguments.maxOutputCharsPerItem -isnot [int] -or -not (($params.arguments.includeOutputs -ceq $false -and $params.arguments.maxOutputCharsPerItem -eq 0) -or ($params.arguments.includeOutputs -ceq $true -and $params.arguments.maxOutputCharsPerItem -eq 20000))){throw 'IO'}
   }elseif($params.tool -eq 'list_projects'){
    Fields $params.arguments @()
   }else{throw 'IO'}
  }else{throw 'IO'}
  $script:stage='load-native'
+ if(-not ('AcbNativeReadonly' -as [type])) {
  Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
@@ -56,6 +60,7 @@ public static class AcbNativeReadonly {
  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
 }
 '@
+ }
  $foreground=[AcbNativeReadonly]::GetForegroundWindow()
  $session=(Get-Process -Id $PID).SessionId
  $sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
@@ -63,15 +68,16 @@ public static class AcbNativeReadonly {
  $names=@([System.IO.Directory]::GetFiles('\\.\pipe\') | ForEach-Object{[System.IO.Path]::GetFileName($_)} | Where-Object{$_ -match '^codex-browser-use-[a-f0-9-]+$'})
  if($names.Count -eq 0 -or $names.Count -gt $inputData.maxCandidates){throw 'OWNER'}
  $script:stage='host-verification'
- $verified=@();$owners=@{}
+ $verified=@()
  foreach($name in $names){
   $candidate=[System.IO.Pipes.NamedPipeClientStream]::new('.',$name,[System.IO.Pipes.PipeDirection]::InOut,[System.IO.Pipes.PipeOptions]::Asynchronous)
   try{
    $candidate.Connect([Math]::Min(250,(Budget)))
    [uint32]$peerId=0
    if(-not [AcbNativeReadonly]::GetNamedPipeServerProcessId($candidate.SafePipeHandle,[ref]$peerId)){continue}
+   $owner=Get-Process -Id $peerId
+   if($owners.ContainsKey($peerId) -and $owners[$peerId].startedAt -ne $owner.StartTime.ToUniversalTime().ToString('o')){throw 'OWNER'}
    if(-not $owners.ContainsKey($peerId)){
-    $owner=Get-Process -Id $peerId
     $version=[System.Diagnostics.FileVersionInfo]::GetVersionInfo($owner.Path)
     $signature=Get-AuthenticodeSignature -LiteralPath $owner.Path
     $process=Get-CimInstance Win32_Process -Filter ('ProcessId='+$peerId)
@@ -84,6 +90,8 @@ public static class AcbNativeReadonly {
  $processIds=@($verified | ForEach-Object{$_.processId} | Sort-Object -Unique)
  if($processIds.Count -ne 1 -or ($null -ne $inputData.expectedProcessId -and $processIds[0] -ne $inputData.expectedProcessId)){throw 'OWNER'}
  $selected=$verified[0]
+ if($null -ne $hostIdentity -and ($hostIdentity.processId -ne $selected.processId -or $hostIdentity.startedAt -ne $selected.startedAt)){throw 'OWNER'}
+ $hostIdentity=$selected
  if($null -ne $inputData.expectedProcessStartedAt -and $selected.startedAt -ne $inputData.expectedProcessStartedAt){throw 'OWNER'}
  $script:stage='connect'
  $pipe=[System.IO.Pipes.NamedPipeClientStream]::new('.',$selected.name,[System.IO.Pipes.PipeDirection]::InOut,[System.IO.Pipes.PipeOptions]::Asynchronous)
@@ -108,3 +116,5 @@ public static class AcbNativeReadonly {
  $script:stage='output'
  [Console]::Out.WriteLine(($envelope | ConvertTo-Json -Depth 40 -Compress))
 }catch{if($_.Exception.Message -eq 'TIMEOUT'){Fail 'TIMEOUT'}elseif($_.Exception.Message -eq 'OWNER'){Fail 'OWNER'}else{Fail 'IO'}}finally{if($null -ne $pipe){$pipe.Dispose()}}
+
+}

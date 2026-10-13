@@ -1,6 +1,6 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { BridgeError } from './errors.ts';
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 export function schemaVersion(db: DatabaseSync): number { return Number(db.prepare('PRAGMA user_version').get()!.user_version); }
 export function migrateSchema(db: DatabaseSync, schema: string): void {
   let version = schemaVersion(db);
@@ -107,5 +107,13 @@ export function migrateSchema(db: DatabaseSync, schema: string): void {
       state TEXT NOT NULL CHECK(state IN ('SENDING','SENT','REJECTED','UNCERTAIN')),
       receipt_id TEXT, error_code TEXT, updated_at TEXT NOT NULL);
       PRAGMA user_version=4;`);
+    version = 4;
+  }
+  if (version === 4) {
+    db.exec(`ALTER TABLE execution_runs ADD COLUMN result_json TEXT;
+      ALTER TABLE execution_runs ADD COLUMN feedback_state TEXT CHECK(feedback_state IN ('SENDING','COMPLETE','UNCERTAIN'));
+      ALTER TABLE execution_runs ADD COLUMN feedback_json TEXT;
+      ALTER TABLE execution_runs ADD COLUMN feedback_error TEXT;
+      PRAGMA user_version=5;`);
   }
 }

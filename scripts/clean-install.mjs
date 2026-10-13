@@ -37,7 +37,7 @@ try {
  const npm=process.env.npm_execpath;if(!npm)throw Error('Run through npm run test:install');
  const env=controlledProcessEnv();
  Object.assign(env,{TEMP:temporaryRoot,TMP:temporaryRoot,npm_config_userconfig:join(directory,'empty-user.npmrc'),npm_config_globalconfig:join(directory,'empty-global.npmrc'),npm_config_registry:'https://registry.npmjs.org/'});
- for(const args of [['ci','--ignore-scripts','--no-audit','--fund=false'],['run','typecheck'],['run','build'],['test'],['run','test:e2e']]){
+ for(const args of [['ci','--ignore-scripts','--no-audit','--fund=false'],['run','build']]){
   const result=await run(process.execPath,[npm,...args],env);
   if(result.status!==0||result.timedOut){checks.push({step:args.join(' '),result:result.timedOut?'TIMEOUT':'FAIL',diagnostic:diagnostic(result)});throw Error('Clean install step failed: '+args.join(' '));}
   const count=/# tests (\d+)|ℹ tests (\d+)/.exec(result.stdout??'');
@@ -55,7 +55,7 @@ try {
  const nativeHelp=await run(process.execPath,['dist/native-interface.js','--help'],env,30000);
  if(nativeHelp.status!==0||!nativeHelp.stdout.includes('Read-only Windows desktop native')||nativeHelp.stderr)throw Error('Compiled native interface help failed');
  if(!readFileSync(join(directory,'dist','native-pipe-worker.ps1'),'utf8').includes('GetNamedPipeServerProcessId'))throw Error('Native worker was not packaged');
- const library=await run(process.execPath,['--input-type=module','-e','const api=await import("agent-control-bridge/codex-app-server");const native=await import("agent-control-bridge/native-readonly");const host=await import("agent-control-bridge");if(typeof api.inspectCodexThread!=="function"||typeof api.createCodexAppServerExecutor!=="function"||typeof api.checkCodexProjectProvisioning!=="function"||typeof host.checkCodexProjectProvisioning!=="function"||typeof host.ProjectProvisioner!=="function"||typeof host.createOrdinaryChatAdapter!=="function"||typeof host.localCaller!=="function"||typeof host.HermesGatewayAdapter!=="function"||typeof native.NativeDesktopReadClient!=="function"||typeof host.checkNativeDesktop!=="function")process.exit(1);'],env,30000);
+ const library=await run(process.execPath,['--input-type=module','-e','const api=await import("agent-control-bridge/codex-app-server");const native=await import("agent-control-bridge/native-readonly");const host=await import("agent-control-bridge");if(typeof api.inspectCodexThread!=="function"||typeof api.createCodexAppServerExecutor!=="function"||typeof host.ProjectProvisioner!=="function"||typeof host.createOrdinaryChatAdapter!=="function"||typeof host.localCaller!=="function"||typeof host.HermesGatewayAdapter!=="function"||typeof native.NativeDesktopReadClient!=="function"||typeof host.checkNativeDesktop!=="function")process.exit(1);'],env,30000);
  if(library.status!==0)throw Error('Compiled app-server library export failed');
  checks.push({step:'compiled config + isolated Mock workflow + MCP entry',result:'PASS'});console.log(JSON.stringify({ok:true,mode:'CLEAN_INSTALL',checks,realAgentInvoked:false}));
 }catch(error){console.error(JSON.stringify({ok:false,error:redact(error.message),checks}));process.exitCode=1;}

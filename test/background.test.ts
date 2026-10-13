@@ -10,6 +10,7 @@ import { BackgroundBridge, type BackgroundHostBindings } from '../src/background
 import type { OrdinaryChatCapabilities, OrdinaryChatHost } from '../src/ordinary-chat.ts';
 import type { BackgroundExecutor } from '../src/background-runner.ts';
 import { NativeChatMessageHost, type NativeChatPage } from '../src/native-messages.ts';
+import {BridgeError} from '../src/errors.ts';
 
 export const hostCapabilities: OrdinaryChatCapabilities = { source: 'application-host', ordinaryChat: true, background: true, exactConversation: true, completeMessages: true, actualGenerationParameters: true, createOrdinaryChat: true, createWorkspace: true, models: ['fixture-model'], reasoningEfforts: ['fixture-effort'] };
 function setup(t: { after: (fn: () => void) => void }, install = true) {
@@ -76,11 +77,12 @@ test('background: overlapping polls do not generate or execute twice', async t =
   f.submit(); const first = f.bridge.tick(); await Promise.resolve(); assert.equal(await f.bridge.tick(), false);
   release(); await first; assert.equal(f.generated(), 1); assert.equal(f.executed(), 1);
 });
-test('background: unknown actual model is not executable and never becomes a successful task', async t => {
+test('background: unknown actual model remains null and permits delivery awaiting independent acceptance', async t => {
   const f = setup(t), original = f.ordinaryChat.generate;
   f.ordinaryChat.generate = async (...args) => ({ ...await original(...args), actualModel: null });
-  const request = f.submit(); await f.bridge.tick(); assert.equal(f.bridge.get(request.requestId).state, 'BLOCKED'); assert.equal(f.executed(), 0);
-  assert.equal(f.db.prepare('SELECT verified FROM prompts').get()!.verified, 0);
+  const request = f.submit(); await f.bridge.tick(); assert.equal(f.bridge.get(request.requestId).state, 'WAITING_APPROVAL'); assert.equal(f.executed(), 1);
+  const prompt=f.db.prepare('SELECT verified,actual_model FROM prompts').get()!;
+  assert.equal(prompt.verified, 1);assert.equal(prompt.actual_model,null);
 });
 test('background: switched local execution target is rejected before claim or spawn', async t => {
   const f = setup(t); f.executor.inspect = async target => ({ source: 'codex-app-state', local: false, conversationId: target.codexConversationId, appProjectId: 'other', workspacePath: '/fixture/other' });
@@ -101,7 +103,7 @@ test('background: starting another observer never changes a possibly live task h
   assert.equal(f.bridge.get(request.requestId).state, 'RUNNING'); assert.equal(f.executed(), 0);
 });
 
-test('background: native message host uses the registered GPT and never executes the reply', async t => {
+test('background: native message host resolves the registered GPT reply and never executes it', async t => {
   const f = setup(t, false); let reads = 0, sends = 0;
   f.host.chatgptMessages = new NativeChatMessageHost({
     readThread: async input => {
@@ -109,13 +111,65 @@ test('background: native message host uses the registered GPT and never executes
       const result: NativeChatPage = { thread: { id: 'fixture-gpt', kind: 'chatgpt', title: 'fixture-project', status: { type: 'idle' } }, turns: [] };
       if (++reads > 1) result.turns.push({ id: 'fixture-turn', status: 'completed', error: null, items: [
         { type: 'userMessage', id: 'fixture-turn', content: [{ type: 'text', text: '[TEST] marker' }] },
-        { type: 'agentMessage', id: 'fixture-reply', text: '[TEST] reply' },
+        { type: 'agentMessage', id: 'fixture-reply', text: '::chatgpt-content-reference{index="0" source_message_id="fixture-reply"}' },
       ] });
       return result;
     },
     sendMessage: async input => { sends++; assert.deepEqual(input, { threadId: 'fixture-gpt', prompt: '[TEST] marker' }); return { threadId: input.threadId }; },
   });
+  f.host.gptReader = async conversationId => ({ source: 'visible-dom', conversationId, browserTitle: 'fixture-project', kind: 'unknown',
+    completionVerified: false, actualModel: null, actualReasoningEffort: null, responseInProgress: false,
+    messages: [{ role: 'assistant', sourceMessageId: 'fixture-reply', text: '[TEST] reply', hash: 'fixture' }] });
   const result = await f.bridge.sendChatgptMessage('project', '[TEST] marker');
-  assert.equal(result.status, 'completed'); assert.equal(sends, 1); assert.equal(f.executed(), 0);
+  assert.equal(result.status, 'completed'); assert.equal(result.reply, '[TEST] reply'); assert.equal(result.replySource, 'visible-dom'); assert.equal(sends, 1); assert.equal(f.executed(), 0);
   assert.equal(f.db.prepare('SELECT COUNT(*) n FROM prompts').get()!.n, 0);
+});
+
+test('background: completed output is stored and GPT feedback is sent once without accepting the task', async t => {
+  const f = setup(t), execute = f.executor.execute; let generations = 0;
+  f.executor.execute = async (...args) => ({ ...await execute(...args), output: { content: '[TEST] files changed; tests passed', messageIds: ['fixture-result'] } });
+  const generate = f.ordinaryChat.generate;
+  f.ordinaryChat.generate = async (...args) => { generations++; return {...await generate(...args),actualModel:null,actualReasoningEffort:null}; };
+  const request = f.submit(); await f.bridge.tick();
+  assert.equal(generations, 2); assert.equal(f.executed(), 1);
+  const result = f.bridge.executionResult(request.requestId);
+  assert.equal(result.output?.content, '[TEST] files changed; tests passed'); assert.equal(result.feedbackState, 'COMPLETE');
+  assert.equal(result.feedback.actualModel,null);assert.equal(result.feedback.actualReasoningEffort,null);
+  await f.bridge.reviewExecution(request.requestId); assert.equal(generations, 2);
+  assert.equal(f.bridge.get(request.requestId).taskStatus, 'WAITING_APPROVAL');
+});
+
+test('background: unknown GPT feedback keeps the completed execution and is never resent', async t => {
+  const f = setup(t), execute = f.executor.execute, generate = f.ordinaryChat.generate; let generations = 0;
+  f.executor.execute = async (...args) => ({ ...await execute(...args), output: { content: '[TEST] completed result', messageIds: ['fixture-result'] } });
+  f.ordinaryChat.generate = async (...args) => { if (++generations === 2) throw new Error('fixture transport failed'); return generate(...args); };
+  const request = f.submit(); await f.bridge.tick();
+  assert.equal(f.bridge.executionResult(request.requestId).feedbackState, 'UNCERTAIN');
+  assert.equal(f.bridge.get(request.requestId).taskStatus, 'WAITING_APPROVAL');
+  await assert.rejects(f.bridge.reviewExecution(request.requestId), { code: 'CONFLICT' });
+  assert.equal(generations, 2); assert.equal(f.executed(), 1);
+});
+test('background: lost execution receipt is read back without rerunning and completes GPT feedback',async t=>{
+  const f=setup(t),execute=f.executor.execute;let receipt:Awaited<ReturnType<typeof execute>>;
+  f.executor.execute=async(...args)=>{receipt={...await execute(...args),output:{content:'[TEST] completed before receipt loss',messageIds:['fixture-final']}};throw new BridgeError('IO','fixture receipt lost');};
+  f.executor.observeExecution=async(content,_target,startedAfter)=>{assert.equal(content,'[ISOLATED TEST] engineering prompt');assert.ok(Date.parse(startedAfter));return receipt;};
+  const request=f.submit();await f.bridge.tick();assert.equal(f.bridge.get(request.requestId).state,'UNCERTAIN');
+  await f.bridge.reconcileExecution(request.requestId);
+  assert.equal(f.executed(),1);assert.equal(f.generated(),2);assert.equal(f.bridge.get(request.requestId).taskStatus,'WAITING_APPROVAL');
+  assert.equal(f.bridge.executionResult(request.requestId).feedbackState,'COMPLETE');
+});
+
+test('background: scoped UI text is captured before pair diagnostics without generation authority',async t=>{
+  const f=setup(t,false);
+  const order:string[]=[];
+  f.host.nativeInspector=async()=>{order.push('diagnostic');return {target:{identityMatches:true,backingKind:'chatgpt',titleMatches:true}} as any;};
+  f.host.gptReader=async()=>{throw new BridgeError('UNSUPPORTED','Current-instance CDP unavailable');};
+  f.host.gptUiReader=async(id,name,carrier)=>{
+    order.push('ui');
+    assert.equal(id,'fixture-gpt');assert.equal(name,'fixture-project');assert.equal(carrier,'fixture-codex');
+    return {source:'windows-uia',conversationId:id,browserTitle:name,kind:'unknown',completionVerified:false,actualModel:null,actualReasoningEffort:null,responseInProgress:false,messages:[{role:'assistant',text:'fixture reply',sourceMessageId:'fixture-message',hash:'fixture'}]};
+  };
+  const observed=await f.bridge.readGptMessages('project','fixture-codex');
+  assert.deepEqual(order,['ui','diagnostic']);
+  assert.equal(observed.visible.source,'windows-uia');assert.equal(observed.executionAuthorized,false);assert.equal(f.executed(),0);
 });

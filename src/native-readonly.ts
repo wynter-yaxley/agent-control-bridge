@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { join, win32 } from 'node:path';
 import { controlledProcessEnv } from './silent-process.ts';
 import { BridgeError } from './errors.ts';
+import type { NativeChatPage } from './native-messages.ts';
 
 type JsonObject = Record<string, unknown>;
 const workerStages = ['input', 'load-native', 'pipe-discovery', 'host-verification', 'connect', 'frame-write', 'frame-read', 'response-shape', 'output'] as const;
@@ -31,6 +32,7 @@ export interface NativeReadOptions {
   signal?: AbortSignal;
   /** Trusted embedding/testing only. Never accepted from an MCP request. */
   spawnFn?: typeof spawn;
+  worker?: NativeReadWorker;
 }
 export interface NativePeerEvidence { sameUserSignedHost: true; appVersion: string; foregroundUnchanged: boolean }
 export interface NativeToolSummary { name: string; namespace: string; inputSchema: JsonObject }
@@ -59,6 +61,74 @@ export interface NativeConversationSummary {
   projectMappingVerified: false;
 }
 
+export class NativeReadWorker {
+  private child?: ChildProcess;
+  private queue: Promise<unknown> = Promise.resolve();
+  private readonly spawnFn: typeof spawn;
+  constructor(spawnFn: typeof spawn = spawn) { this.spawnFn = spawnFn; }
+  close(): void {
+    const child = this.child; this.child = undefined;
+    if (child?.exitCode === null) child.kill();
+  }
+  request(input: JsonObject, timeoutMs: number, signal?: AbortSignal): Promise<JsonObject> {
+    const deadline = Date.now() + timeoutMs;
+    const pending = this.queue.then(() => this.run(input, deadline - Date.now(), signal));
+    // Release the queue after failure; the caller retains its original rejection.
+    this.queue = pending.then(() => undefined, () => undefined);
+    return pending;
+  }
+  private run(input: JsonObject, timeoutMs: number, signal?: AbortSignal): Promise<JsonObject> {
+    if (timeoutMs < 1 || signal?.aborted) return Promise.reject(new BridgeError('TIMEOUT', 'Native diagnostic cancelled'));
+    if (process.platform !== 'win32' && this.spawnFn === spawn) return Promise.reject(new BridgeError('UNSUPPORTED', 'The native desktop pipe host must run on Windows'));
+    if (!this.child) {
+      const helper = fileURLToPath(new URL('./native-pipe-worker.ps1', import.meta.url));
+      const bootstrap = "& ([scriptblock]::Create([System.IO.File]::ReadAllText('" + helper.replaceAll("'", "''") + "')))";
+      const executable = join(process.env.SystemRoot ?? process.env.WINDIR ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+      this.child = this.spawnFn(executable, ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(bootstrap, 'utf16le').toString('base64')],
+        { env: controlledProcessEnv(), windowsHide: true, shell: false, stdio: ['pipe', 'pipe', 'pipe'] });
+      const child = this.child;
+      child.once('close', () => { if (this.child === child) this.child = undefined; });
+    }
+    const child = this.child;
+    return new Promise((resolve, reject) => {
+      let settled = false, bytes = 0;
+      const chunks: Buffer[] = [];
+      const finish = (error?: BridgeError, value?: JsonObject) => {
+        if (settled) return; settled = true;
+        clearTimeout(timer); signal?.removeEventListener('abort', abort);
+        child.stdout!.removeListener('data', output); child.stderr!.removeListener('data', diagnostics);
+        child.removeListener('error', failed); child.removeListener('close', closed); child.stdin!.removeListener('error', inputFailed);
+        if (error) { this.close(); reject(error); } else resolve(value!);
+      };
+      const decode = () => {
+        try { finish(undefined, object(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks))))); }
+        catch { finish(new BridgeError('IO', 'Native worker response is invalid')); }
+      };
+      const count = (data: Buffer) => {
+        bytes += data.length;
+        if (bytes > Number(input.maxFrameBytes) + 8192) finish(new BridgeError('IO', 'Native diagnostic output exceeded its budget'));
+      };
+      const output = (data: Buffer) => { count(data); if (settled) return; chunks.push(data); if (data.includes(10)) decode(); };
+      const diagnostics = (data: Buffer) => count(data);
+      const abort = () => finish(new BridgeError('TIMEOUT', 'Native diagnostic cancelled'));
+      const failed = () => finish(new BridgeError('DEPENDENCY', 'Native read-only worker could not start'));
+      const inputFailed = () => finish(new BridgeError('IO', 'Native worker input failed'));
+      // EOF is also accepted for existing one-shot trusted transports.
+      const closed = (code: number) => {
+        if (code === 0 && chunks.length) decode();
+        else finish(new BridgeError('IO', 'Native worker failed; private diagnostics omitted'));
+      };
+      const timer = setTimeout(abort, timeoutMs);
+      signal?.addEventListener('abort', abort, { once: true });
+      child.once('error', failed); child.once('close', closed); child.stdin!.on('error', inputFailed);
+      child.stdout!.on('data', output); child.stderr!.on('data', diagnostics);
+      child.stdin!.write(JSON.stringify({ ...input, timeoutMs }) + '\n');
+    });
+  }
+}
+const sharedWorker = new NativeReadWorker();
+export const closeNativeReadWorker = () => sharedWorker.close();
+
 /** Read-only transport. No write method, browser, credentials, or capability installation. */
 export class NativeDesktopReadClient {
   private readonly options: NativeReadOptions;
@@ -67,6 +137,7 @@ export class NativeDesktopReadClient {
   private peerStartedAt: string | undefined;
   private busy = false;
   private requests = 0;
+  private readonly worker: NativeReadWorker;
   peer: NativePeerEvidence | undefined;
   constructor(options: NativeReadOptions) {
     identifier(options.carrierThreadId);
@@ -74,6 +145,7 @@ export class NativeDesktopReadClient {
       if (!Number.isInteger(value) || value < min || value > max) throw new BridgeError('CONFIG', 'Invalid native diagnostic budget');
     }
     this.options = { ...options };
+    this.worker = options.worker ?? (options.spawnFn ? new NativeReadWorker(options.spawnFn) : sharedWorker);
     this.deadline = Date.now() + options.timeoutMs;
   }
   private async request(method: 'tools/list' | 'tools/call', tool?: 'list_threads' | 'read_thread' | 'list_projects', args?: JsonObject): Promise<JsonObject> {
@@ -90,8 +162,8 @@ export class NativeDesktopReadClient {
     } };
     this.busy = true;
     try {
-      const envelope = await this.runWorker({ requestJson: JSON.stringify(request), timeoutMs: remaining, maxFrameBytes: this.options.maxFrameBytes,
-        maxCandidates: this.options.maxCandidates, expectedProcessId: this.peerPid ?? null, expectedProcessStartedAt: this.peerStartedAt ?? null }, remaining);
+      const envelope = await this.worker.request({ requestJson: JSON.stringify(request), timeoutMs: remaining, maxFrameBytes: this.options.maxFrameBytes,
+        maxCandidates: this.options.maxCandidates, expectedProcessId: this.peerPid ?? null, expectedProcessStartedAt: this.peerStartedAt ?? null }, remaining, this.options.signal);
       if (envelope.ok !== true) throw new NativeInterfaceError(envelope.code === 'TIMEOUT' ? 'TIMEOUT' : envelope.code === 'OWNER' ? 'OWNER' : 'IO', envelope.stage);
       const peer = object(envelope.peer);
       if (peer.sameUserSignedHost !== true || !Number.isSafeInteger(peer.processId) || Number(peer.processId) < 1 || typeof peer.appVersion !== 'string' || !/^\d+(?:\.\d+){1,4}$/.test(peer.appVersion) ||
@@ -116,48 +188,6 @@ export class NativeDesktopReadClient {
       catch (error) { if (error instanceof BridgeError) throw error; throw new BridgeError('IO', 'Native tool response JSON is invalid'); }
     } finally { this.busy = false; }
   }
-  private async runWorker(input: JsonObject, timeoutMs: number): Promise<JsonObject> {
-    if (process.platform !== 'win32' && !this.options.spawnFn) throw new BridgeError('UNSUPPORTED', 'The native desktop pipe host must run on Windows');
-    const helper = fileURLToPath(new URL('./native-pipe-worker.ps1', import.meta.url));
-    const bootstrap = `& ([scriptblock]::Create([System.IO.File]::ReadAllText('${helper.replaceAll("'", "''")}')))`;
-    const executable = join(process.env.SystemRoot ?? process.env.WINDIR ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-    return new Promise((resolve, reject) => {
-      let child: ChildProcess | undefined, timer: ReturnType<typeof setTimeout> | undefined, settled = false, bytes = 0;
-      const chunks: Buffer[] = [];
-      const finish = (error?: BridgeError, value?: JsonObject) => {
-        if (settled) return; settled = true;
-        if (timer) clearTimeout(timer);
-        this.options.signal?.removeEventListener('abort', abort);
-        if (child && child.exitCode === null) child.kill();
-        if (error) reject(error); else resolve(value!);
-      };
-      const abort = () => finish(new BridgeError('TIMEOUT', 'Native diagnostic cancelled'));
-      try {
-        child = (this.options.spawnFn ?? spawn)(executable, ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(bootstrap, 'utf16le').toString('base64')],
-          { env: controlledProcessEnv(), windowsHide: true, shell: false, stdio: ['pipe', 'pipe', 'pipe'] });
-        timer = setTimeout(() => finish(new BridgeError('TIMEOUT', 'Native diagnostic deadline exceeded')), timeoutMs);
-        this.options.signal?.addEventListener('abort', abort, { once: true });
-        child.once('error', () => finish(new BridgeError('DEPENDENCY', 'Native read-only worker could not start')));
-        child.stdin!.on('error', () => finish(new BridgeError('IO', 'Native worker input failed')));
-        child.stdout!.on('data', (data: Buffer) => {
-          if (settled) return;
-          bytes += data.length;
-          if (bytes > this.options.maxFrameBytes + 8192) { finish(new BridgeError('IO', 'Native diagnostic output exceeded its budget')); return; }
-          chunks.push(data);
-        });
-        // Discard private stderr; still count it toward the same absolute output budget.
-        child.stderr!.on('data', (data: Buffer) => { if (settled) return; bytes += data.length; if (bytes > this.options.maxFrameBytes + 8192) finish(new BridgeError('IO', 'Native diagnostic output exceeded its budget')); });
-        child.once('close', code => {
-          if (settled) return;
-          if (code !== 0) { finish(new BridgeError('IO', 'Native worker failed; private diagnostics omitted')); return; }
-          try { finish(undefined, object(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks))))); }
-          catch { finish(new BridgeError('IO', 'Native worker response is invalid')); }
-        });
-        if (this.options.signal?.aborted) abort();
-        else child.stdin!.end(JSON.stringify(input));
-      } catch { finish(new BridgeError('DEPENDENCY', 'Native read-only worker could not start')); }
-    });
-  }
   async catalog(): Promise<NativeToolSummary[]> {
     const result = await this.request('tools/list');
     if (!Array.isArray(result.tools) || result.tools.length > 1000) throw new BridgeError('IO', 'Invalid native tool catalog');
@@ -173,6 +203,18 @@ export class NativeDesktopReadClient {
     if (!Array.isArray(result.pinnedThreads) || !Array.isArray(result.threads)) throw new BridgeError('IO', 'Invalid native thread inventory');
     const rows = [...result.pinnedThreads, ...result.threads].map(object);
     return { currentCarrierVisible: rows.some(row => row.id === this.options.carrierThreadId), chatgptBackingVisible: rows.some(row => row.kind === 'chatgpt') };
+  }
+  async projectInventory(): Promise<{ projects: { projectId: string; projectKind: string; label: string; path: string; hostId: string }[] }> {
+    return await this.request('tools/call', 'list_projects', {}) as unknown as Awaited<ReturnType<NativeDesktopReadClient['projectInventory']>>;
+  }
+  async threadInventory(): Promise<{ threads: { id: string; kind: string; title: string; projectId?: string | null; cwd?: string }[]; pinnedThreads: { id: string; kind: string; title: string }[] }> {
+    return await this.request('tools/call', 'list_threads', { limit: 30 }) as unknown as Awaited<ReturnType<NativeDesktopReadClient['threadInventory']>>;
+  }
+  async readConversationPage(conversationId: string): Promise<NativeChatPage> {
+    identifier(conversationId);
+    const page = await this.request('tools/call', 'read_thread', { threadId: conversationId, turnLimit: 1, includeOutputs: true, maxOutputCharsPerItem: 20000 }) as unknown as NativeChatPage;
+    if (page.thread.id !== conversationId) throw new BridgeError('PROVENANCE', 'Native conversation page identity differs');
+    return page;
   }
   async projectSummary(expected: NativeProjectExpectation): Promise<NativeProjectSummary> {
     identifier(expected.appProjectId);

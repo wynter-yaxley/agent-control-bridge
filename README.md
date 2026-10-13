@@ -1,150 +1,177 @@
 # Agent Control Bridge
 
-[English](README_EN.md)
+Hermes 通过飞书协调现有 ChatGPT/Codex：GPT 生成工程 Prompt，Bridge 验证真实来源并投递，Codex 执行，结果回同一 GPT 复核，Hermes 独立验收与报告。复用现有登录态，不提供模型推理服务，不引入额外按 Token 计费的 OpenAI API。
 
-Agent Control Bridge 是连接 Hermes、ChatGPT 与 Codex 的本地任务控制和状态管理桥。它为飞书上的 Hermes 提供任务台账、进度观察与独立验收接口，让 ChatGPT 生成工程 Prompt，由桥验证并中转给 Codex 执行开发。
+每项目固定 **一个原生 Codex workspace、一个同名普通 GPT 对话、多个该 workspace 内 Codex 对话**。SQLite 保存映射、来源、状态、通知及回执，禁止跨项目混用身份。
 
-项目保留各 Agent 的职责：Hermes 协调并向用户汇报；ChatGPT 负责沟通和生成 Prompt；Codex 执行开发；Bridge 管理来源、权限和状态；SQLite 保存可追踪记录。它适合已有桌面 Agent 的协作场景，不提供模型推理服务。
+    飞书 → Hermes → 普通 GPT → 来源核验 → 登记的 Codex → GPT 复核
+             ↑                    Bridge / SQLite          ↓
+             └──── 通知、实际交付、独立验收 ←───────────────┘
 
-## 核心能力
+0.2.0 为待验收开发版本。已完成真实隔离 GPT → 原生桌面 Codex → GPT 闭环，过程中需要页面定位、停止生成与对账恢复。**完全静默无人值守未验证，默认 MCP 没有安装桌面写宿主。** 实际 GPT 模型/思考强度未知记录 null，不再阻断；真实来源、完整正文、精确会话/消息 ID 和哈希仍须核验。
 
-- **任务生命周期**：原子领取、版本冲突检测、租约、进度、交付、取消与显式恢复。
-- **独立验收**：执行者只能提交待验收交付；授权的独立 reviewer 是 `SUCCEEDED` 的唯一入口。
-- **Prompt 中转接口**：校验可信来源、会话、模型能力和内容哈希，记录投递状态；不确定投递保留待核实状态。
-- **SQLite 台账**：任务、事件、审批、来源、验收与持久通知；支持受控 Schema 升级。
-- **Watcher**：事件触发检查与周期轮询、通知去重、重启恢复、阻塞超时报备记录。
-- **桌面协作工具**：受限 CDP 读取与授权发送接口，默认关闭写入；不接管物理鼠标键盘。
-- **无凭据 Demo**：隔离 Mock 完整演示 ChatGPT → Bridge → Codex → Watcher → 独立验收。
-- **后台原生读取诊断**：Windows 管道读取已存在的 Codex/GPT 对话摘要，核对目标 ID/标题，无浏览器、物理输入或前台切换；读取成功仍不授权生产生成。见 [原生接口说明](docs/NATIVE_DESKTOP.md)。
+## 能力与自动化边界
 
-**当前边界**：真实桌面生成适配器尚不能独立证明 GPT-6/High，生产自动 Prompt 投递默认拒绝。飞书消息发送须接入 Hermes 消息适配器。Codex 本地历史是快照，不能完整观察所有后台执行；取消台账不证明真实 Agent 已停止。详见 [部署说明](docs/DEPLOYMENT.md)。
+| 技术 | 操作 | 依赖 GUI | 页面/编辑焦点影响 | 静默能力 |
+|---|---|---|---|---|
+| Native IPC | 项目、会话、目录及轮次只读 | 不操作 GUI | 实测读取未改变前台 | 当前签名宿主兼容性接口，有条件；不是承诺稳定的公开外部 API |
+| Windows UIA | 正常按钮、菜单、编辑框和正文 | 是，桌面须可交互 | 可能切换页面和编辑焦点 | 不保证；需要可信宿主本次批准 |
+| 当前实例 CDP | 已有受控页面读取/传输 | 依赖现有页面结构和调试端点 | 读取不导航；写入可能影响页面/焦点 | 不保证；不自动开启端口或创建浏览器/Profile |
+| Codex App Server | 正式 stdio 工程执行和事件 | 不依赖桌面 GUI | 通常无须焦点 | 协议支持；仍须可信原生归属和会话排他证明 |
 
-## 架构
+| 业务操作 | 适配器/实际证据 | 桌面条件与影响 | 限制 |
+|---|---|---|---|
+| 创建原生 Workspace | WindowsNativeProjectHost：正常 UIA + 原生 ID/目录回读，组件真实通过 | 可交互；可能改变页面/编辑焦点 | 本次初始化与精确目录批准；独立 App Server 项目不算原生 |
+| 创建/精确命名普通 GPT | 同一 ProjectHost；正常聊天模式、改名保存、ID/标题回读真实通过 | 可交互；会改变页面 | 标题与 workspace 完全同名；整套自动创建待部署实测 |
+| 创建 Codex/核验归属 | 正式宿主创建及原生 projectId/cwd 回读真实通过；UIA Work 分支有实现 | UIA 创建依赖可交互界面 | 新 UIA 创建分支未整套实测；不能只凭 cwd 推断成员关系 |
+| 完整 GPT 回复/发送 | ConversationHost：UIA 正文 + 原生消息关联；真实工程 Prompt/反馈通过 | 可交互；导航/发送可能改变页面和编辑焦点 | 内容引用不是正文；合成 idle/completed 不能证明流式结束；诊断读取不授予生成权 |
+| 原生 Codex 执行 | ConversationHost + runner；真实文件及一次 Node 断言通过 | UIA 发送依赖界面，状态/最终输出经 IPC 读回 | 只执行一次，回执丢失须对账原执行 |
+| App Server 后台执行 | 既有执行适配器；协议/事件/沙箱经隔离测试 | 不操作 GUI | 当前目标的真实工程集成待独立验收，不负责原生桌面项目创建 |
+| 状态/通知/恢复 | 队列、Watcher、outbox 和对账入口；隔离测试与原生恢复实证 | 普通状态查询无 UI；GPT 对账可能导航 | 不以失联推断完成；周期/阈值取统一配置 |
+| 独立验收/飞书送达 | 受保护 reviewer + Hermes 既有通道 | 无须桌面写入 | 开发者/GPT 不能自验；Hermes stdio 写宿主与飞书端到端待实测 |
 
-![Agent Control Bridge 架构与数据流](assets/architecture.svg)
+不启动第二实例、Profile、浏览器/WebView；不重启或停止现有应用，不提升权限、注入、写应用私有数据库、提取凭据或接管物理输入。UIA 仍使用既有局部查询和 Automation Pattern，没有另建驱动或坐标兜底。
 
-```text
-用户需求 → Hermes → ChatGPT 生成 Prompt → Bridge 验证/中转 → Codex 执行
-                    Bridge ← 状态与交付 ← Codex
-                       ↕ SQLite       ↓ Watcher
-用户 ← Hermes 汇报 ← 独立验收入口 → Bridge 最终状态
-```
+## 安装与配置
 
-一个项目登记 **1 个 Codex workspace + 该 workspace 下 N 个 Codex 对话 + 1 个 GPT 对话**。GPT 对话名必须与 workspace 项目名一致；开发、测试和交付在登记的 Codex 对话中进行。新项目成套隔离，生产适配器必须独立核对实际会话。
+Node.js >=24.19.0、npm、Git。Windows IPC/UIA 使用系统 PowerShell 5.1，无须另装 UI 框架。只有保留的 CDP Python 适配器需要 Python >=3.10 及 websocket-client。
 
-## 快速开始
+    git clone https://github.com/wynter-yaxley/agent-control-bridge.git
+    cd agent-control-bridge
+    npm ci --ignore-scripts
+    npm run build
+    node dist/cli.js help
+    node dist/cli.js demo
 
-0.2.0 开发版本增加了 stdio MCP 入口、持久后台队列、独立执行者、普通 GPT 宿主接口、项目建套流程和待发送通知回执。普通 GPT 的真实宿主绑定尚未完成；缺少能力时会记录 `BLOCKED`，不会改用浏览器或第二 profile。见 [后台 MCP 接入与当前边界](docs/BACKGROUND_MCP.md)。
+demo 使用唯一临时库与明确 Mock 来源，退出清理，不调用真实模型或读取业务库。Mock 不能通过配置开启生产权限。
 
-### 环境
+复制 [config.example.json](config.example.json) 为 .bridge.config.json，配置实际路径和启用项。默认 Agent/桌面操作关闭；CLI > ACB_* 环境变量 > 文件 > 默认。配置不是角色或 UI 授权。
 
-核心 CLI 需要 **Node.js >=24.19.0、npm 和 Git**，使用 Node 内置 SQLite，无需 SQLite 原生扩展。MCP 入口使用官方 MCP TypeScript SDK 和 Zod。核心面向 Windows/Linux；既有桌面集成面向 Windows，需要 Python >=3.10、可选的 `websocket-client`、已安装并登录的外部 Agent 应用及受控 CDP 接口。Demo 不需要这些桌面条件。
+| 配置 | 默认值及用途 |
+|---|---|
+| database.path | ./data/bridge.db，专用台账 |
+| background.workspaceRoot / maxConcurrent | ./workspaces / 1，创建和执行串行，共用宿主 |
+| background.timeoutMs / leaseSeconds | 120000 / 600，租约大于操作预算 |
+| background.intervalMs / watcher.intervalMs | 60000，事件触发加周期兜底 |
+| watcher.timeoutMs / failureReporting.blockedAfterMs | 10000 / 600000，检测预算和持续阻塞上报阈值 |
+| nativeInterface | 原生预算、帧大小、候选上限和只读白名单 |
+| desktop.uiPollMs | 100，UIA 控件等待周期 |
+| desktop.cdpUrl / python | 已有回环调试端点 / Python；UIA 路线无须 CDP |
+| agents.chatgpt.model / reasoningEffort | 请求 gpt-6 / high，不代表实际参数已验证 |
+| agents.codex.executable | 正式 Codex CLI 路径，用于 App Server |
 
-```sh
-git clone https://github.com/wynter-yaxley/agent-control-bridge.git
-cd agent-control-bridge
-npm install
-npm run build
-npm test
-node dist/cli.js help
-node dist/cli.js demo
-```
+真实 GPT/Codex 还需对应 agents.*.enabled。GPT 曾超过 120 秒，上一隔离测试使用 timeoutMs=600000、leaseSeconds=1000、uiPollMs=1000；这些值不是时延保证。
 
-`demo` 创建并清理唯一临时库，展示生成测试 Prompt、桥接投递、Codex 领取、进度、Watcher、提交交付、拒绝执行者自验、独立 Mock 验收与最终查询。`mock-chatgpt` 来源和 `mock:gpt-6` 模型明确标记为测试数据；不会调用付费模型或读取业务库。普通配置或环境变量不能打开生产 Mock 权限。
+新库可用 node dist/cli.js init --config <配置>。既有库先一致性备份、在副本验证，再显式 migrate；不自动迁移业务库，不只复制活跃 SQLite 主文件而忽略 WAL。
 
-### 初始化本地台账
+身份来自 OS principal 与受保护的 [caller-policy.example.json](config/caller-policy.example.json)，实际策略固定为 config/caller-policy.json。controller、Codex executor、独立 reviewer 分开，保护策略/代码/库 ACL。业务文本、环境变量、MCP 参数和 --by 不能授权。同 OS 任意恶意代码不受台账角色隔离；没有公共多租户 HTTP 服务。
 
-PowerShell：
+## Hermes / MCP 接入
 
-```powershell
-Copy-Item config.example.json .bridge.config.json
-node dist/cli.js init --config .bridge.config.json
-node dist/cli.js config-show --config .bridge.config.json
-node dist/cli.js schema-version
-```
+    node <项目绝对目录>/dist/mcp.js --config <配置绝对路径> --db <专用数据库绝对路径>
 
-其他终端可用 `cp config.example.json .bridge.config.json`。默认关闭外部 Agent 与桌面操作；数据目录应专用并受限。完整真实环境配置见 [部署说明](docs/DEPLOYMENT.md)。
+stdout 只承载 MCP，安全错误写 stderr。默认入口提供台账和按配置启用的诊断；**真实工作流由可信 Windows 组合根通过 runMcp(args, createHost) 安装宿主**。开关不授予桌面写权，也不能从业务消息加载任意脚本。
 
-## 配置
+受保护启动代码复用既有实现，trusted 必须来自实际宿主，提供本次批准和真实执行者绑定，没有自动批准默认值：
 
-配置优先级：**CLI 显式参数 > 对应环境变量 > 本地配置文件 > 内置默认值**。`--config` 或 `ACB_CONFIG` 选择配置文件；`--db` 覆盖数据库路径。配置内相对数据路径以配置文件目录为基准，环境变量和 CLI 的数据库路径以工作目录为基准。未知字段、非法类型和不安全端点会被拒绝。
+    import {
+      runMcp, createWindowsNativeReadTools,
+      createWindowsNativeProjectHost, createWindowsNativeConversationHost,
+    } from './dist/host-api.js';
 
-| 配置 | 默认值与用途 | 环境覆盖 |
-|---|---|---|
-| `database.path` | `./data/bridge.db`，专用台账目录 | `ACB_DB_PATH` |
-| `database.busyTimeoutMs` | `5000`，有限 SQLite 锁等待 | — |
-| `watcher.intervalMs` | `60000`，跨进程轮询兜底 | `ACB_WATCH_INTERVAL_MS` |
-| `watcher.timeoutMs` | `10000`，合作式检测预算 | — |
-| `failureReporting.blockedAfterMs` | `600000`，持续阻塞报备阈值 | `ACB_BLOCKED_REPORT_MS` |
-| `agents.chatgpt.model` | `gpt-6`，请求模型，不代表已验证实际模型 | `ACB_CHATGPT_MODEL` |
-| `agents.chatgpt.reasoningEffort` | `high`，请求思考强度 | `ACB_CHATGPT_REASONING` |
-| `desktop.cdpUrl` | 本机回环端点，具体样例见配置文件 | `ACB_CDP_URL` |
-| `desktop.enabled` / `allowForegroundAutomation` | `false`；开启配置仍不授予单次操作权限 | — |
-| `desktop.allowPhysicalInput` | `false`；物理输入不支持 | — |
+    export async function startDesktopBridge(args, trusted) {
+      await runMcp(args, ({ config, authority, context }) => {
+        const native = createWindowsNativeReadTools(
+          config, trusted.carrierThreadId, trusted.createCodexThread,
+        );
+        return {
+          projects: createWindowsNativeProjectHost({
+            config, native, authorizeInitialization: trusted.authorizeInitialization,
+          }),
+          ...createWindowsNativeConversationHost({
+            config, native, authorizeUiOperation: trusted.authorizeUiOperation,
+          }),
+          executorContext: trusted.bindExecutor(authority, context),
+        };
+      });
+    }
 
-Watcher 本进程事件可触发即时检查，跨进程依赖周期兜底。检测及时返回且事件循环正常时，目标为一个周期加检测耗时与调度延迟；**不承诺无条件最坏 60 秒 SLA**。阻塞通知也是本地台账事件，Hermes 需要消费并真正向用户上报。完整字段见 [config.example.json](config.example.json)。
+carrierThreadId 是现有工具调用上下文，不是角色授权。正式 Codex 创建回调可选，否则走已有 UIA Work 分支。授权绑定本次项目名/目录、会话 ID、动作和事件；一次批准可覆盖明确列出的初始化、生成、执行、反馈和清理，不能保存为永久配置。
 
-## 使用方法
+[Hermes MCP 样例](config/hermes-mcp.example.yaml) 默认开放 15 个流程工具，诊断按需加入，reviewer 使用单独受保护连接。路径变量替换为实际非秘密路径。同步项目调用预算覆盖五个顺序阶段：120000ms 示例为 630 秒，600000ms 示例为 3030 秒；客户端超时不能触发盲目重发。
 
-### 手动台账演练
+WSL Hermes 的管道/UIA 宿主运行在当前登录桌面的 Windows 会话，通过既有合法传输连接。tools/hermes/mcp_probe.py 只验证隔离协议，不是真实写宿主。HermesGatewayAdapter 复用已验证飞书事件和可信项目路由；NotificationDispatcher 持久保存回执，不另起事件消费者。
 
-以下只演示记录操作，不自动执行代码。默认 CLI 调用者是无 reviewer 权限的 `pi`，因此用 `pi` 演练；生产 Codex 领取另外要求已经验证并投递的 ChatGPT Prompt。
+## MCP 工具
 
-```sh
-node dist/cli.js task-create -t "本地台账演练" -k demo -e pi
-node dist/cli.js task-list --status QUEUED
-node dist/cli.js task-claim TASK_ID --version 0 -e pi
-node dist/cli.js task-progress TASK_ID --version 1 --note "人工模拟开发完成"
-node dist/cli.js task-renew TASK_ID --version 2 --lease 600
-node dist/cli.js task-finish TASK_ID --version 3 --note "交付待独立验收"
-node dist/cli.js task-show TASK_ID
-node dist/cli.js watch
-```
+保留原 acb_ 名称，不增加动态搜索/注册中心。状态为紧凑摘要，完整证据按需读。
 
-将 `TASK_ID` 替换为返回的 UUID，每次操作采用查询得到的最新版本。`watch` 是独立观察进程，可在其终端停止，不停止外部 Agent。只有部署好的独立 reviewer OS 身份可执行：
+| 工具 | 功能 |
+|---|---|
+| acb_capabilities | 宿主、阻断、uiInteractionRequired；先查一次，环境修复后再查 |
+| acb_project_prepare / acb_project_get | 成套创建、状态及已记录资源 ID；READY 才能用于任务 |
+| acb_project_reconcile | 核验原 UNCERTAIN 完整 bundle，不重建、不接受替代 ID |
+| acb_request_submit / acb_request_get | 需求入队、eventKey 去重、状态/version/attempt/最后事件 |
+| acb_request_retry | 原因修复后重试无未知外部结果的 BLOCKED |
+| acb_execution_result | 默认结果/反馈 ID、哈希、字符数；includeContent:true 取完整正文 |
+| acb_execution_review | 将保存交付回固定 GPT 一次，不等于验收 |
+| acb_request_reconcile_generation | 回读原 GPT 生成并恢复队列，不重发 |
+| acb_request_reconcile_execution | 原执行者核对原回执再回 GPT，不重跑 |
+| acb_execution_reconcile_feedback | 回读原 SENDING/UNCERTAIN 反馈，不重发 |
+| acb_notifications_pull / acb_notifications_ack / acb_notifications_status | 通知领取、实际 external receipt 确认、数量/不确定发送 |
+| acb_review_submit | 独立 reviewer 与 expectedVersion；controller/executor 不开放 |
+| acb_codex_target_check / acb_native_target_check / acb_gpt_read | 可选只读诊断，不授予执行/创建/生成完成权限 |
 
-```sh
-node dist/cli.js task-verify TASK_ID --version 4 --pass --reason "独立检查交付"
-node dist/cli.js task-show TASK_ID
-node dist/cli.js status
-```
+兼容变化：需要全文的旧客户端给 acb_execution_result 加 includeContent:true。原正文仍在台账保存，状态查询不重复返回 Prompt/历史。project 操作的 resources 返回已取得的 appProjectId、GPT/Codex conversationId 和路径，省去 CLI 映射查询；部分身份不代表成功。
 
-验收结果写入 SQLite，最终状态可查询；真实用户消息由 Hermes 消息适配器发送。无需部署身份的完整演练使用 `demo`。
+## 一次真实工作流
 
-### 状态机与权限
+1. 构建、绑定可信宿主/角色与本次 UI 范围；查 acb_capabilities。HOST_MISSING 先安装，不在未变环境反复重试。fullWorkflowReady 固定 false，TARGET_ENVIRONMENT_ACCEPTANCE_REQUIRED 留给目标验收，不伪造通过。
+2. acb_project_prepare {name,eventKey} 创建唯一隔离套件，保存 operationId/projectId/resources。GPT 精确同名，原生 ID/路径/ordinary 模式/Codex 成员关系必须回读。
+3. acb_request_submit {eventKey,projectId,title,requirement}，飞书用真实事件 ID。需求不是工程 Prompt；队列自动选登记会话、生成、核验、投递、保存结果并回 GPT。
+4. 优先消费通知；仅在状态变化、恢复、验收需要时查状态。WAITING_APPROVAL 且反馈 COMPLETE 后，acb_execution_result {requestId,includeContent:true} 一次读取证据；必要来源字段由受保护只读台账核对。
+5. Hermes 独立验证实际文件/测试，再由独立 reviewer 调 acb_review_submit {taskId,expectedVersion,pass,reason}。GPT 复核/Codex 自报 PASS 不替代验收。
+6. 领取通知后由 Hermes 原飞书通道发送，保存真实 receipt 再 ack。结束只清理归属明确的本次测试资源，不动用户库、其他 workspace/聊天。
 
-```text
-QUEUED → RUNNING → WAITING_APPROVAL → 独立 verify(pass) → SUCCEEDED
-                  WAITING_APPROVAL → 独立 verify(fail) → FAILED
-RUNNING ⇄ BLOCKED
-过期 RUNNING/BLOCKED → 独立 recover → FAILED → reviewer requeue → QUEUED
-UNKNOWN → reviewer requeue → QUEUED
-合法活动状态 → owner cancel → CANCELLED
-```
+最小真实测试仅在新目录创建唯一文本文件并核验固定内容，不重复旧探针。只有独立验收能进入 SUCCEEDED。用户 workspace/配置及忽略的私有运行证据不属于源码清理范围。
 
-`--by`、执行者名称、role 字符串与环境变量不能授予权限。调用身份来自 OS 主体和受保护策略；状态更新校验版本、holder、instance 与 attempt。执行者不能验收自己，普通 SQL 最终成功写入也有验收门禁。直接修改宿主代码、策略或数据库的所有者属于可信边界；同一 OS 账户的任意恶意代码不受这套台账权限隔离。Linux 当前支持单用户核心 CLI 与 Demo；跨 uid 共享写入验收尚未提供。部署配置见 [身份和安全模型](docs/DEPLOYMENT.md)。
+## 故障与恢复
 
-项目不获取、复制、展示、保存或修改认证凭据，不导出 Cookie 或会话 Token。运行库、个人配置、日志、Profile 与缓存默认不入库；消息和日志仍应避免含私密业务内容。
+| 错误/状态 | 处理 |
+|---|---|
+| AUTH / OWNER | 核对真实宿主/上下文/本次批准，不能自签业务角色或改私有状态 |
+| BLOCKED / UNSUPPORTED | 报告缺失宿主/控件；环境未变不重试 |
+| PROVENANCE | 核对原会话/标题/归属、完整正文、消息 ID/哈希；不放宽条件 |
+| CONFLICT | 查看 version/attempt/holder，保留用户草稿及运行任务 |
+| GPT generation UNCERTAIN | reconcile_generation 回读原请求；合成完成不足以证明流式结束 |
+| 工程 UNCERTAIN | reconcile_execution 核对原 Prompt/起始时间/目标/final_answer，不重跑 |
+| 反馈 SENDING/UNCERTAIN | reconcile_feedback，不重发结果 |
+| project UNCERTAIN | 完整原资源才可 reconcile，缺 ID 则报告，不能补造 |
+| DB / SCHEMA | 一致性备份、副本验证、显式迁移 |
+| TIMEOUT / 失联 | 保留未知结果并按阈值报告，不以失联推断成功或确定退出 |
 
-### 真实桌面模式与扩展
+恢复应用先报告、确认退出、取得事件批准、核对原映射；不可结束仍运行的应用。页面不稳定/账户挑战须如实报告，不能保证零风控。
 
-先安装、登录外部应用并配置本机 CDP，再由可信宿主安装生成/传输适配器，登记 workspace/GPT/Codex 会话。ChatGPT 的实际模型、思考强度或来源无法验证时，产物保持 `REVIEW_REQUIRED`；没有可靠证明不能自动进入 Codex。手动文件导入不会授权执行。
+## 性能、生命周期与验证
 
-桌面发送可能改变编辑焦点，需要可信宿主单次授权，命令行参数不能授权。默认只提供受限读取与诊断；不会重启正在使用的应用。工具参数、兼容入口和故障说明见 [桌面工具](tools/desktop/README.md)；恢复步骤见 [部署说明](docs/DEPLOYMENT.md)。
+每个 Bridge 进程/Windows 用户会话串行复用一个自有 PowerShell worker，JSON 行和原 JSON-RPC ID 关联请求。新 pipe handle 均核对签名宿主 PID/启动时间；签名/同用户检查只对同一存活进程缓存。超时只结束自有 worker，不重放请求、不动桌面应用。runMcp 在在途操作结束后关闭 worker；直接底层宿主退出时调用 closeNativeReadWorker() 或 NativeReadWorker.close()。
 
-新增 Agent 可实现窄能力接口并注册可信适配器；新增执行者类型还需要兼容扩展状态类型和 Schema。参见 [开发说明](docs/DEVELOPMENT.md)。
+2026-10-13 少量同机只读采样：原两次启动耗时 4583/1628ms，复用冷/热为 3828/219ms，启动数 2→1，59 字节摘要一致、前台未变。只测一次冷/热组合，不是 SLA 或实际 Token Usage；没有遥测服务。App Server 在单次执行内已复用连接读事件和结果，不引入进程池。UIA 操作算法未改，不增加未经批准的写测试。
 
-### 故障排查
+    npm run typecheck
+    npm run build
+    npm test
+    npm run test:desktop
+    npm run check
+    npm audit --audit-level=high
+    npm run test:install
 
-成功 JSON 写 stdout，错误 JSON 写 stderr。退出码：`1` 文件/I/O；`2` 参数/配置；`3` 权限/来源；`4` 状态/版本/租约/验收；`5` 数据库/Schema；`6` Agent/能力/依赖；`7` 超时；`8` 执行失败。
+npm test 已发现全部 Node 测试，包含 e2e/workflow；CI 不再重复同一 e2e 集合。test:e2e 仍可定向执行。干净安装只验证依赖/构建/编译入口/Mock 演练，不重跑源码矩阵。Mock 通过不等于桌面、Hermes/飞书验收。
 
-缺库先 `init`，冲突先重新查询版本。旧库需先备份并在副本用 `migrate --db COPY.sqlite` 验证；普通写命令拒绝隐式升级。AUTH/PROVENANCE 失败应检查受保护身份或适配器，不用角色文字绕过。CDP 不可达不能单独证明闪退，也不能据此自动重启。
+只读诊断保留 native:check、codex:check、codex:target-check；飞书发送测试需明确批准。删除旧创建目录研究、实验 App Server 项目探针、第二 Profile 原型。保留当前 CDP 读取及有调用依赖的兼容模块。
 
-## 许可与文档
+结构保留职责层次：mcp-server/mcp 为协议；background/project-provisioner/prompts/tasks/topology/outbox 为业务；native-readonly/windows-native-host 为 IPC/UIA；codex-app-server/ordinary-chat/hermes-gateway/notification-delivery 为适配器。没有为美观搬迁整个项目。
 
-采用 [MIT License](LICENSE)，依赖许可见 [第三方声明](THIRD_PARTY_NOTICES.md)。
+实际源码参考：[WPS 常驻 JSON 行宿主](https://github.com/sueccku/dsh-plugin-wps-office-next/blob/bc69b96fca0c30e63680a151ebf96a093404d2da/host/wps-com-host.ps1)、[mcp-windows 局部查询](https://github.com/sbroenne/mcp-windows/blob/655b9fc92d03ad52a270067c6844ea1231c90559/src/Sbroenne.WindowsMcp/Automation/Tools/UIFindTool.cs)、[FlaUI 批量动作](https://github.com/shanselman/FlaUI-MCP/blob/da1d2a24eae6ccdfbbd40a1375b6617536552351/src/FlaUI.Mcp/Tools/BatchTool.cs)、[winapp Pattern 操作](https://github.com/microsoft/winappCli/blob/96f487615872f7c0e4032e0361856e3109a477e3/src/winapp-CLI/WinApp.Cli/Commands/UiInvokeCommand.cs)、[mcp-compressor 门面转换](https://github.com/atlassian-labs/mcp-compressor/blob/86dc1dfd414d68914d2fbb7b2421420c3f74bbea/python/mcp-compressor/mcp_compressor/transforms.py)。只借鉴原则，不复制/执行源码或引入框架。当前 19 个工具没有证据需要动态 Catalog。
 
-- [部署与恢复](docs/DEPLOYMENT.md)
-- [项目协作规范](docs/PROJECT_RULES.md)
-- [贡献指南](CONTRIBUTING.md)与[开发说明](docs/DEVELOPMENT.md)
-- [历史审查](docs/audit/CODE_AUDIT_REPORT.md)、[整改追踪](docs/audit/REMEDIATION.md)与[交付记录](docs/audit/DELIVERY.md)
+规则见 [PROJECT_RULES](docs/PROJECT_RULES.md)，独立报告用 [验收模板](docs/ACCEPTANCE_TEMPLATE.md)。保留 [MIT LICENSE](LICENSE) 和 [第三方声明](THIRD_PARTY_NOTICES.md)。报告存项目 docs，私有历史不发布，不再写个人文件夹。

@@ -42,12 +42,21 @@ test('prompt: content tampering rejected before transport, including after deliv
  const f=setup(t);const id=await f.pipeline.generate(f.task.id,'requirement',f.controller);await f.pipeline.deliver(id,f.controller);
  f.scope.db.prepare("UPDATE prompts SET content='tampered' WHERE id=?").run(id);await assert.rejects(()=>f.pipeline.deliver(id,f.controller),/modified/);assert.equal(f.store.claim(f.task.id,f.worker,600,0).ok,false);assert.equal(f.count(),1);
 });
-for(const cap of [{verified:false,models:['gpt-6'],reasoningEfforts:['high']},{verified:true,models:['other'],reasoningEfforts:['high']},{verified:true,models:['gpt-6'],reasoningEfforts:['low']}])test('prompt: unsupported or unverified capabilities refuse generation',async t=>{
- let generated=false;const f=setup(t,{source:'mock-chatgpt',capabilities:async()=>cap,generate:async()=>{generated=true;throw new Error();}});await assert.rejects(()=>f.pipeline.generate(f.task.id,'requirement',f.controller),/cannot be verified/);assert.equal(generated,false);
+test('prompt: unverified generation capability refuses generation',async t=>{
+ let generated=false;const f=setup(t,{source:'mock-chatgpt',capabilities:async()=>({verified:false,models:[],reasoningEfforts:[]}),generate:async()=>{generated=true;throw new Error();}});await assert.rejects(()=>f.pipeline.generate(f.task.id,'requirement',f.controller),/capability is unavailable/);assert.equal(generated,false);
 });
-test('prompt: unknown actual model/reasoning is explicitly awaiting review and cannot auto-deliver',async t=>{
- const f=setup(t,{source:'chatgpt',capabilities:async()=>({verified:true,models:['gpt-6'],reasoningEfforts:['high']}),generate:async()=>({content:'[TEST] unverified model output',sourceMessageId:'fixture',actualModel:null,actualReasoningEffort:null})});
- const id=await f.pipeline.generate(f.task.id,'requirement',f.controller);assert.equal(f.scope.db.prepare('SELECT delivery_status FROM prompts WHERE id=?').get(id)!.delivery_status,'REVIEW_REQUIRED');await assert.rejects(()=>f.pipeline.deliver(id,f.controller),/record/);
+test('prompt: unknown model/effort remains null with trusted provenance and can auto-deliver',async t=>{
+ const f=setup(t,{source:'chatgpt',capabilities:async()=>({verified:true,models:[],reasoningEfforts:[]}),generate:async()=>({content:'[TEST] trusted source with unobserved parameters',sourceMessageId:'fixture',actualModel:null,actualReasoningEffort:null})});
+ const id=await f.pipeline.generate(f.task.id,'requirement',f.controller),row=f.scope.db.prepare('SELECT * FROM prompts WHERE id=?').get(id)!;
+ assert.equal(row.delivery_status,'PENDING');assert.equal(row.actual_model,null);assert.equal(row.actual_reasoning,null);await f.pipeline.deliver(id,f.controller);assert.equal(f.count(),1);
+});
+test('prompt: timed-out generation is reconciled from the original host reply without another send',async t=>{
+ let sends=0,reads=0;
+ const f=setup(t,{source:'chatgpt',capabilities:async()=>({verified:true,models:[],reasoningEfforts:[]}),generate:async()=>{sends++;throw new Error('fixture external timeout');},observeGeneration:async request=>{reads++;assert.match(request,/用户需求：\noriginal requirement$/);return {content:'[TEST] original completed GPT prompt',sourceMessageId:'fixture-original-reply',actualModel:null,actualReasoningEffort:null};}});
+ await assert.rejects(f.pipeline.generate(f.task.id,'original requirement',f.controller));
+ await assert.rejects(f.pipeline.reconcileGeneration(f.task.id,'changed requirement',f.controller),{code:'CONFLICT'});
+ const id=await f.pipeline.reconcileGeneration(f.task.id,'original requirement',f.controller);
+ assert.equal(await f.pipeline.generate(f.task.id,'original requirement',f.controller),id);assert.equal(sends,1);assert.equal(reads,1);
 });
 test('prompt: uncertain delivery remains fenced and requires independent explicit recovery',async t=>{
  const f=setup(t,undefined,true);const id=await f.pipeline.generate(f.task.id,'requirement',f.controller);await assert.rejects(()=>f.pipeline.deliver(id,f.controller));

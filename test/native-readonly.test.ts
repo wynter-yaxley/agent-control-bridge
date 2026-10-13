@@ -7,16 +7,15 @@ import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { NativeDesktopReadClient, checkNativeDesktop } from '../src/native-readonly.ts';
+import { NativeDesktopReadClient, NativeReadWorker, checkNativeDesktop } from '../src/native-readonly.ts';
 import { defaults } from '../src/config.ts';
-import { checkNativeProvisioningCapabilities } from '../src/native-capabilities.ts';
 import { WINDOWS_POWERSHELL } from '../src/permissions.ts';
 import { controlledProcessEnv } from '../src/silent-process.ts';
 import { redact } from '../src/security.ts';
 
 const carrier = '00000000-0000-0000-0000-000000000001', target = '00000000-0000-0000-0000-000000000002';
 type Row = Record<string, any>;
-function fixture(transform?: (envelope: Row, input: Row, child: ChildProcess) => unknown, silent = false) {
+function fixture(transform?: (envelope: Row, input: Row, child: ChildProcess) => unknown, silent = false, persistent = false) {
   const inputs: Row[] = [], options: Row[] = [], children: ChildProcess[] = []; let killed = 0;
   const spawnFn = ((_exe: string, _args: readonly string[], opts: Row) => {
     options.push(opts);
@@ -40,8 +39,8 @@ function fixture(transform?: (envelope: Row, input: Row, child: ChildProcess) =>
         };
         const envelope: Row = { ok: true, peer: { sameUserSignedHost: true, processId: 1234, processStartedAt: '2026-01-01T00:00:00.0000000Z', appVersion: '155.0.0.0', foregroundUnchanged: true }, response: { jsonrpc: '2.0', id: request.id, result } };
         const changed = transform ? transform(envelope, input, child) : envelope;
-        if (changed !== undefined) child.stdout!.emit('data', Buffer.isBuffer(changed) ? changed : Buffer.from(JSON.stringify(changed)));
-        Object.defineProperty(child, 'exitCode', { value: 0 }); child.emit('close', 0);
+        if (changed !== undefined) child.stdout!.emit('data', Buffer.isBuffer(changed) ? changed : Buffer.from(JSON.stringify(changed) + (persistent ? '\n' : '')));
+        if (!persistent) { Object.defineProperty(child, 'exitCode', { value: 0 }); child.emit('close', 0); }
       });
       done();
     } });
@@ -63,6 +62,16 @@ test('native reads: current protocol, exact target, signed peer, hidden workers 
   assert.ok(!JSON.stringify(result).includes('synthetic-private')); assert.ok(!JSON.stringify(result).includes('unproven-config-model'));
   assert.ok(!f.inputs.some(i => /send_message|create_thread/.test(i.request.params.tool ?? '')));
   assert.equal((client(f) as any).sendMessage, undefined);
+});
+
+test('native reads: creation host uses bounded inventories and the actual 20000-character contract',async()=>{
+  const f=fixture(),reader=client(f);
+  assert.equal((await reader.projectInventory()).projects[0].projectId,target);
+  assert.equal((await reader.threadInventory()).pinnedThreads[0].id,target);
+  assert.equal((await reader.readConversationPage(target)).thread.id,target);
+  assert.deepEqual(f.inputs[1].request.params.arguments,{limit:30});
+  assert.deepEqual(f.inputs[2].request.params.arguments,{threadId:target,turnLimit:1,includeOutputs:true,maxOutputCharsPerItem:20000});
+  assert.ok(f.inputs.every(input=>['list_projects','list_threads','read_thread'].includes(input.request.params.tool)));
 });
 test('native reads: new advertised catalog metadata does not create a write transport', async () => {
   const f=fixture(e=>{e.response.result.tools.push({name:'future_project_create',namespace:'codex_app',inputSchema:{type:'object'},description:'synthetic-private-description'});return e;});
@@ -114,7 +123,7 @@ test('native reads: both stdout and private stderr are bounded and only owned wo
 test('native reads: absolute timeout and cancellation close the owned worker without retry', async () => {
   const silent = fixture(undefined, true); await assert.rejects(client(silent, { timeoutMs: 10 }).catalog(), { code: 'TIMEOUT' }); assert.equal(silent.inputs.length, 1); assert.equal(silent.killed(), 1);
   const controller = new AbortController(), f = fixture(undefined, true), c = client(f, { signal: controller.signal });
-  const pending = c.catalog(); controller.abort(); await assert.rejects(pending, { code: 'TIMEOUT' }); assert.equal(f.killed(), 1);
+  const pending = c.catalog(); await new Promise<void>(done => setImmediate(done)); controller.abort(); await assert.rejects(pending, { code: 'TIMEOUT' }); assert.equal(f.killed(), 1);
   const pre = fixture(); await assert.rejects(client(pre, { signal: controller.signal }).catalog(), { code: 'TIMEOUT' }); assert.equal(pre.inputs.length, 0);
 });
 test('native reads: parallel request and exhausted session budget are refused', async () => {
@@ -160,25 +169,6 @@ for (const scenario of ['duplicate-id', 'duplicate-path', 'unknown-schema', 'mis
   });
   await assert.rejects(client(f).projectSummary({ appProjectId: target, workspacePath: 'D:\\fixture', name: 'fixture' }), { code: scenario === 'duplicate-path' ? 'PROVENANCE' : scenario === 'missing-id' ? 'NOT_FOUND' : 'IO' });
 });
-test('native provisioning diagnostic: only catalog, carrier read and native inventory; readiness remains blocked', async () => {
-  const f = fixture(e => {
-    if (e.response.result.tools) e.response.result.tools.push({ name: 'list_projects', namespace: 'codex_app', inputSchema: { type: 'object', additionalProperties: false, properties: {} } });
-    return e;
-  });
-  const result = await checkNativeProvisioningCapabilities({ carrierThreadId: carrier, ...defaults().nativeInterface, spawnFn: f.spawnFn,
-    expectedProject: { appProjectId: target, workspacePath: 'D:\\fixture', name: 'fixture' } });
-  assert.equal(result.state, 'BLOCKED'); assert.equal(result.project?.identityMatches, true); assert.equal(result.fullWorkflowReady, false);
-  assert.equal(result.catalog.ordinaryChatCreationVerified, false); assert.equal(result.catalog.nativeWorkspaceCreationVerified, false);
-  assert.equal(f.inputs.length, 3); assert.deepEqual(f.inputs.map(input => input.request.params.tool ?? input.request.method), ['tools/list', 'read_thread', 'list_projects']);
-  assert.ok(f.inputs.slice(1).every(input => input.expectedProcessId === 1234)); assert.ok(!JSON.stringify(result).includes('synthetic-private'));
-});
-test('native provisioning diagnostic: changed inventory schema is reviewed before any project call', async () => {
-  const f = fixture();
-  await assert.rejects(checkNativeProvisioningCapabilities({ carrierThreadId: carrier, ...defaults().nativeInterface, spawnFn: f.spawnFn,
-    expectedProject: { appProjectId: target, workspacePath: 'D:\\fixture', name: 'fixture' } }), { code: 'UNSUPPORTED' });
-  assert.equal(f.inputs.length, 2);
-});
-
 test('native worker: rejects write, extra fields and invalid budgets before opening any pipe', { skip: process.platform !== 'win32' }, async () => {
   const helper = fileURLToPath(new URL('../src/native-pipe-worker.ps1', import.meta.url));
   const encoded = Buffer.from(`& ([scriptblock]::Create([System.IO.File]::ReadAllText('${helper.replaceAll("'", "''")}')))`, 'utf16le').toString('base64');
@@ -195,4 +185,14 @@ test('native worker: rejects write, extra fields and invalid budgets before open
     child.stdin.end(JSON.stringify(input));
   });
   assert.ok(!/ExecutionPolicy|Stop-Process|SetForegroundWindow|SendKeys|clipboard/i.test(readFileSync(helper, 'utf8')));
+});
+
+test('native reads: clients share one serial worker with distinct request IDs', async t => {
+  const f = fixture(undefined, false, true), worker = new NativeReadWorker(f.spawnFn);
+  t.after(() => worker.close());
+  await Promise.all([client(f, { worker }).catalog(), client(f, { worker }).listSummary()]);
+  assert.equal(f.children.length, 1);
+  assert.equal(f.inputs.length, 2);
+  assert.notEqual(f.inputs[0].request.id, f.inputs[1].request.id);
+  assert.equal(f.killed(), 0);
 });

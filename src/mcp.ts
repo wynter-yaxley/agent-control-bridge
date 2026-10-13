@@ -6,11 +6,16 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallerAuthority, localCaller } from './caller.ts';
 import { loadConfig } from './config.ts';
 import { createDb } from './db.ts';
-import { BackgroundBridge } from './background.ts';
+import { BackgroundBridge, type BackgroundHostBindings } from './background.ts';
 import { createBridgeMcpServer } from './mcp-server.ts';
 import { BridgeError, classifyError, EXIT_CODES } from './errors.ts';
+import { createDesktopGptReader } from './desktop-gpt-reader.ts';
+import { createWindowsNativeGptReader } from './windows-native-host.ts';
+import { closeNativeReadWorker } from './native-readonly.ts';
 
-export async function runMcp(args: string[]): Promise<void> {
+// A trusted Hermes embedding can supply persistent host objects. This factory
+// is executable host code, never a command-line/config/MCP argument.
+export async function runMcp(args: string[], createHost?: (services: {config: ReturnType<typeof loadConfig>; authority: CallerAuthority; context: ReturnType<typeof localCaller>['context']}) => Promise<BackgroundHostBindings> | BackgroundHostBindings): Promise<void> {
   let parsed: ReturnType<typeof parseArgs>;
   try { parsed = parseArgs({ args, options: { config: { type: 'string' }, db: { type: 'string' }, help: { type: 'boolean' } }, tokens: true, strict: true }); }
   catch { throw new BridgeError('INPUT', 'Invalid MCP startup arguments'); }
@@ -21,7 +26,12 @@ export async function runMcp(args: string[]): Promise<void> {
   const authority = new CallerAuthority();
   const caller = localCaller(authority, fileURLToPath(new URL('../config/caller-policy.json', import.meta.url)));
   const db = createDb({ dbPath: config.database.path, busyTimeoutMs: config.database.busyTimeoutMs, authorizedSids: caller.authorizedSids });
-  const bridge = new BackgroundBridge(db, authority, caller.context, config, {}, code => process.stderr.write(`ACB ${code}\n`));
+  const host = createHost ? await createHost({config,authority,context:caller.context}) : {};
+  const bridge = new BackgroundBridge(db, authority, caller.context, config, {
+    gptReader: config.desktop.enabled ? createDesktopGptReader(config, parsed.values.config as string ?? process.env.ACB_CONFIG ?? '.bridge.config.json') : undefined,
+    gptUiReader: config.desktop.enabled && process.platform==='win32' ? createWindowsNativeGptReader(config,process.env.CODEX_THREAD_ID) : undefined,
+    ...host,
+  }, code => process.stderr.write(`ACB ${code}\n`));
   let version: string;
   try { version = (JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string }).version; }
   catch { db.close(); throw new BridgeError('CONFIG', 'Package version is unavailable'); }
@@ -30,7 +40,7 @@ export async function runMcp(args: string[]): Promise<void> {
   const close = async () => {
     if (closed) return; closed = true;
     await bridge.shutdown();
-    await server.close(); db.close();
+    await server.close(); closeNativeReadWorker(); db.close();
   };
   server.server.onclose = () => { void close(); };
   process.once('SIGINT', () => { void close(); }); process.once('SIGTERM', () => { void close(); });

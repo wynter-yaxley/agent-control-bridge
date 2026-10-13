@@ -1,8 +1,6 @@
 import { spawn as nodeSpawn, type ChildProcess } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
-import { isAbsolute, resolve, win32, join, dirname, basename } from 'node:path';
-import { mkdtempSync, mkdirSync, rmSync, realpathSync, existsSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { isAbsolute, resolve, win32 } from 'node:path';
 import { BridgeError } from './errors.ts';
 import { controlledProcessEnv } from './silent-process.ts';
 import { requireNoSecrets } from './security.ts';
@@ -37,7 +35,7 @@ export interface CodexThreadSummary {
   status: 'notLoaded' | 'idle' | 'active' | 'systemError'; local: boolean;
 }
 interface ClientOptions { executable: string; timeoutMs: number; spawnFn?: typeof nodeSpawn; disabledServerName?: string }
-interface IsolatedClientOptions extends ClientOptions { ownedHome?: string; ownedCwd?: string; metadataOnly?: boolean }
+interface ReadClientOptions extends ClientOptions { metadataOnly?: boolean }
 interface Pending { resolve: (value: Row) => void; reject: (error: BridgeError) => void; timer: ReturnType<typeof setTimeout>; cleanup: () => void }
 class AppServerRpcError extends BridgeError {
   readonly rpcCode: number | null;
@@ -63,20 +61,19 @@ class AppServerConnection {
   notification?: (method: string, params: Row) => void;
   serverRequest?: () => void;
   disconnected?: (error: BridgeError) => void;
-  constructor(options: IsolatedClientOptions) {
+  constructor(options: ReadClientOptions) {
     if (typeof options.executable !== 'string' || !options.executable.trim() || !Number.isInteger(options.timeoutMs) || options.timeoutMs < 1 || options.timeoutMs > 600000) throw new BridgeError('CONFIG', 'Invalid app-server transport configuration');
     if (options.disabledServerName !== undefined && !/^[a-zA-Z0-9_-]{1,64}$/.test(options.disabledServerName)) throw new BridgeError('CONFIG', 'Invalid bridge MCP server name');
     this.timeoutMs = options.timeoutMs;
     try {
       this.child = (options.spawnFn ?? nodeSpawn)(options.executable, [
-        // An owned diagnostic home has no user plugin settings. Prevent default
-        // catalog clones/background plugin helpers from racing its cleanup.
-        ...(options.ownedHome || options.metadataOnly ? ['--disable', 'plugins', '--disable', 'remote_plugin', '--disable', 'apps'] : []),
+        // Metadata reads do not need plugin/app initialization.
+        ...(options.metadataOnly ? ['--disable', 'plugins', '--disable', 'remote_plugin', '--disable', 'apps'] : []),
         ...(options.disabledServerName ? ['-c', `mcp_servers.${options.disabledServerName}.enabled=false`] : []),
         'app-server', '--listen', 'stdio://',
       ], {
-        shell: false, windowsHide: true, cwd: options.ownedCwd,
-        env: { ...controlledProcessEnv(), ...(options.ownedHome ? { CODEX_HOME: options.ownedHome } : {}) }, stdio: ['pipe', 'pipe', 'pipe'],
+        shell: false, windowsHide: true,
+        env: controlledProcessEnv(), stdio: ['pipe', 'pipe', 'pipe'],
       });
     } catch { throw new BridgeError('DEPENDENCY', 'Codex app-server could not start'); }
     this.child.once('error', () => this.fail(new BridgeError('DEPENDENCY', 'Codex app-server could not start')));
@@ -99,20 +96,6 @@ class AppServerConnection {
     this.child.stdout?.destroy?.(); this.child.stderr?.destroy?.();
   }
   close(): void { this.fail(new BridgeError('IO', 'Owned app-server connection closed')); }
-  async closeAndWait(): Promise<boolean> {
-    if (this.exited || this.child.exitCode != null || this.child.signalCode != null) { this.close(); return true; }
-    return new Promise(resolveClosed => {
-      // Inherited helper output handles can delay `close` after this owned
-      // process has exited. Wait for its process exit, not private stderr EOF.
-      const timer = setTimeout(() => { clearTimeout(force); this.child.removeListener('exit', closed); this.child.removeListener('close', closed); resolveClosed(false); }, 5000);
-      const closed = () => { clearTimeout(timer); clearTimeout(force); this.child.removeListener('exit', closed); this.child.removeListener('close', closed); this.close(); resolveClosed(true); };
-      // Let the owned server release its SQLite and helper handles on EOF before
-      // bounded termination. Never signal an existing desktop process.
-      const force = setTimeout(() => this.close(), 250);
-      this.child.once('exit', closed); this.child.once('close', closed);
-      try { this.child.stdin?.end(); } catch { this.close(); }
-    });
-  }
   private write(message: unknown): void {
     if (this.failure) throw this.failure;
     if (!this.child.stdin) throw new BridgeError('DEPENDENCY', 'App-server stdin is unavailable');
@@ -189,247 +172,6 @@ export async function inspectCodexThread(options: ClientOptions & { conversation
     await connection.initialize(options.signal, true);
     return summary(await connection.request('thread/read', { threadId: id, includeTurns: false }, options.signal), id);
   } finally { connection.close(); }
-}
-
-export interface CodexProvisioningCheck {
-  ok: boolean; code: string; stage: 'catalog' | 'create' | 'name' | 'readback' | 'stored-readback' | 'stored-listing' | 'complete';
-  checks: { model: string; reasoningEffort: string; sameWorkspace: boolean; created: boolean; readback: boolean; settingsMatch: boolean; codexTitleSet: boolean; persisted: boolean; storedSettingsMatch: boolean; storedModel: string | null; storedReasoningEffort: string | null }[];
-  listingChecks: { sameWorkspace: boolean; expectedCount: number; observedCount: number; identitiesMatch: boolean; workspaceMatches: boolean }[];
-  sourceKinds: string[]; ownedProcessExitConfirmed: boolean; cleanupCode: string | null;
-  differentModelsVerified: boolean; differentEffortsVerified: boolean;
-  uniqueConversationIds: boolean; crossWorkspaceIsolationVerified: boolean; storedListingIsolationVerified: boolean;
-  isolatedHome: true; temporaryResourcesRemoved: boolean;
-  retainedTemporaryDirectory: string | null;
-  listingsSkipped: boolean;
-  modelAccessVerified: false; nativeWorkspaceBindingVerified: false;
-  ordinaryGptCreationVerified: false; fullWorkflowReady: false;
-  realModelInvoked: false; businessDatabaseOpened: false; credentialsRead: false;
-}
-
-/** Creates dormant threads only in a new, owned Codex home. This is a diagnostic,
- * never a production project host; no turn/start, copied login, or desktop write. */
-export async function checkCodexProvisioning(options: ClientOptions & { signal?: AbortSignal; nameDormantThreads?: boolean; skipListings?: boolean }): Promise<CodexProvisioningCheck> {
-  if (typeof options.executable !== 'string' || !options.executable.trim() || !Number.isInteger(options.timeoutMs) || options.timeoutMs < 1 || options.timeoutMs > 60000) throw new BridgeError('CONFIG', 'Invalid provisioning diagnostic configuration');
-  if (options.signal?.aborted) throw new BridgeError('TIMEOUT', 'Provisioning diagnostic aborted before resource creation');
-  const result: CodexProvisioningCheck = { ok: false, code: 'UNSUPPORTED', stage: 'catalog', checks: [], listingChecks: [], sourceKinds: [], ownedProcessExitConfirmed: false, cleanupCode: null, differentModelsVerified: false, differentEffortsVerified: false,
-    uniqueConversationIds: false, crossWorkspaceIsolationVerified: false, storedListingIsolationVerified: false, isolatedHome: true, temporaryResourcesRemoved: false, retainedTemporaryDirectory: null, listingsSkipped: options.skipListings === true,
-    modelAccessVerified: false, nativeWorkspaceBindingVerified: false, ordinaryGptCreationVerified: false, fullWorkflowReady: false,
-    realModelInvoked: false, businessDatabaseOpened: false, credentialsRead: false };
-  const temporaryParent = realpathSync.native(tmpdir()), root = mkdtempSync(join(temporaryParent, 'acb-codex-provision-'));
-  const home = join(root, 'codex-home'), firstWorkspace = join(root, 'workspace-a'), secondWorkspace = join(root, 'workspace-b');
-  let connection: AppServerConnection | undefined, cleanupSafe = true;
-  const deadline = Date.now() + options.timeoutMs, identities = new Set<string>();
-  const remaining = () => { const value = deadline - Date.now(); if (value < 1 || options.signal?.aborted) throw new BridgeError('TIMEOUT', 'Provisioning diagnostic deadline exceeded'); return value; };
-  const connect = async () => {
-    connection = new AppServerConnection({ ...options, timeoutMs: remaining(), ownedHome: home, ownedCwd: root });
-    connection.notification = method => { if (method.startsWith('turn/') || method.startsWith('item/')) throw new BridgeError('EXECUTION', 'Unexpected agent activity during dormant-thread diagnostic'); };
-    await connection.initialize(options.signal); return connection;
-  };
-  try {
-    writeFileSync(join(root, 'acb-probe-owner.json'), JSON.stringify({ purpose: 'isolated-codex-provisioning-diagnostic', createdAt: new Date().toISOString(), directory: basename(root) }), { flag: 'wx', mode: 0o600 });
-    for (const path of [home, firstWorkspace, secondWorkspace]) mkdirSync(path, { mode: 0o700 });
-    let client = await connect();
-    const catalog = await client.request('model/list', { limit: 100, includeHidden: false }, options.signal, remaining());
-    if (!Array.isArray(catalog.data) || catalog.data.length > 100 || catalog.nextCursor != null) throw new BridgeError('UNSUPPORTED', 'A complete bounded model catalog is required');
-    const models = catalog.data.map(row).filter((entry): entry is Row => !!entry && typeof entry.model === 'string' && /^gpt-[a-z0-9.-]{1,100}$/i.test(entry.model)).map(entry => ({
-      model: String(entry.model), efforts: Array.isArray(entry.supportedReasoningEfforts) ? [...new Set(entry.supportedReasoningEfforts.map(row).flatMap(e => typeof e?.reasoningEffort === 'string' && EFFORTS.includes(e.reasoningEffort) ? [e.reasoningEffort] : []))] : [],
-    }));
-    const first = models.find(entry => entry.efforts.length >= 2), second = models.find(entry => entry.model !== first?.model && entry.efforts.length >= 1);
-    if (!first || !second) throw new BridgeError('UNSUPPORTED', 'Two models and two effort choices are required for this diagnostic');
-    const cases = [
-      { model: first.model, effort: first.efforts[0]!, workspace: firstWorkspace },
-      { model: first.model, effort: first.efforts.at(-1)!, workspace: firstWorkspace },
-      { model: second.model, effort: second.efforts[0]!, workspace: firstWorkspace },
-      { model: first.model, effort: first.efforts[0]!, workspace: secondWorkspace },
-    ];
-    const created: { id: string; workspace: string; source?: string }[] = [];
-    for (const item of cases) {
-      result.stage = 'create';
-      const evidence = { model: item.model, reasoningEffort: item.effort, sameWorkspace: item.workspace === firstWorkspace, created: false, readback: false, settingsMatch: false, codexTitleSet: false, persisted: false, storedSettingsMatch: false, storedModel: null as string | null, storedReasoningEffort: null as string | null };
-      result.checks.push(evidence);
-      const start = await client.request('thread/start', { model: item.model, cwd: item.workspace, approvalPolicy: 'untrusted', sandbox: 'read-only', ephemeral: false,
-        config: { model_reasoning_effort: item.effort } }, options.signal, remaining());
-      const thread = row(start.thread), id = identifier(thread?.id);
-      if (identities.has(id)) throw new BridgeError('PROVENANCE', 'Codex reused a conversation identity');
-      identities.add(id); created.push({ id, workspace: item.workspace }); evidence.created = true;
-      if (thread?.ephemeral !== false || start.model !== item.model || start.reasoningEffort !== item.effort ||
-          typeof start.cwd !== 'string' || pathKey(start.cwd) !== pathKey(item.workspace) || start.approvalPolicy !== 'untrusted' || row(start.sandbox)?.type !== 'readOnly') throw new BridgeError('PROVENANCE', 'Created Codex settings did not match the request');
-      evidence.settingsMatch = true;
-      if (options.nameDormantThreads) {
-        result.stage = 'name';
-        await client.request('thread/name/set', { threadId: id, name: `Isolated ACB probe ${created.length}` }, options.signal, remaining());
-        evidence.codexTitleSet = true;
-      }
-      result.stage = 'readback';
-      const observed = await client.request('thread/read', { threadId: id, includeTurns: false }, options.signal, remaining());
-      const read = summary(observed, id);
-      if (pathKey(read.workspacePath) !== pathKey(item.workspace) || read.status !== 'idle' || !read.local) throw new BridgeError('PROVENANCE', 'Created Codex thread readback mismatched');
-      evidence.readback = true;
-      const source = row(observed.thread)?.source;
-      if (typeof source !== 'string' || !['cli', 'vscode', 'exec', 'appServer'].includes(source)) throw new BridgeError('PROVENANCE', 'Created Codex source kind is unknown');
-      created.at(-1)!.source = source;
-    }
-    result.uniqueConversationIds = identities.size === 4; result.crossWorkspaceIsolationVerified = true;
-    result.sourceKinds = [...new Set(created.map(item => item.source!))];
-    result.differentModelsVerified = true; result.differentEffortsVerified = true;
-    // A second connection proves storage/readback independently of the start receipt.
-    cleanupSafe = await client.closeAndWait(); connection = undefined;
-    if (!cleanupSafe) throw new BridgeError('IO', 'Owned diagnostic process did not confirm exit');
-    client = await connect();
-    result.stage = 'stored-readback';
-    for (let index = 0; index < created.length; index++) {
-      const item = created[index]!, read = summary(await client.request('thread/read', { threadId: item.id, includeTurns: false }, options.signal, remaining()), item.id);
-      if (pathKey(read.workspacePath) !== pathKey(item.workspace) || !read.local || !['notLoaded', 'idle'].includes(read.status)) throw new BridgeError('PROVENANCE', 'Persisted Codex identity or workspace mismatched');
-      result.checks[index]!.persisted = true;
-      // Resume without overrides so the receipt describes stored settings,
-      // rather than echoing a freshly requested model or effort.
-      const resumed = await client.request('thread/resume', { threadId: item.id }, options.signal, remaining());
-      const actual = summary(resumed, item.id), expected = result.checks[index]!;
-      expected.storedModel = typeof resumed.model === 'string' && /^gpt-[a-z0-9.-]{1,100}$/i.test(resumed.model) ? resumed.model : null;
-      expected.storedReasoningEffort = typeof resumed.reasoningEffort === 'string' && EFFORTS.includes(resumed.reasoningEffort) ? resumed.reasoningEffort : null;
-      if (actual.status !== 'idle' || pathKey(actual.workspacePath) !== pathKey(item.workspace) || resumed.model !== expected.model || resumed.reasoningEffort !== expected.reasoningEffort) throw new BridgeError('PROVENANCE', 'Persisted Codex model or effort mismatched');
-      expected.storedSettingsMatch = true;
-    }
-    if (options.skipListings) { result.code = 'PARTIAL'; return result; }
-    result.stage = 'stored-listing';
-    for (const workspace of [firstWorkspace, secondWorkspace]) {
-      // Zero-turn named rollouts may exist before their state index is populated.
-      // The documented scan/reconcile path operates only in this owned test home.
-      const listing = await client.request('thread/list', { cwd: workspace, sourceKinds: [...new Set(created.map(item => item.source!))], useStateDbOnly: false, limit: 10 }, options.signal, remaining());
-      if (!Array.isArray(listing.data) || listing.nextCursor != null) throw new BridgeError('PROVENANCE', 'Isolated Codex listing is incomplete');
-      const observed = listing.data.map(row), expected = created.filter(item => item.workspace === workspace).map(item => item.id);
-      const identitiesMatch = observed.length === expected.length && observed.every(item => !!item && expected.includes(String(item.id))) && new Set(observed.map(item => item?.id)).size === expected.length;
-      const workspaceMatches = observed.every(item => !!item && typeof item.cwd === 'string' && pathKey(item.cwd) === pathKey(workspace));
-      result.listingChecks.push({ sameWorkspace: workspace === firstWorkspace, expectedCount: expected.length, observedCount: observed.length, identitiesMatch, workspaceMatches });
-      if (!identitiesMatch || !workspaceMatches) throw new BridgeError('PROVENANCE', 'Codex listing mixed workspace identities');
-    }
-    result.storedListingIsolationVerified = true; result.ok = true; result.code = 'OK'; result.stage = 'complete';
-  } catch (error) { result.ok = false; result.code = error instanceof BridgeError ? error.code : 'IO'; }
-  finally {
-    if (connection) cleanupSafe = await connection.closeAndWait() && cleanupSafe;
-    result.ownedProcessExitConfirmed = cleanupSafe;
-    // Only the exact mkdtemp directory owned by this call, under its checked parent.
-    if (cleanupSafe && dirname(root) === temporaryParent && realpathSync.native(root) === root) {
-      try { rmSync(root, { recursive: true, force: true, maxRetries: 4, retryDelay: 100 }); result.temporaryResourcesRemoved = !existsSync(root); }
-      catch (error) { const code = row(error)?.code; result.cleanupCode = typeof code === 'string' && /^[A-Z_]{1,30}$/.test(code) ? code : 'IO'; }
-    }
-    if (!result.temporaryResourcesRemoved) { result.retainedTemporaryDirectory = basename(root); result.ok = false; if (['OK', 'PARTIAL'].includes(result.code)) result.code = 'IO'; }
-  }
-  return result;
-}
-
-export interface CodexProjectProvisioningCheck {
-  ok: boolean; code: string; rpcErrorCode: number | null;
-  stage: 'initialize' | 'project-create' | 'project-read' | 'thread-create' | 'thread-name' | 'cold-read' | 'listing' | 'complete';
-  projects: { created: boolean; idempotent: boolean; readback: boolean; persisted: boolean }[];
-  conversations: { sameProject: boolean; created: boolean; projectMatches: boolean; workspaceMatches: boolean; titleMatches: boolean; persisted: boolean }[];
-  listingCounts: { expected: number; observed: number; identitiesMatch: boolean }[];
-  projectListMatches: boolean; uniqueConversationIds: boolean;
-  listingsSkipped: boolean;
-  isolatedHome: true; experimentalApi: true; nativeDesktopVerified: false;
-  ordinaryGptCreationVerified: false; fullWorkflowReady: false; realModelInvoked: false; credentialsRead: false; businessDatabaseOpened: false;
-  temporaryResourcesRemoved: boolean; retainedTemporaryDirectory: string | null; ownedProcessExitConfirmed: boolean; cleanupCode: string | null;
-}
-
-/** Real experimental project APIs in an owned test home. A passed diagnostic
- * proves the app-server registry only; it cannot attest desktop registration. */
-export async function checkCodexProjectProvisioning(options: ClientOptions & { signal?: AbortSignal; includeListings?: boolean }): Promise<CodexProjectProvisioningCheck> {
-  if (!options.executable?.trim() || !Number.isInteger(options.timeoutMs) || options.timeoutMs < 1 || options.timeoutMs > 60000) throw new BridgeError('CONFIG', 'Invalid project diagnostic configuration');
-  if (options.signal?.aborted) throw new BridgeError('TIMEOUT', 'Project diagnostic cancelled before resource creation');
-  const result: CodexProjectProvisioningCheck = { ok: false, code: 'UNSUPPORTED', rpcErrorCode: null, stage: 'initialize', projects: [], conversations: [], listingCounts: [], projectListMatches: false, uniqueConversationIds: false, listingsSkipped: options.includeListings === false,
-    isolatedHome: true, experimentalApi: true, nativeDesktopVerified: false, ordinaryGptCreationVerified: false, fullWorkflowReady: false, realModelInvoked: false, credentialsRead: false, businessDatabaseOpened: false,
-    temporaryResourcesRemoved: false, retainedTemporaryDirectory: null, ownedProcessExitConfirmed: false, cleanupCode: null };
-  const parent = realpathSync.native(tmpdir()), root = mkdtempSync(join(parent, 'acb-project-api-')), home = join(root, 'codex-home');
-  const deadline = Date.now() + options.timeoutMs;
-  let client: AppServerConnection | undefined, cleanupSafe = true;
-  const remaining = () => { const value = deadline - Date.now(); if (value < 1 || options.signal?.aborted) throw new BridgeError('TIMEOUT', 'Project diagnostic deadline exceeded'); return value; };
-  const connect = async () => {
-    client = new AppServerConnection({ ...options, timeoutMs: remaining(), ownedHome: home, ownedCwd: root });
-    client.notification = method => { if (method.startsWith('turn/') || method.startsWith('item/')) throw new BridgeError('EXECUTION', 'Unexpected agent activity during project diagnostic'); };
-    await client.initialize(options.signal, true);
-  };
-  const request = (method: Parameters<AppServerConnection['request']>[0], params: Row) => client!.request(method, params, options.signal, remaining());
-  const projectCheck = (response: Row, expected: { id?: string; name: string; path: string }) => {
-    const project = row(response.project), roots = project?.roots;
-    const id = identifier(project?.id);
-    if ((expected.id && id !== expected.id) || project?.name !== expected.name || !Array.isArray(roots) || roots.length !== 1 || typeof row(roots[0])?.path !== 'string' || pathKey(String(row(roots[0])!.path)) !== pathKey(expected.path)) throw new BridgeError('PROVENANCE', 'Project readback identity, exact name or roots mismatched');
-    return id;
-  };
-  try {
-    writeFileSync(join(root, 'acb-probe-owner.json'), JSON.stringify({ purpose: 'isolated-project-api-diagnostic', createdAt: new Date().toISOString(), directory: basename(root) }), { flag: 'wx', mode: 0o600 });
-    mkdirSync(home, { mode: 0o700 });
-    const projects = [{ name: 'ACB 隔离项目 A', path: join(root, 'workspace-a'), id: '' }, { name: 'ACB 隔离项目 B', path: join(root, 'workspace-b'), id: '' }];
-    for (const project of projects) mkdirSync(project.path, { mode: 0o700 });
-    await connect();
-    for (const [index, project] of projects.entries()) {
-      result.stage = 'project-create';
-      const check = { created: false, idempotent: false, readback: false, persisted: false }; result.projects.push(check);
-      const params = { name: project.name, roots: [{ path: project.path }], idempotencyKey: `acb-${basename(root)}-${index}` };
-      project.id = projectCheck(await request('project/create', params), project); check.created = true;
-      if (projects.some(other => other !== project && other.id === project.id)) throw new BridgeError('PROVENANCE', 'Projects reused an identity');
-      projectCheck(await request('project/create', params), project); check.idempotent = true;
-      result.stage = 'project-read'; projectCheck(await request('project/read', { projectId: project.id }), project); check.readback = true;
-    }
-    const catalog = await request('model/list', { limit: 100, includeHidden: false });
-    const model = Array.isArray(catalog.data) ? catalog.data.map(row).find(item => typeof item?.model === 'string' && /^gpt-[a-z0-9.-]{1,100}$/i.test(item.model))?.model : null;
-    if (typeof model !== 'string') throw new BridgeError('UNSUPPORTED', 'No bounded model catalog entry');
-    const created: { id: string; project: typeof projects[number]; name: string; source: string }[] = [];
-    const verifyThread = (response: Row, item: typeof created[number], loaded: boolean) => {
-      const observed = summary(response, item.id), thread = row(response.thread);
-      if (observed.appProjectId !== item.project.id || pathKey(observed.workspacePath) !== pathKey(item.project.path) || !observed.local || !['idle', ...(loaded ? [] : ['notLoaded'])].includes(observed.status) || thread?.name !== item.name) throw new BridgeError('PROVENANCE', 'Codex project, workspace or exact title readback mismatched');
-    };
-    for (let index = 0; index < 4; index++) {
-      const project = projects[index < 3 ? 0 : 1]!, check = { sameProject: index < 3, created: false, projectMatches: false, workspaceMatches: false, titleMatches: false, persisted: false }; result.conversations.push(check);
-      result.stage = 'thread-create';
-      const start = await request('thread/start', { projectId: project.id, cwd: project.path, model, ephemeral: false, sandbox: 'read-only', approvalPolicy: 'untrusted' });
-      const observed = summary(start, identifier(row(start.thread)?.id));
-      if (created.some(item => item.id === observed.conversationId)) throw new BridgeError('PROVENANCE', 'Codex reused a conversation identity');
-      check.created = true;
-      if (observed.appProjectId !== project.id) throw new BridgeError('PROVENANCE', 'Created Codex project assignment mismatched'); check.projectMatches = true;
-      if (pathKey(observed.workspacePath) !== pathKey(project.path) || !observed.local || observed.status !== 'idle' || row(start.thread)?.ephemeral !== false || row(start.sandbox)?.type !== 'readOnly' || start.approvalPolicy !== 'untrusted') throw new BridgeError('PROVENANCE', 'Created Codex workspace or sandbox mismatched'); check.workspaceMatches = true;
-      const source = row(start.thread)?.source;
-      if (typeof source !== 'string' || !['cli', 'vscode', 'exec', 'appServer'].includes(source)) throw new BridgeError('PROVENANCE', 'Unknown Codex source kind');
-      const item = { id: observed.conversationId, project, name: `ACB 精确命名 ${index + 1} · 验证`, source }; created.push(item);
-      result.stage = 'thread-name';
-      await request('thread/name/set', { threadId: item.id, name: 'ACB 临时名称' });
-      await request('thread/name/set', { threadId: item.id, name: item.name });
-      verifyThread(await request('thread/read', { threadId: item.id, includeTurns: false }), item, true); check.titleMatches = true;
-    }
-    result.uniqueConversationIds = new Set(created.map(item => item.id)).size === 4;
-    cleanupSafe = await client!.closeAndWait(); client = undefined;
-    if (!cleanupSafe) throw new BridgeError('IO', 'Owned project diagnostic process did not confirm exit');
-    await connect(); result.stage = 'cold-read';
-    for (const [index, project] of projects.entries()) { projectCheck(await request('project/read', { projectId: project.id }), project); result.projects[index]!.persisted = true; }
-    for (const [index, item] of created.entries()) { verifyThread(await request('thread/read', { threadId: item.id, includeTurns: false }), item, false); result.conversations[index]!.persisted = true; }
-    if (options.includeListings === false) { result.code = 'PARTIAL'; return result; }
-    result.stage = 'listing';
-    const listed = await request('project/list', { limit: 10 });
-    if (!Array.isArray(listed.data) || listed.nextCursor != null || listed.data.length !== 2 || !projects.every(project => listed.data instanceof Array && listed.data.some(value => row(value)?.id === project.id))) throw new BridgeError('PROVENANCE', 'Project inventory mismatched');
-    for (const value of listed.data) { const project = projects.find(item => item.id === row(value)?.id)!; projectCheck({ project: value }, project); }
-    result.projectListMatches = true;
-    let emptyListings = false;
-    for (const project of projects) {
-      const expected = created.filter(item => item.project === project), listed = await request('thread/list', { projectId: project.id, limit: 10, sourceKinds: [...new Set(created.map(item => item.source))], useStateDbOnly: false });
-      const rows = Array.isArray(listed.data) ? listed.data.map(row) : [];
-      const match = Array.isArray(listed.data) && listed.nextCursor == null && rows.length === expected.length && new Set(rows.map(item => item?.id)).size === expected.length && rows.every(item => item && expected.some(value => value.id === item.id));
-      result.listingCounts.push({ expected: expected.length, observed: rows.length, identitiesMatch: match });
-      if (Array.isArray(listed.data) && listed.nextCursor == null && rows.length === 0) { emptyListings = true; continue; }
-      if (!match) throw new BridgeError('PROVENANCE', 'Project thread inventory mismatched');
-      for (const thread of rows) verifyThread({ thread }, expected.find(item => item.id === thread!.id)!, false);
-    }
-    if (emptyListings) { result.code = 'PARTIAL'; return result; }
-    result.ok = true; result.code = 'OK'; result.stage = 'complete';
-  } catch (error) { result.code = error instanceof BridgeError ? error.code : 'IO'; result.rpcErrorCode = error instanceof AppServerRpcError ? error.rpcCode : null; }
-  finally {
-    if (client) cleanupSafe = await client.closeAndWait() && cleanupSafe;
-    result.ownedProcessExitConfirmed = cleanupSafe;
-    if (cleanupSafe && dirname(root) === parent && realpathSync.native(root) === root) {
-      try { rmSync(root, { recursive: true, force: true, maxRetries: 4, retryDelay: 100 }); result.temporaryResourcesRemoved = !existsSync(root); }
-      catch (error) { const code = row(error)?.code; result.cleanupCode = typeof code === 'string' && /^[A-Z_]{1,30}$/.test(code) ? code : 'IO'; }
-    }
-    if (!result.temporaryResourcesRemoved) { result.retainedTemporaryDirectory = basename(root); result.ok = false; if (result.code === 'OK') result.code = 'IO'; }
-  }
-  return result;
 }
 
 interface TurnEvent { method: string; threadId: string; turnId: string | null; status?: string; failed?: boolean; reroutedTo?: string }
@@ -558,7 +300,13 @@ export function createCodexAppServerExecutor(options: CodexAppServerExecutorOpti
         assertResumeSandbox(resumed, target.workspacePath);
         await options.assertExclusive(target, signal);
         const executionId = await executeTurn(connection, { ...options, target, content, key, signal, onEvent });
-        return { executionId, codexConversationId: target.codexConversationId, workspacePath: target.workspacePath };
+        const completed = row((await connection.request('thread/read', { threadId: target.codexConversationId, includeTurns: true }, signal)).thread);
+        const turn = Array.isArray(completed?.turns) ? completed.turns.map(row).find(turn => turn?.id === executionId) : undefined;
+        if (completed?.id !== target.codexConversationId || turn?.status !== 'completed' || turn.error != null || !Array.isArray(turn.items)) throw new BridgeError('PROVENANCE', 'Completed Codex turn could not be read back');
+        const replies = turn.items.map(row).filter(item => item?.type === 'agentMessage' && item.phase !== 'commentary');
+        if (replies.length === 0 || replies.some(item => typeof item?.id !== 'string' || typeof item.text !== 'string' || !item.text.trim())) throw new BridgeError('PROVENANCE', 'Completed Codex reply has no full text or message identity');
+        const output = { content: replies.map(item => String(item!.text)).join('\n\n'), messageIds: replies.map(item => String(item!.id)) };
+        return { executionId, codexConversationId: target.codexConversationId, workspacePath: target.workspacePath, output };
       } finally { connection.close(); }
     },
   };
