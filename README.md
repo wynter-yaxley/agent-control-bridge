@@ -94,7 +94,7 @@ stdout 只承载 MCP，安全错误写 stderr。默认入口只注册 8 个只�
         const native = createWindowsNativeReadTools(
           config, trusted.carrierThreadId, trusted.createCodexThread,
         );
-        const gptReader = createDesktopGptReader(config);
+        const gptReader = createDesktopGptReader(config, trusted.configPath);
         const { ordinaryChat } = createWindowsNativeConversationHost({
           config, native, ui, authorizeUiOperation: trusted.authorizeUiOperation,
         });

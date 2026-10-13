@@ -326,12 +326,16 @@ export function createCodexAppServerExecutor(options: CodexAppServerExecutorOpti
       try {
         await connection.initialize(signal);
         const value=await connection.request('thread/read',{threadId:target.codexConversationId,includeTurns:true},signal);
-        check(summary(value,target.codexConversationId),expected,target);
+        const observed=summary(value,target.codexConversationId);
+        check(observed,expected,target);
         const thread=row(value.thread),turns=Array.isArray(thread?.turns)?thread.turns.map(row):[];
         const turn=original?.executionId ? turns.find(t=>t?.id===original.executionId) : turns.find(t=>Array.isArray(t?.items) && t.items.map(row).some(item=>item?.type==='userMessage' && item.id===original?.dispatchId && Array.isArray(item.content) && item.content.some(part=>row(part)?.text===content)));
         if(!turn)throw new BridgeError('PROVENANCE','No exact original execution receipt; do not rerun');
         const executionId=identifier(turn.id);
-        if(turn.status==='inProgress')return {executionId,codexConversationId:target.codexConversationId,workspacePath:target.workspacePath,running:true};
+        if(turn.status==='inProgress') {
+          if(observed.status!=='active')throw new BridgeError('EXECUTION','Original turn has no live running evidence; preserve the uncertain outcome');
+          return {executionId,codexConversationId:target.codexConversationId,workspacePath:target.workspacePath,running:true};
+        }
         if(turn.status!=='completed' || turn.error!=null || !Array.isArray(turn.items))throw new BridgeError('EXECUTION','Original execution has no successful terminal receipt');
         const replies=turn.items.map(row).filter(item=>item?.type==='agentMessage' && item.phase!=='commentary');
         if(!replies.length || replies.some(item=>typeof item?.text!=='string' || !item.text.trim() || typeof item.id!=='string'))throw new BridgeError('PROVENANCE','Original execution has no complete final text');

@@ -9,7 +9,7 @@ import { BridgeError } from '../src/errors.ts';
 
 const workspace = resolve('fixture 中文 app-server');
 const target = { codexConversationId: 'fixture-thread', workspacePath: workspace };
-type Mode = 'normal' | 'early' | 'failed' | 'interrupted' | 'wrong-thread' | 'wrong-turn' | 'reroute' | 'approval' | 'command-approval' | 'early-approval' | 'disconnect' | 'silent-turn' | 'silent-interrupt' | 'silent-start' | 'bad-id' | 'wrong-project' | 'null-project' | 'wrong-root' | 'active' | 'wrong-model' | 'broad-sandbox' | 'corrupt' | 'oversize' | 'bad-spawn';
+type Mode = 'normal' | 'early' | 'active-turn' | 'unloaded-turn' | 'failed' | 'interrupted' | 'wrong-thread' | 'wrong-turn' | 'reroute' | 'approval' | 'command-approval' | 'early-approval' | 'disconnect' | 'silent-turn' | 'silent-interrupt' | 'silent-start' | 'bad-id' | 'wrong-project' | 'null-project' | 'wrong-root' | 'active' | 'wrong-model' | 'broad-sandbox' | 'corrupt' | 'oversize' | 'bad-spawn';
 function fixture(mode: Mode = 'normal') {
   const requests: Record<string, unknown>[] = [];
   let hidden = false, killed = 0, exclusive = 0;
@@ -26,7 +26,7 @@ function fixture(mode: Mode = 'normal') {
     const emit = (value: unknown) => child.stdout!.emit('data', Buffer.from(JSON.stringify(value) + '\n'));
     const thread = () => ({ id: mode === 'bad-id' ? 'foreign-thread' : target.codexConversationId,
       projectId: mode === 'null-project' ? null : mode === 'wrong-project' ? 'foreign-project' : 'native-project',
-      cwd: mode === 'wrong-root' ? resolve('foreign') : workspace, source: 'appServer', status: { type: mode === 'active' ? 'active' : 'idle' },
+      cwd: mode === 'wrong-root' ? resolve('foreign') : workspace, source: 'appServer', status: { type: ['active','active-turn'].includes(mode) ? 'active' : mode==='unloaded-turn' ? 'notLoaded' : 'idle' },
       preview: 'synthetic-private-preview', turns: [{ text: 'synthetic-private-history' }] });
     const completed = (status = 'completed', threadId = target.codexConversationId, turnId = 'fixture-turn') => ({ method: 'turn/completed', params: { threadId, ...(mode === 'wrong-turn' && turnId === 'foreign-turn' ? { turnId: 'fixture-turn' } : {}), turn: { id: turnId, status, error: status === 'failed' ? { message: 'synthetic-private-diagnostic' } : null } } });
     child.stdin = new Writable({ write(chunk, _encoding, done) {
@@ -38,7 +38,7 @@ function fixture(mode: Mode = 'normal') {
         else if (message.method === 'thread/read') {
           if (mode === 'corrupt') child.stdout!.emit('data', Buffer.from('{invalid}\n'));
           else if (mode === 'oversize') child.stdout!.emit('data', Buffer.alloc(1024 * 1024 + 1, 65));
-          else emit({ id: message.id, result: { thread: message.params.includeTurns ? { ...thread(), turns: [{ id: 'fixture-turn', status: 'completed', error: null, items: [{ type: 'agentMessage', id: 'fixture-commentary', text: 'Working...', phase: 'commentary' }, { type: 'agentMessage', id: 'fixture-answer', text: '[ISOLATED TEST] final output', phase: 'final_answer' }] }] } : thread() } });
+          else emit({ id: message.id, result: { thread: message.params.includeTurns ? { ...thread(), turns: [{ id: 'fixture-turn', status: ['active-turn','unloaded-turn'].includes(mode)?'inProgress':'completed', error: null, items: [{ type: 'agentMessage', id: 'fixture-commentary', text: 'Working...', phase: 'commentary' }, { type: 'agentMessage', id: 'fixture-answer', text: '[ISOLATED TEST] final output', phase: 'final_answer' }] }] } : thread() } });
         } else if (message.method === 'thread/resume') emit({ id: message.id, result: { thread: thread(), cwd: workspace, model: mode === 'wrong-model' ? 'gpt-foreign' : 'gpt-fixture', reasoningEffort: 'high', approvalPolicy: 'untrusted', sandbox: { type: 'workspaceWrite', writableRoots: mode === 'broad-sandbox' ? [workspace, resolve('foreign')] : [workspace], networkAccess: false } } });
         else if (message.method === 'turn/start') {
           if (mode === 'silent-start') return;
@@ -150,6 +150,11 @@ test('app-server: recovery reads exact original turn without resume/start or res
  const receipt=await executor.observeExecution!('[TEST] original',target,'2000-01-01',new AbortController().signal,{executionId:'fixture-turn',dispatchId:'original-dispatch'});
  assert.equal(receipt.executionId,'fixture-turn');assert.equal(receipt.output!.messageIds[0],'fixture-answer');
  assert.ok(!f.requests.some(request=>['turn/start','thread/resume'].includes(String(request.method))));
+ const active=fixture('active-turn'),unloaded=fixture('unloaded-turn');
+ const original={executionId:'fixture-turn',dispatchId:'original-dispatch'};
+ assert.equal((await createCodexAppServerExecutor(active.options).observeExecution!('[TEST] original',target,'2000-01-01',new AbortController().signal,original)).running,true);
+ await assert.rejects(createCodexAppServerExecutor(unloaded.options).observeExecution!('[TEST] original',target,'2000-01-01',new AbortController().signal,original),code('EXECUTION'));
+ assert.ok(![...active.requests,...unloaded.requests].some(request=>['turn/start','thread/resume'].includes(String(request.method))));
 });
 
 test('app-server: only the installed host approves the exact original command request',async()=>{
