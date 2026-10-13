@@ -28,3 +28,8 @@ test('untrusted PATH cannot replace the OS identity helper',{skip:process.platfo
   const result=spawnSync(process.execPath,['--experimental-strip-types','--input-type=module','-e',"import {currentPrincipal} from './src/caller.ts'; console.log(currentPrincipal());"],{cwd:root,encoding:'utf8',env:{...process.env,PATH:root}});
   assert.equal(result.status,0,result.stderr);assert.match(result.stdout.trim(),/^S-1-\d+(?:-\d+)+$/);assert.equal(result.stdout.includes('fake-principal'),false);
 });
+
+test('controller/reviewer overlap cannot be issued and reviewer has no implicit control',()=>{
+ const a=new CallerAuthority();assert.throws(()=>a.issue({principal:'fixture:caller',instance:'one',executor:'hermes',controller:true,reviewer:true}),{code:'AUTH'});
+ const r=a.issue({principal:'fixture:reviewer',instance:'one',executor:'hermes',reviewer:true});assert.equal(a.resolve(r)!.controller,false);
+});

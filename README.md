@@ -1,6 +1,6 @@
 # Agent Control Bridge
 
-Hermes 通过飞书协调现有 ChatGPT/Codex：GPT 生成工程 Prompt，Bridge 验证真实来源并投递，Codex 执行，结果回同一 GPT 复核，Hermes 独立验收与报告。复用现有登录态，不提供模型推理服务，不引入额外按 Token 计费的 OpenAI API。
+通用 Windows 10/11 本机 MCP 工具，Hermes/飞书是首选控制器，也可接入其他符合约定的 MCP Client。GPT 生成工程 Prompt，Bridge 核验来源并投递，Codex 执行，结果回同一 GPT 复核，独立 Reviewer 验收。复用现有登录态，不引入额外按 Token 计费的 OpenAI API。
 
 每项目固定 **一个原生 Codex workspace、一个同名普通 GPT 对话、多个该 workspace 内 Codex 对话**。SQLite 保存映射、来源、状态、通知及回执，禁止跨项目混用身份。
 
@@ -8,7 +8,7 @@ Hermes 通过飞书协调现有 ChatGPT/Codex：GPT 生成工程 Prompt，Bridge
              ↑                    Bridge / SQLite          ↓
              └──── 通知、实际交付、独立验收 ←───────────────┘
 
-0.2.0 为待验收开发版本。已完成真实隔离 GPT → 原生桌面 Codex → GPT 闭环，过程中需要页面定位、停止生成与对账恢复。**按用户 2026-10-13 要求，创建 Workspace 和普通 GPT 不要求完全静默，允许正常 UIA、目录确认和页面/编辑焦点变化；完全静默不再是这两项创建的验收门槛。** 默认 MCP 已改为真正只读；写入仍须接入可信桌面宿主。当前 UIA 页面没有可核验会话 ID，整改后会在发送前拒绝，历史闭环不能当作当前写链路已通过。实际 GPT 模型/思考强度未知记录 null，不再阻断；真实来源、完整正文、精确会话/消息 ID 和哈希仍须核验。
+0.2.0 为待独立验收开发版本。历史隔离 GPT → 原生 Codex → GPT 闭环曾需要人工页面定位和恢复，不能替代当前更严格写链路的验收。**创建 Workspace 和普通 GPT 允许正常 UIA、目录确认和页面/编辑焦点变化，不要求完全静默。** 当前实机 CDP 不可用，UIA 只读返回 titleOnly；现有聊天写入仍被精确身份要求阻断。本轮未执行真实 GUI 写入或 Hermes/飞书闭环。实际 GPT 模型/思考强度未知记录 null，不阻断真实来源。
 
 ## 能力与自动化边界
 
@@ -16,17 +16,16 @@ Hermes 通过飞书协调现有 ChatGPT/Codex：GPT 生成工程 Prompt，Bridge
 |---|---|---|---|---|
 | Native IPC | 项目、会话、目录及轮次只读 | 不操作 GUI | 实测读取未改变前台 | 当前签名宿主兼容性接口，有条件；不是承诺稳定的公开外部 API |
 | Windows UIA | 正常按钮、菜单、编辑框和正文 | 是，桌面须可交互 | 可能切换页面和编辑焦点 | 不保证；需要可信宿主本次批准 |
-| 当前实例 CDP | 已有受控页面读取/传输 | 依赖现有页面结构和调试端点 | 读取不导航；写入可能影响页面/焦点 | 不保证；不自动开启端口或创建浏览器/Profile |
+| 当前实例 CDP | 普通 GPT 精确 ID、可见正文与状态读取 | 依赖现有页面和调试端点 | 只读不导航 | 校验监听进程、签名和唯一已有目标；不自动开启端口 |
 | Codex App Server | 正式 stdio 工程执行和事件 | 不依赖桌面 GUI | 通常无须焦点 | 协议支持；仍须可信原生归属和会话排他证明 |
 
 | 业务操作 | 适配器/实际证据 | 桌面条件与影响 | 限制 |
 |---|---|---|---|
-| 创建原生 Workspace | WindowsNativeProjectHost：正常 UIA + 原生 ID/目录回读，组件真实通过 | 可交互；可能改变页面/编辑焦点 | 本次初始化与精确目录批准；独立 App Server 项目不算原生 |
-| 创建/精确命名普通 GPT | 同一 ProjectHost；正常聊天模式、改名保存、ID/标题回读真实通过 | 可交互；会改变页面 | 标题与 workspace 完全同名；整套自动创建待部署实测 |
-| 创建 Codex/核验归属 | 正式宿主创建及原生 projectId/cwd 回读真实通过；UIA Work 分支有实现 | UIA 创建依赖可交互界面 | 新 UIA 创建分支未整套实测；不能只凭 cwd 推断成员关系 |
-| 完整 GPT 回复/发送 | ConversationHost：UIA 正文 + 原生消息关联；真实工程 Prompt/反馈通过 | 可交互；导航/发送可能改变页面和编辑焦点 | 内容引用不是正文；合成 idle/completed 不能证明流式结束；诊断读取不授予生成权 |
-| 原生 Codex 执行 | ConversationHost + runner；真实文件及一次 Node 断言通过 | UIA 发送依赖界面，状态/最终输出经 IPC 读回 | 只执行一次，回执丢失须对账原执行 |
-| App Server 后台执行 | 既有执行适配器；协议/事件/沙箱经隔离测试 | 不操作 GUI | 当前目标的真实工程集成待独立验收，不负责原生桌面项目创建 |
+| 创建原生 Workspace | ProjectHost 的 UIA 创建与原生 ID/目录回读；历史实机、当前组件证据分开 | 可交互；可能改变页面/编辑焦点 | 文件系统创建前即要求本次精确目录批准；App Server 项目不算原生 |
+| 创建/命名普通 GPT | 新空白普通聊天用唯一初始化标识建立 ID，再核对 Native 新增基线、用户消息、类型和标题 | 可交互；会改变页面 | 只用于本次批准的新空白聊天；无工程内容；当前实现仅组件验证，失败不重发 |
+| 创建 Codex/核验归属 | 必须安装正式原生创建回调，核对原生 projectId/cwd | 取决于正式宿主 | UIA Work 创建/工程发送已拒绝；GPT /c/UUID 不能证明 Codex 身份 |
+| 完整 GPT 回复/发送 | 发送一次，Native 完成后读取 UIA/CDP 最终内容并复核消息 ID/Hash；组件验证 | UIA 需要可交互桌面 | 当前跨 CDP/UIA 的原子目标保证未打通；titleOnly 不允许现有聊天写入；内容引用不是正文 |
+| App Server 后台执行 | 原生目标绑定 + 正式 stdio、turnId、事件和结果；组件验证 | 不操作 GUI，可独立于 MCP 客户端连接运行 | 需真实 Executor 委托及命令/文件审批回调；尚未实际部署长任务，不负责原生项目创建 |
 | 状态/通知/恢复 | 队列、Watcher、outbox 和对账入口；隔离测试与原生恢复实证 | 普通状态查询无 UI；GPT 对账可能导航 | 不以失联推断完成；周期/阈值取统一配置 |
 | 独立验收/飞书送达 | 受保护 reviewer + Hermes 既有通道 | 无须桌面写入 | 开发者/GPT 不能自验；Hermes stdio 写宿主与飞书端到端待实测 |
 
@@ -35,6 +34,8 @@ Hermes 通过飞书协调现有 ChatGPT/Codex：GPT 生成工程 Prompt，Bridge
 ## 安装与配置
 
 Node.js >=24.19.0、npm、Git。Windows IPC/UIA 使用系统 PowerShell 5.1，无须另装 UI 框架。只有保留的 CDP Python 适配器需要 Python >=3.10 及 websocket-client。
+
+当前只读验证环境：Windows 11 build 26200、Node 24.19.0、OpenAI.Codex 26.1007.2314.0。Windows 10 为目标部署平台，尚无本轮实机证据；第三方应用更新可能改变 IPC/UIA/CDP，兼容性须按实际目标验证，内部接口不承诺官方稳定支持。
 
     git clone https://github.com/wynter-yaxley/agent-control-bridge.git
     cd agent-control-bridge
@@ -50,15 +51,15 @@ demo 使用唯一临时库与明确 Mock 来源，退出清理，不调用真实
 | 配置 | 默认值及用途 |
 |---|---|
 | database.path | ./data/bridge.db，专用台账 |
-| background.workspaceRoot / maxConcurrent | ./workspaces / 1，创建和执行串行，共用宿主 |
-| background.timeoutMs / leaseSeconds | 120000 / 600，租约大于操作预算 |
+| background.workspaceRoot / maxConcurrent | ./workspaces / 1，GUI 串行，后台执行独立计数 |
+| background.timeoutMs / leaseSeconds | 120000 / 600，单次传输/GUI 预算；持久执行定期续租、不受整个任务时长限制 |
 | background.intervalMs / watcher.intervalMs | 60000，事件触发加周期兜底 |
 | watcher.timeoutMs / failureReporting.blockedAfterMs | 10000 / 600000，检测预算和持续阻塞上报阈值 |
 | nativeInterface | 原生预算、帧大小、候选上限和只读白名单 |
 | desktop.uiPollMs | 100，UIA 控件等待周期 |
 | desktop.cdpUrl / python | 已有回环调试端点 / Python；UIA 路线无须 CDP |
 | agents.chatgpt.model / reasoningEffort | 请求 gpt-6 / high，不代表实际参数已验证 |
-| agents.codex.executable | 正式 Codex CLI 路径，用于 App Server |
+| agents.codex.executable / model / reasoningEffort | 正式 CLI 路径和显式执行参数；默认 null，不借用 GPT 参数 |
 
 真实 GPT/Codex 还需对应 agents.*.enabled。GPT 曾超过 120 秒，上一隔离测试使用 timeoutMs=600000、leaseSeconds=1000、uiPollMs=1000；这些值不是时延保证。
 
@@ -70,48 +71,64 @@ demo 使用唯一临时库与明确 Mock 来源，退出清理，不调用真实
 
     node <项目绝对目录>/dist/mcp.js --read-only --config <配置绝对路径> --db <已有专用数据库绝对路径>
 
-stdout 只承载 MCP，安全错误写 stderr。默认入口只注册 8 个只读工具，以 SQLite readOnly/query_only 打开已有 v5 库，不建库、不迁移、不改 ACL、不启动队列；**真实工作流由可信 Windows 组合根通过 runMcp(args, createHost) 安装宿主**。开关不授予桌面写权，也不能从业务消息加载任意脚本。
+stdout 只承载 MCP，安全错误写 stderr。默认入口只注册 8 个只读工具，以 SQLite readOnly/query_only 打开已有 v6 库，不建库、不迁移、不改 ACL、不启动队列。通用 MCP Client 可以使用同一 stdio 契约；没有强制 Hermes 身份文本要求。
+
+最小 Windows 组合入口：
+
+    node dist/windows-host.js --config <配置> --db <已有 v6 库>
+    node dist/windows-host.js --write --config <配置> --db <已有 v6 库>
+
+默认只读；--write 允许受保护 Controller 操作台账，但不启动任务队列、不凭开关授予 GUI 或 Executor 权限。部署受信任启动程序调用 runWindowsHost(args, createBindings)，MCP 进程只提交/查询，**另起一个同台账 --worker 运行时**持续执行和对账，客户端断连不停止它。当前没有真实执行委托时 --worker 明确拒绝 CODEX_EXECUTOR_HOST_MISSING；不是已部署写宿主。不要从配置、环境变量或 MCP 加载任意插件代码。
 
 受保护启动代码复用既有实现，trusted 必须来自实际宿主，提供本次批准和真实执行者绑定，没有自动批准默认值：
 
     import {
-      runMcp, WindowsNativeUi, createWindowsNativeReadTools,
+      runWindowsHost, WindowsNativeUi, createWindowsNativeReadTools,
       createWindowsNativeProjectHost, createWindowsNativeConversationHost,
+      createDesktopGptReader, createWindowsNativeGptReader,
     } from './dist/host-api.js';
 
     export async function startDesktopBridge(args, trusted) {
-      await runMcp(args, ({ config, authority, context }) => {
+      await runWindowsHost(args, ({ config, authority, context }) => {
         const ui = new WindowsNativeUi(config);
         const native = createWindowsNativeReadTools(
           config, trusted.carrierThreadId, trusted.createCodexThread,
         );
+        const gptReader = createDesktopGptReader(config);
+        const { ordinaryChat } = createWindowsNativeConversationHost({
+          config, native, ui, authorizeUiOperation: trusted.authorizeUiOperation,
+        });
         return {
           projects: createWindowsNativeProjectHost({
             config, native, ui, authorizeInitialization: trusted.authorizeInitialization,
           }),
-          ...createWindowsNativeConversationHost({
-            config, native, ui, authorizeUiOperation: trusted.authorizeUiOperation,
-          }),
+          ordinaryChat, gptReader,
+          gptUiReader: createWindowsNativeGptReader(config, trusted.carrierThreadId, ui),
           executorContext: trusted.bindExecutor(authority, context),
+          approveCodex: trusted.approveCodex,
         };
       });
     }
 
-carrierThreadId 是现有工具调用上下文，不是角色授权。正式 Codex 创建回调可选，否则走已有 UIA Work 分支。授权绑定本次项目名/目录、会话 ID、动作和事件；一次批准可覆盖明确列出的初始化、生成、执行、反馈和清理，不能保存为永久配置。
+该例是需要接入真实外部授权的组合方式，不提供 trusted 的伪实现。启动时还须给 --carrier-thread <已登记的原生 Codex ID>，以便组合入口安装 App Server Executor；正式原生 Codex 创建回调缺失则明确阻断，没有 UIA Work 兜底。carrierThreadId 只是传输上下文，不授予角色。审批绑定项目/目录/会话/动作/有效范围；命令与文件变更由可信审批回调决定，认证/登录请求拒绝。没有实际委托不能默认批准。
 
-[Hermes MCP 样例](config/hermes-mcp.example.yaml) 使用上述只读入口，开放 8 个查询/诊断工具。写宿主就绪后才能使用原 19 个接口；reviewer 使用单独受保护连接。路径变量替换为实际非秘密路径。同步项目调用预算覆盖五个顺序阶段：120000ms 示例为 630 秒，600000ms 示例为 3030 秒；客户端超时不能触发盲目重发。
+Controller、Executor、Reviewer 必须是不同的受保护主体/连接，Reviewer 不兼任 Controller 或 Codex。普通 Controller 不能提交最终验收或执行 Reviewer 专属恢复。策略与代码在受控启动时加载，不热更新授权；改源码不能提升运行中的权限。同 OS 用户恶意代码仍可破坏本机运行时，不能声称强隔离。实际本机策略已取消 Controller/Reviewer 重叠，独立 Reviewer 仍需部署者提供。
+
+[Hermes MCP 样例](config/hermes-mcp.example.yaml) 开放 8 个查询/诊断工具；可信写入口有 20 个工具，包括设置默认 Codex。Reviewer 使用单独受保护连接。路径变量替换为实际非秘密路径。项目创建调用有界；工程任务提交立即返回 ID，执行与客户端预算分离；超时不能盲目重发。
 
 WSL Hermes 使用可执行的 Windows Node 绝对路径（WSL 下为 /mnt/c/.../node.exe），入口/配置/库参数使用 Windows 绝对路径，Node >=24.19.0；不要把 Linux Node 当作 Windows UIA 宿主。tools/hermes/mcp_probe.py 只验证隔离协议，不是真实写宿主。HermesGatewayAdapter 复用已验证飞书事件和可信项目路由；NotificationDispatcher 持久保存回执，不另起事件消费者。
 
-2026-10-13 已用现有 Hermes 虚拟环境的 MCP SDK 连接 Windows 编译入口，复用真实 OS 策略，发现 8 个只读工具并回读隔离库登记操作，观察到 HOST_MISSING；没有启动 Hermes Agent/飞书消费者、修改实际 profile 或发送消息。现有业务库 v2 被明确 SCHEMA 拒绝，需部署者备份后显式迁移；本轮未改业务库。实际策略同时赋予 controller/reviewer，写部署前须分离；只读连接没有验收或写工具。
+Hermes 虚拟环境 MCP SDK 已连接 Windows 编译入口与真实 OS 策略，发现 8 个只读工具并观察到 HOST_MISSING；没有启动 Hermes Agent/飞书消费者、修改实际 profile 或发送消息。现有部署业务库 v2 被 SCHEMA 拒绝，需部署者备份后显式迁移；本轮未改业务库。实际策略的 Controller/Reviewer 重叠已取消，独立 Reviewer 仍未配置；只读连接没有验收或写工具。
 
 已检查 Hermes 的 MCP trust gate 与 form elicitation：它们能询问用户，但没有现成的受保护 Windows 回调，把批准与本次会话 ID/动作/事件及 executor 绑定。不能把客户端 JSON accept 当作宿主授权。最小写接入条件是受保护 Windows 组合根提供已有 authorizeInitialization/authorizeUiOperation 与 bindExecutor，批准可撤销且限定本次范围，独立 reviewer 分离；本项目不另建认证/RPC 框架。
 
 ## 精确会话与完成边界
 
-UIA 只接受公共无障碍 Document Value URI 中完整 /c/<UUID> 路径作为当前页面身份，不读取私有状态。OpenChat 已取消标题导航；现有页面必须先匹配登记 ID，再匹配标题。写入草稿前和提交前均核验 ID。新会话初始化必须先取得不同于原页面的 UI ID，再通过原生新增 ID 基线和 Prompt 对账，身份未知时不提交。当前实机 Document 只有通用 app://…/index.html，477 个控件没有会话 UUID，发送/初始化因此 PROVENANCE；正式宿主 Codex 创建回调和原生只读不受此限制。需要应用公开页面身份或正式导航/发送能力后才能恢复写链路，不能仅凭同名放行。
+CDP 优先复用当前实例已有端点，先校验端口所属签名进程与唯一已有 ChatGPT WebView，再比对 /c/UUID 和 Native 登记 ID。不能连接即回退 UIA Document.Current.Name，返回 titleOnly、conversationId:null 和空消息，不反复扫描 UUID；连名称也不可得则 unavailable。identityVerified 与标题证据严格区分。
 
-生成只发送一次，chat-send 不再采集回复；原生最新轮次 completed/idle 后才调用 chat-read-reply。UI 还须普通编辑器就绪、停止按钮及“ChatGPT 正在回应”消失、精确用户 Prompt 对应回复的朗读/更多操作按钮可用；之后重读最终正文，并再次核对原生轮次/助手 ID。合成 completed 或更多操作按钮单独存在均不足。最终正文、哈希、来源 ID 沿用 prompts/feedback 台账；轮次、用户/助手 ID、观察时间和双重完成证据写现有审计/反馈字段，无 schema 变化。未证明完成即进入原 UNCERTAIN/reconciliation，不重发。
+现有聊天写入仍需在同一桌面操作中、修改草稿前和提交前核对精确身份，并在提交后验证原生回执。当前 UIA URI 只有通用 index.html，跨 CDP/UIA 的原子目标保证也未打通，故拒绝工程写入。新聊天仅在本次可信创建批准下有例外：确认新建空白普通聊天，以唯一 ACB_INIT 标识发送不含工程任务的初始化消息，关联原生新增 ID/精确用户消息/类型/同名标题；不确定即保留原阶段，不重发。Codex 不使用 GPT 页面 URI，也没有 UIA Work 工程发送兜底。
+
+生成只发送一次；原生最新轮次 completed/idle 后才读取最终正文，匹配用户 Prompt、助手消息 ID 并再次核对原生轮次。UIA 还需非流式状态与精确回复操作；CDP 需要该助手消息自身的明确流式结束证据，缺失不猜测。按钮或合成 completed 单独不足。全文/Hash 保留原台账，完成证据写现有审计/反馈字段；未知结果对账原轮次、不重发。Native content-reference 仍不是正文。
 
 这些正向完成路径本轮只经组件测试，当前界面缺 ID，不能宣称实机最终正文已验收。NativeChatMessageHost 已有正式发送/回读及可见正文关联能力；本轮没有改写其 IPC 协议，也不把 content-reference 当完整正文。
 
@@ -121,10 +138,11 @@ UIA 只接受公共无障碍 Document Value URI 中完整 /c/<UUID> 路径作为
 
 | 工具 | 功能 |
 |---|---|
-| acb_capabilities | 宿主、阻断、uiInteractionRequired；先查一次，环境修复后再查 |
+| acb_capabilities | hostStatus:missing/installed/readyForTargetChecks；可指定 projectId/conversationId 查 targetStatus；verified 仅证明观察到的身份，不是执行授权或环境验收 |
 | acb_project_prepare / acb_project_get | 成套创建、状态及已记录资源 ID；READY 才能用于任务 |
-| acb_project_reconcile | 核验原 UNCERTAIN 完整 bundle，不重建、不接受替代 ID |
-| acb_request_submit / acb_request_get | 需求入队、eventKey 去重、状态/version/attempt/最后事件 |
+| acb_project_reconcile | 核对原阶段/回执，继续安全确认尚未开始的步骤；不替换已知资源 |
+| acb_project_default_codex | 选择同项目已登记的默认 Codex；CLI 同步提供 mapping-default |
+| acb_request_submit / acb_request_get | 需求入队、可指定 codexConversationId，否则用显式默认；eventKey 去重、状态/version/attempt/最后事件 |
 | acb_request_retry | 原因修复后重试无未知外部结果的 BLOCKED |
 | acb_execution_result | 默认结果/反馈 ID、哈希、字符数；includeContent:true 取完整正文 |
 | acb_execution_review | 将保存交付回固定 GPT 一次，不等于验收 |
@@ -141,7 +159,7 @@ UIA 只接受公共无障碍 Document Value URI 中完整 /c/<UUID> 路径作为
 
 1. 构建、绑定可信宿主/角色与本次 UI 范围；查 acb_capabilities。HOST_MISSING 先安装，不在未变环境反复重试。fullWorkflowReady 固定 false，TARGET_ENVIRONMENT_ACCEPTANCE_REQUIRED 留给目标验收，不伪造通过。
 2. acb_project_prepare {name,eventKey} 创建唯一隔离套件，保存 operationId/projectId/resources。GPT 精确同名，原生 ID/路径/ordinary 模式/Codex 成员关系必须回读。
-3. acb_request_submit {eventKey,projectId,title,requirement}，飞书用真实事件 ID。需求不是工程 Prompt；队列自动选登记会话、生成、核验、投递、保存结果并回 GPT。
+3. 启动独立可信 worker；acb_request_submit {eventKey,projectId,title,requirement,codexConversationId?} 返回持久 requestId。指定目标或显式默认，绝不按 ID 排序。需求不是工程 Prompt；worker 生成、核验、投递、续租、收集并回 GPT。
 4. 优先消费通知；仅在状态变化、恢复、验收需要时查状态。WAITING_APPROVAL 且反馈 COMPLETE 后，acb_execution_result {requestId,includeContent:true} 一次读取证据；必要来源字段由受保护只读台账核对。
 5. Hermes 独立验证实际文件/测试，再由独立 reviewer 调 acb_review_submit {taskId,expectedVersion,pass,reason}。GPT 复核/Codex 自报 PASS 不替代验收。
 6. 领取通知后由 Hermes 原飞书通道发送，保存真实 receipt 再 ack。结束只清理归属明确的本次测试资源，不动用户库、其他 workspace/聊天。
@@ -157,13 +175,22 @@ UIA 只接受公共无障碍 Document Value URI 中完整 /c/<UUID> 路径作为
 | PROVENANCE | 核对原会话/标题/归属、完整正文、消息 ID/哈希；不放宽条件 |
 | CONFLICT | 查看 version/attempt/holder，保留用户草稿及运行任务 |
 | GPT generation UNCERTAIN | reconcile_generation 回读原请求；合成完成不足以证明流式结束 |
-| 工程 UNCERTAIN | reconcile_execution 核对原 Prompt/起始时间/目标/final_answer，不重跑 |
+| 工程 UNCERTAIN | 原 turnId 或精确 dispatchId 回读；仍运行则 RUNNING，完成进入 WAITING_APPROVAL，不 resume/start 重跑 |
 | 反馈 SENDING/UNCERTAIN | reconcile_feedback，不重发结果 |
-| project UNCERTAIN | 完整原资源才可 reconcile，缺 ID 则报告，不能补造 |
+| project UNCERTAIN | 保存 phase/resources；只有唯一原阶段回执才能补记遗失 ID，安全缺失步骤才继续；未知则阻断，不补造 |
 | DB / SCHEMA | 一致性备份、副本验证、显式迁移 |
 | TIMEOUT / 失联 | 保留未知结果并按阈值报告，不以失联推断成功或确定退出 |
 
 恢复应用先报告、确认退出、取得事件批准、核对原映射；不可结束仍运行的应用。页面不稳定/账户挑战须如实报告，不能保证零风控。
+
+worker 启动按 PID/进程启动标识核对原持有者。已退出/状态未知的生成、执行、反馈和项目操作保留 ID 转入 UNCERTAIN 并通知；不会把存活持有者的工作抢走。未知任务只限制同项目及有关 GUI 阶段，其他项目已准备好的可信 Prompt 可继续后台执行；真实 RUNNING 后台任务仍遵守单并发。锁屏或非可交互桌面拒绝 GUI 副作用，已授权 App Server 执行继续。持久执行的 RPC 有单次预算，整个工程轮次不使用十分钟总超时。
+
+## 数据管理
+
+    node dist/cli.js db-backup --config <配置> --file <专用备份目录中的新文件>
+    node dist/cli.js db-restore --file <已验证备份> --db <专用恢复目录中的新文件>
+
+使用 SQLite 在线 backup，包括 WAL 中已提交的数据。备份/恢复拒绝覆盖已有文件；恢复校验完整性，只写新台账，不覆盖活跃任务。部署者先停止 Bridge 自有运行时、检查新库及原会话映射，再受控切换配置；不停止 ChatGPT/Codex，也不自动迁移或启动 Agent。清理只针对关闭连接后、能证明归属的已结束隔离测试资源，未知业务目录不删。数据库不默认上传云端。v6 迁移增加进程所有者、创建阶段、GUI 占用和默认/指定 Codex，旧多会话映射需明确选择默认。
 
 ## 性能、生命周期与验证
 
@@ -187,7 +214,7 @@ npm test 已发现全部 Node 测试，包含 e2e/workflow；CI 不再重复同�
 
 结构保留职责层次：mcp-server/mcp 为协议；background/project-provisioner/prompts/tasks/topology/outbox 为业务；native-readonly/windows-native-host 为 IPC/UIA；codex-app-server/ordinary-chat/hermes-gateway/notification-delivery 为适配器。没有为美观搬迁整个项目。
 
-实际源码参考：[WPS 常驻 JSON 行宿主](https://github.com/sueccku/dsh-plugin-wps-office-next/blob/bc69b96fca0c30e63680a151ebf96a093404d2da/host/wps-com-host.ps1)、[mcp-windows 局部查询](https://github.com/sbroenne/mcp-windows/blob/655b9fc92d03ad52a270067c6844ea1231c90559/src/Sbroenne.WindowsMcp/Automation/Tools/UIFindTool.cs)、[FlaUI 批量动作](https://github.com/shanselman/FlaUI-MCP/blob/da1d2a24eae6ccdfbbd40a1375b6617536552351/src/FlaUI.Mcp/Tools/BatchTool.cs)、[winapp Pattern 操作](https://github.com/microsoft/winappCli/blob/96f487615872f7c0e4032e0361856e3109a477e3/src/winapp-CLI/WinApp.Cli/Commands/UiInvokeCommand.cs)、[mcp-compressor 门面转换](https://github.com/atlassian-labs/mcp-compressor/blob/86dc1dfd414d68914d2fbb7b2421420c3f74bbea/python/mcp-compressor/mcp_compressor/transforms.py)。只借鉴原则，不复制/执行源码或引入框架。当前 19 个工具没有证据需要动态 Catalog。
+实际源码参考：[WPS 常驻 JSON 行宿主](https://github.com/sueccku/dsh-plugin-wps-office-next/blob/bc69b96fca0c30e63680a151ebf96a093404d2da/host/wps-com-host.ps1)、[mcp-windows 局部查询](https://github.com/sbroenne/mcp-windows/blob/655b9fc92d03ad52a270067c6844ea1231c90559/src/Sbroenne.WindowsMcp/Automation/Tools/UIFindTool.cs)、[FlaUI 批量动作](https://github.com/shanselman/FlaUI-MCP/blob/da1d2a24eae6ccdfbbd40a1375b6617536552351/src/FlaUI.Mcp/Tools/BatchTool.cs)、[winapp Pattern 操作](https://github.com/microsoft/winappCli/blob/96f487615872f7c0e4032e0361856e3109a477e3/src/winapp-CLI/WinApp.Cli/Commands/UiInvokeCommand.cs)、[mcp-compressor 门面转换](https://github.com/atlassian-labs/mcp-compressor/blob/86dc1dfd414d68914d2fbb7b2421420c3f74bbea/python/mcp-compressor/mcp_compressor/transforms.py)。只借鉴原则，不复制/执行源码或引入框架；默认 8 个、可信写入口 20 个工具不需要动态 Catalog。
 
 规则见 [PROJECT_RULES](docs/PROJECT_RULES.md)，独立报告用 [验收模板](docs/ACCEPTANCE_TEMPLATE.md)。保留 [MIT LICENSE](LICENSE) 和 [第三方声明](THIRD_PARTY_NOTICES.md)。报告存项目 docs，私有历史不发布，不再写个人文件夹。
 

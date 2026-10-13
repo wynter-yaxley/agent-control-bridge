@@ -11,7 +11,7 @@ export class ConversationRegistry {
   constructor(db: DatabaseSync, authority: CallerAuthority) { this.db = db; this.authority = authority; }
   private controller(context: CallerContext) {
     const caller = this.authority.resolve(context);
-    if (!caller?.controller || caller.executor !== 'hermes') throw new BridgeError('AUTH', 'Trusted Hermes context required for conversation mappings');
+    if (!caller?.controller) throw new BridgeError('AUTH', 'Trusted Hermes context required for conversation mappings');
     return caller;
   }
   registerProject(id: string, name: string, root: string, context: CallerContext): void {
@@ -51,9 +51,16 @@ export class ConversationRegistry {
       const other = this.db.prepare('SELECT project_id FROM codex_conversations WHERE conversation_id=?').get(input.codexConversationId);
       if (other && other.project_id !== input.projectId) throw new BridgeError('CONFLICT', 'Codex conversation already belongs to another project');
       this.db.prepare('INSERT OR IGNORE INTO conversation_workspaces(project_id,workspace_path,workspace_key,chatgpt_conversation_id,chatgpt_conversation_name,registered_at,app_project_id) VALUES(?,?,?,?,?,?,?)').run(input.projectId, workspace, key, input.chatgptConversationId, input.chatgptConversationName, now(), input.appProjectId ?? null);
+      this.db.prepare('UPDATE conversation_workspaces SET default_codex_conversation_id=COALESCE(default_codex_conversation_id,?) WHERE project_id=?').run(input.codexConversationId,input.projectId);
       this.db.prepare('INSERT OR IGNORE INTO codex_conversations(conversation_id,project_id) VALUES(?,?)').run(input.codexConversationId, input.projectId);
       this.db.prepare('INSERT INTO audit_log(at,actor,action,detail) VALUES(?,?,?,?)').run(now(), caller.principal, 'conversation_mapping', `project=${input.projectId}`);
     });
+  }
+  setDefault(projectId: string, conversationId: string, context: CallerContext): void {
+    const caller=this.controller(context);
+    if(!this.db.prepare('SELECT 1 FROM project_access WHERE project_id=? AND principal=?').get(projectId,caller.principal) ||
+       !this.db.prepare('SELECT 1 FROM codex_conversations WHERE project_id=? AND conversation_id=?').get(projectId,conversationId))throw new BridgeError('PROVENANCE','Default conversation must be registered to this controller/workspace');
+    this.db.prepare('UPDATE conversation_workspaces SET default_codex_conversation_id=? WHERE project_id=?').run(conversationId,projectId);
   }
   forTask(taskId: string): { project_id:string; app_project_id:string | null; workspace_path:string; workspace_key:string; chatgpt_conversation_id:string; chatgpt_conversation_name:string; project_name:string } {
     const mapping = this.db.prepare('SELECT w.*,p.name AS project_name FROM conversation_workspaces w JOIN tasks t ON t.project_id=w.project_id JOIN projects p ON p.id=w.project_id WHERE t.id=?').get(taskId) as { project_id:string; app_project_id:string | null; workspace_path:string; workspace_key:string; chatgpt_conversation_id:string; chatgpt_conversation_name:string; project_name:string } | undefined;

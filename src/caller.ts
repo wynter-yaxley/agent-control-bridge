@@ -23,8 +23,9 @@ export class CallerAuthority {
         (identity.executor !== null && !EXECUTORS.includes(identity.executor)) ||
         typeof identity.reviewer !== 'boolean' ||
         (identity.controller !== undefined && typeof identity.controller !== 'boolean')) throw new Error('Invalid trusted caller identity');
+    if(identity.reviewer && (identity.controller===true || identity.executor==='codex'))throw new BridgeError('AUTH','Controller and Codex executor cannot be reviewers');
     const handle = Object.freeze({}) as CallerContext;
-    this.#contexts.set(handle, Object.freeze({ ...identity, controller: identity.controller ?? (identity.executor === 'hermes' && identity.reviewer) }));
+    this.#contexts.set(handle, Object.freeze({ ...identity, controller: identity.controller ?? false }));
     return handle;
   }
   resolve(context: unknown): Readonly<CallerIdentity> | null {

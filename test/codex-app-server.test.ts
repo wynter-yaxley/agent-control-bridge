@@ -9,7 +9,7 @@ import { BridgeError } from '../src/errors.ts';
 
 const workspace = resolve('fixture 中文 app-server');
 const target = { codexConversationId: 'fixture-thread', workspacePath: workspace };
-type Mode = 'normal' | 'early' | 'failed' | 'interrupted' | 'wrong-thread' | 'wrong-turn' | 'reroute' | 'approval' | 'early-approval' | 'disconnect' | 'silent-turn' | 'silent-interrupt' | 'silent-start' | 'bad-id' | 'wrong-project' | 'null-project' | 'wrong-root' | 'active' | 'wrong-model' | 'broad-sandbox' | 'corrupt' | 'oversize' | 'bad-spawn';
+type Mode = 'normal' | 'early' | 'failed' | 'interrupted' | 'wrong-thread' | 'wrong-turn' | 'reroute' | 'approval' | 'command-approval' | 'early-approval' | 'disconnect' | 'silent-turn' | 'silent-interrupt' | 'silent-start' | 'bad-id' | 'wrong-project' | 'null-project' | 'wrong-root' | 'active' | 'wrong-model' | 'broad-sandbox' | 'corrupt' | 'oversize' | 'bad-spawn';
 function fixture(mode: Mode = 'normal') {
   const requests: Record<string, unknown>[] = [];
   let hidden = false, killed = 0, exclusive = 0;
@@ -31,6 +31,7 @@ function fixture(mode: Mode = 'normal') {
     const completed = (status = 'completed', threadId = target.codexConversationId, turnId = 'fixture-turn') => ({ method: 'turn/completed', params: { threadId, ...(mode === 'wrong-turn' && turnId === 'foreign-turn' ? { turnId: 'fixture-turn' } : {}), turn: { id: turnId, status, error: status === 'failed' ? { message: 'synthetic-private-diagnostic' } : null } } });
     child.stdin = new Writable({ write(chunk, _encoding, done) {
       const message = JSON.parse(String(chunk)); requests.push(message); done();
+      if (mode==='command-approval' && message.id==='fixture-approval' && message.result?.decision==='accept') {queueMicrotask(()=>emit(completed()));return;}
       if (message.id === undefined || message.method === undefined) return;
       queueMicrotask(() => {
         if (message.method === 'initialize') emit({ id: message.id, result: { userAgent: 'fixture' } });
@@ -45,6 +46,7 @@ function fixture(mode: Mode = 'normal') {
           if (mode === 'early') emit(completed());
           if (mode === 'early-approval') emit({ id: 'fixture-approval', method: 'item/commandExecution/requestApproval', params: { threadId: target.codexConversationId, turnId: 'fixture-turn', command: 'private command' } });
           emit({ id: message.id, result: { turn: { id: 'fixture-turn', status: 'inProgress', items: [], error: null } } });
+          if(mode==='command-approval') {setImmediate(()=>emit({id:'fixture-approval',method:'item/commandExecution/requestApproval',params:{threadId:target.codexConversationId,turnId:'fixture-turn',command:'[TEST] command'}}));return;}
           queueMicrotask(() => {
             if (['early', 'early-approval', 'silent-turn', 'silent-interrupt'].includes(mode)) return;
             if (mode === 'approval') emit({ id: 'fixture-approval', method: 'item/permissions/requestApproval', params: { threadId: target.codexConversationId, turnId: 'fixture-turn' } });
@@ -57,7 +59,7 @@ function fixture(mode: Mode = 'normal') {
     return child;
   }) as typeof spawn;
   const hostInspect = async () => ({ source: 'codex-app-state' as const, local: true, conversationId: target.codexConversationId, appProjectId: 'native-project', workspacePath: workspace });
-  const options = { executable: 'fixture', timeoutMs: 250, interruptTimeoutMs: 100, model: 'gpt-fixture', reasoningEffort: 'high', selfMcpServerName: 'fixture-bridge', spawnFn, inspect: hostInspect, assertExclusive: async () => { exclusive++; } };
+  const options = { durableExecution:false, executable: 'fixture', timeoutMs: 250, interruptTimeoutMs: 100, model: 'gpt-fixture', reasoningEffort: 'high', selfMcpServerName: 'fixture-bridge', spawnFn, inspect: hostInspect, assertExclusive: async () => { exclusive++; } };
   return { requests, options, hidden: () => hidden, killed: () => killed, exclusive: () => exclusive };
 }
 const code = (expected: string) => (error: unknown) => error instanceof BridgeError && error.code === expected && !error.message.includes('synthetic-private');
@@ -141,4 +143,18 @@ test('app-server: exclusion failure and invalid prompt block before any model tu
   await assert.rejects(executor.execute('[ISOLATED TEST] prompt', 'fixture-dispatch', target, new AbortController().signal), code('CONFLICT'));
   assert.equal(f.requests.length, 0);
   await assert.rejects(executor.execute('', 'fixture-dispatch', target, new AbortController().signal), code('INPUT'));
+});
+
+test('app-server: recovery reads exact original turn without resume/start or resending',async()=>{
+ const f=fixture(),executor=createCodexAppServerExecutor(f.options);
+ const receipt=await executor.observeExecution!('[TEST] original',target,'2000-01-01',new AbortController().signal,{executionId:'fixture-turn',dispatchId:'original-dispatch'});
+ assert.equal(receipt.executionId,'fixture-turn');assert.equal(receipt.output!.messageIds[0],'fixture-answer');
+ assert.ok(!f.requests.some(request=>['turn/start','thread/resume'].includes(String(request.method))));
+});
+
+test('app-server: only the installed host approves the exact original command request',async()=>{
+ const f=fixture('command-approval');let approved=0;
+ const executor=createCodexAppServerExecutor({...f.options,approve:async(request,signal)=>{assert.equal(signal.aborted,false);assert.equal(request.target.codexConversationId,target.codexConversationId);assert.equal(request.params.turnId,'fixture-turn');assert.equal(request.dispatchId,'fixture-dispatch');approved++;return 'accept';}});
+ const receipt=await executor.execute('[TEST] authorized prompt','fixture-dispatch',target,new AbortController().signal);
+ assert.equal(receipt.executionId,'fixture-turn');assert.equal(approved,1);assert.equal(f.requests.filter(r=>r.method==='turn/start').length,1);
 });

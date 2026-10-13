@@ -1,6 +1,6 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { BridgeError } from './errors.ts';
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 export function schemaVersion(db: DatabaseSync): number { return Number(db.prepare('PRAGMA user_version').get()!.user_version); }
 export function migrateSchema(db: DatabaseSync, schema: string): void {
   let version = schemaVersion(db);
@@ -115,5 +115,23 @@ export function migrateSchema(db: DatabaseSync, schema: string): void {
       ALTER TABLE execution_runs ADD COLUMN feedback_json TEXT;
       ALTER TABLE execution_runs ADD COLUMN feedback_error TEXT;
       PRAGMA user_version=5;`);
+    version=5;
+  }
+  if (version === 5) {
+    db.exec(`ALTER TABLE background_requests ADD COLUMN owner_token TEXT;
+      ALTER TABLE background_requests ADD COLUMN gui INTEGER NOT NULL DEFAULT 1;
+      ALTER TABLE background_requests ADD COLUMN codex_conversation_id TEXT;
+      ALTER TABLE execution_runs ADD COLUMN owner_token TEXT;
+      ALTER TABLE execution_runs ADD COLUMN feedback_owner_token TEXT;
+      ALTER TABLE project_operations ADD COLUMN owner_token TEXT;
+      ALTER TABLE project_operations ADD COLUMN phase TEXT;
+      ALTER TABLE conversation_workspaces ADD COLUMN default_codex_conversation_id TEXT;
+      UPDATE conversation_workspaces SET default_codex_conversation_id=(SELECT conversation_id FROM codex_conversations c WHERE c.project_id=conversation_workspaces.project_id)
+        WHERE (SELECT COUNT(*) FROM codex_conversations c WHERE c.project_id=conversation_workspaces.project_id)=1;
+      DROP INDEX one_active_background;
+      DROP INDEX one_project_provision;
+      CREATE UNIQUE INDEX one_live_gui ON background_requests((1)) WHERE gui=1 AND state IN ('GENERATING','RUNNING');
+      CREATE UNIQUE INDEX one_project_provision ON project_operations((1)) WHERE state='PROVISIONING';
+      PRAGMA user_version=6;`);
   }
 }

@@ -73,7 +73,7 @@ test('native messages: visible bodies resolve every exact native reply ID withou
     sendMessage: async () => { sends++; return { threadId: target.conversationId }; },
   });
   const visible: VisibleGptSnapshot = { source: 'visible-dom', conversationId: target.conversationId, browserTitle: target.name,
-    kind: 'unknown', completionVerified: false, actualModel: null, actualReasoningEffort: null, responseInProgress: false,
+    kind: 'unknown', completionVerified: true, actualModel: null, actualReasoningEffort: null, responseInProgress: false,
     messages: [{ role: 'assistant', sourceMessageId: 'old-reply', text: 'old body', hash: 'fixture' },
       { role: 'assistant', sourceMessageId: 'new-reply', text: 'first body', hash: 'fixture' },
       { role: 'assistant', sourceMessageId: 'second-reply', text: 'second body', hash: 'fixture' }] };

@@ -1,4 +1,6 @@
-import { DatabaseSync } from 'node:sqlite';
+import { execFileSync } from 'node:child_process';
+import { WINDOWS_POWERSHELL } from './permissions.ts';
+import { DatabaseSync, backup } from 'node:sqlite';
 import { readFileSync, mkdirSync, existsSync, openSync, closeSync, lstatSync } from 'node:fs';
 import { dirname, resolve, parse } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
@@ -66,3 +68,43 @@ export function createDb(options: DbOptions = {}): DatabaseSync {
 }
 export function now(): string { return new Date().toISOString(); }
 export function uuid(): string { return randomUUID(); }
+
+let ownProcessToken: string | undefined;
+function processToken(pid: number): string | null {
+  if(process.platform==='win32') {
+    const script=`$ErrorActionPreference='Stop';$p=Get-Process -Id ${pid} -ErrorAction SilentlyContinue;if($p){[Console]::Out.Write($p.StartTime.ToUniversalTime().Ticks)}`;
+    const token=execFileSync(WINDOWS_POWERSHELL,['-NoProfile','-NonInteractive','-Command',script],{windowsHide:true,timeout:10000,encoding:'utf8',stdio:['ignore','pipe','pipe']}).trim();
+    return token || null;
+  }
+  try {const stat=readFileSync(`/proc/${pid}/stat`,'utf8');return stat.slice(stat.lastIndexOf(')')+2).split(' ')[19];}
+  catch(error){if((error as NodeJS.ErrnoException).code==='ENOENT')return null;throw error;}
+}
+export function processOwner(): string { return ownProcessToken ??= `${process.pid}:${processToken(process.pid)}`; }
+export function ownerAlive(owner: string | null): boolean | null {
+  if(!owner)return null;
+  const [pid,token]=owner.split(':');
+  if(Number(pid)===process.pid)return owner===processOwner();
+  try {return processToken(Number(pid))===token;}
+  catch {return null;} // Unknown ownership is explicitly retained; never assumed dead.
+}
+
+/** SQLite online backup includes committed WAL pages. Never overwrite a file. */
+export async function backupDatabase(sourcePath:string,destinationPath:string,authorizedSids:readonly string[]=[]):Promise<{pages:number}> {
+  const source=resolve(sourcePath),destination=resolve(destinationPath);
+  if(source===destination || existsSync(destination))throw new BridgeError('CONFLICT','Backup/restore destination must be a new file');
+  const parent=dirname(destination);
+  if([resolve(homedir()),resolve(tmpdir()),parse(destination).root].includes(parent) || (existsSync(parent)&&lstatSync(parent).isSymbolicLink()))throw new BridgeError('CONFIG','Backup requires a dedicated directory');
+  mkdirSync(parent,{recursive:true,mode:0o700});protectPath(parent,authorizedSids);
+  closeSync(openSync(destination,'wx',0o600));protectPath(destination,authorizedSids);
+  const db=new DatabaseSync(source,{readOnly:true});
+  try {const pages=await backup(db,destination);protectPath(destination,authorizedSids);return {pages};}
+  finally{db.close();}
+}
+export async function restoreDatabase(backupPath:string,newPath:string,authorizedSids:readonly string[]=[]):Promise<{pages:number}> {
+  // A fresh destination cannot replace an active ledger. The operator stops the
+  // old worker and switches its config only after inspecting the restored copy.
+  const source=new DatabaseSync(resolve(backupPath),{readOnly:true});
+  try {if(source.prepare('PRAGMA integrity_check').get()!.integrity_check!=='ok')throw new BridgeError('DB','Backup integrity check failed');}
+  finally{source.close();}
+  return backupDatabase(backupPath,newPath,authorizedSids);
+}

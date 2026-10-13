@@ -46,8 +46,8 @@ class AppServerRpcError extends BridgeError {
   }
 }
 
-/** A private, owned stdio process. It never connects to the live desktop process,
- * opens a browser, reads auth files, or grants interactive server requests. */
+/** An owned stdio process, separate from the desktop. Target-bound approvals
+ * require the protected host callback; authentication requests are not handled. */
 class AppServerConnection {
   private readonly child: ChildProcess;
   private readonly timeoutMs: number;
@@ -56,10 +56,9 @@ class AppServerConnection {
   private failure?: BridgeError;
   private exited = false;
   private buffer = '';
-  private bytes = 0;
   private decoder = new StringDecoder('utf8');
   notification?: (method: string, params: Row) => void;
-  serverRequest?: () => void;
+  serverRequest?: (method:string,params:Row) => Promise<Row | undefined>;
   disconnected?: (error: BridgeError) => void;
   constructor(options: ReadClientOptions) {
     if (typeof options.executable !== 'string' || !options.executable.trim() || !Number.isInteger(options.timeoutMs) || options.timeoutMs < 1 || options.timeoutMs > 600000) throw new BridgeError('CONFIG', 'Invalid app-server transport configuration');
@@ -103,8 +102,6 @@ class AppServerConnection {
   }
   private receive(data: Buffer): void {
     if (this.failure) return;
-    this.bytes += data.length;
-    if (this.bytes > 16 * 1024 * 1024) { this.fail(new BridgeError('EXECUTION', 'App-server output exceeded its finite bound')); return; }
     this.buffer += this.decoder.write(data);
     for (;;) {
       const end = this.buffer.indexOf('\n');
@@ -120,10 +117,12 @@ class AppServerConnection {
       try {
         if (typeof message.method === 'string') {
           if (message.id !== undefined) {
-            // Return an error, never an approval, token refresh, login, or tool result.
+            // Only the installed target-bound host may answer execution approvals.
             if (typeof message.id !== 'string' && typeof message.id !== 'number') throw new BridgeError('EXECUTION', 'Invalid server request identity');
-            this.write({ id: message.id, error: { code: -32601, message: 'Interactive server requests are not installed' } });
-            if (this.serverRequest) this.serverRequest(); else this.fail(new BridgeError('AUTH', 'App-server requires an interactive host'));
+            if(this.serverRequest) {
+              const id=message.id;
+              void this.serverRequest(message.method,row(message.params) ?? {}).then(result=>this.write(result?{id,result}:{id,error:{code:-32601,message:'Approval or authentication host is unavailable'}})).catch(error=>this.fail(error instanceof BridgeError?error:new BridgeError('AUTH','Host approval failed')));
+            } else {this.write({ id: message.id, error: { code: -32601, message: 'Interactive server requests are not installed' } });this.fail(new BridgeError('AUTH', 'App-server requires an interactive host'));}
           } else this.notification?.(message.method, row(message.params) ?? {});
         } else {
           if (typeof message.id !== 'number' || !this.pending.has(message.id)) throw new BridgeError('EXECUTION', 'Unexpected app-server response identity');
@@ -183,7 +182,7 @@ function eventSummary(method: string, params: Row, target: string): TurnEvent | 
     ...(method === 'turn/completed' ? { status: String(turn?.status), failed: turn?.error != null } : {}),
     ...(method === 'model/rerouted' ? { reroutedTo: typeof params.toModel === 'string' ? params.toModel : '' } : {}) };
 }
-async function executeTurn(connection: AppServerConnection, options: { target: DeliveryTarget; model: string; reasoningEffort: string; content: string; key: string; timeoutMs: number; interruptTimeoutMs: number; signal: AbortSignal; onEvent?: (event: Row) => void }): Promise<string> {
+async function executeTurn(connection: AppServerConnection, options: { target: DeliveryTarget; model: string; reasoningEffort: string; content: string; key: string; durable?: boolean; timeoutMs: number; interruptTimeoutMs: number; signal: AbortSignal; onEvent?: (event: Row) => void; approve?: CodexAppServerExecutorOptions['approve'] }): Promise<string> {
   let turnId: string | null = null, finished = false, stopping = false;
   let pendingStop: BridgeError | undefined;
   const early: TurnEvent[] = [];
@@ -207,9 +206,17 @@ async function executeTurn(connection: AppServerConnection, options: { target: D
     finish(error);
   };
   const abort = () => { void stop(new BridgeError('TIMEOUT', 'Turn aborted; external outcome requires reconciliation')); };
-  const timer = setTimeout(() => { void stop(new BridgeError('TIMEOUT', 'Turn deadline exceeded; external outcome requires reconciliation')); }, options.timeoutMs);
+  const timer = options.durable ? undefined : setTimeout(() => { void stop(new BridgeError('TIMEOUT', 'Turn deadline exceeded; external outcome requires reconciliation')); }, options.timeoutMs);
   connection.disconnected = error => finish(error);
-  connection.serverRequest = () => { void stop(new BridgeError('AUTH', 'Interactive approval or authentication requires a trusted host')); };
+  connection.serverRequest = async(method,params) => {
+    if(!options.approve || !['item/commandExecution/requestApproval','item/fileChange/requestApproval'].includes(method) || params.threadId!==options.target.codexConversationId || !turnId || params.turnId!==turnId) {
+      void stop(new BridgeError('AUTH','This approval/authentication request has no trusted target-bound host'));
+      return undefined;
+    }
+    const decision=await options.approve({method,params,target:options.target,dispatchId:options.key},options.signal);
+    if(options.signal.aborted || !['accept','decline'].includes(decision))throw new BridgeError('AUTH','Host approval is unavailable or expired');
+    return {decision};
+  };
   const consume = (event: TurnEvent) => {
     if (finished || stopping || event.turnId !== turnId) return;
     try { options.onEvent?.({ type: event.method.replaceAll('/', '.').toLowerCase(), threadId: event.threadId, turnId }); }
@@ -237,6 +244,8 @@ async function executeTurn(connection: AppServerConnection, options: { target: D
     }, options.signal);
     const turn = row(result.turn);
     turnId = identifier(turn?.id);
+    try{options.onEvent?.({type:'turn.started',threadId:options.target.codexConversationId,turnId});}
+    catch{const error=new BridgeError('IO','Turn receipt persistence failed; external outcome requires reconciliation');await stop(error);throw error;}
     if (pendingStop) {
       // A refusal/deadline can precede the start acknowledgement. Once the
       // actual turn ID arrives, interrupt that turn once; never invent an ID.
@@ -258,11 +267,12 @@ async function executeTurn(connection: AppServerConnection, options: { target: D
 }
 
 export interface CodexAppServerExecutorOptions extends ClientOptions {
-  model: string; reasoningEffort: string; interruptTimeoutMs: number; selfMcpServerName: string;
+  model: string; reasoningEffort: string; interruptTimeoutMs: number; selfMcpServerName: string; durableExecution?: boolean;
   inspect: BackgroundExecutor['inspect'];
   // App-server readback alone cannot prove that another desktop/CLI process
   // isn't already executing this thread. The trusted host owns this exclusion.
   assertExclusive: (target: DeliveryTarget, signal: AbortSignal) => Promise<void>;
+  approve?: (request:{method:string;params:Row;target:DeliveryTarget;dispatchId:string},signal:AbortSignal)=>Promise<'accept'|'decline'>;
 }
 export function createCodexAppServerExecutor(options: CodexAppServerExecutorOptions): BackgroundExecutor {
   if (!/^gpt-[a-zA-Z0-9.-]{1,100}$/.test(options.model) || !EFFORTS.includes(options.reasoningEffort) || !Number.isInteger(options.interruptTimeoutMs) || options.interruptTimeoutMs < 1 || options.interruptTimeoutMs > 30000 || typeof options.selfMcpServerName !== 'string' || !/^[a-zA-Z0-9_-]{1,64}$/.test(options.selfMcpServerName) || typeof options.inspect !== 'function' || typeof options.assertExclusive !== 'function') throw new BridgeError('CONFIG', 'App-server executor requires explicit model, effort, own MCP name and trusted target/exclusion adapters');
@@ -276,6 +286,7 @@ export function createCodexAppServerExecutor(options: CodexAppServerExecutorOpti
   };
   return {
     mode: 'codex-app-server',
+    durable: options.durableExecution!==false,
     async inspect(target, signal) {
       const expected = await options.inspect(target, signal);
       check(await inspectCodexThread({ ...options, conversationId: target.codexConversationId, signal }), expected, target);
@@ -299,7 +310,7 @@ export function createCodexAppServerExecutor(options: CodexAppServerExecutorOpti
         if (resumed.model !== options.model || resumed.reasoningEffort !== options.reasoningEffort || typeof resumed.cwd !== 'string' || pathKey(resumed.cwd) !== pathKey(target.workspacePath)) throw new BridgeError('PROVENANCE', 'App-server selected configuration does not match the explicit request');
         assertResumeSandbox(resumed, target.workspacePath);
         await options.assertExclusive(target, signal);
-        const executionId = await executeTurn(connection, { ...options, target, content, key, signal, onEvent });
+        const executionId = await executeTurn(connection, { ...options, durable:options.durableExecution!==false, target, content, key, signal, onEvent });
         const completed = row((await connection.request('thread/read', { threadId: target.codexConversationId, includeTurns: true }, signal)).thread);
         const turn = Array.isArray(completed?.turns) ? completed.turns.map(row).find(turn => turn?.id === executionId) : undefined;
         if (completed?.id !== target.codexConversationId || turn?.status !== 'completed' || turn.error != null || !Array.isArray(turn.items)) throw new BridgeError('PROVENANCE', 'Completed Codex turn could not be read back');
@@ -308,6 +319,25 @@ export function createCodexAppServerExecutor(options: CodexAppServerExecutorOpti
         const output = { content: replies.map(item => String(item!.text)).join('\n\n'), messageIds: replies.map(item => String(item!.id)) };
         return { executionId, codexConversationId: target.codexConversationId, workspacePath: target.workspacePath, output };
       } finally { connection.close(); }
+    },
+    async observeExecution(content,target,_startedAfter,signal,original) {
+      const expected=await options.inspect(target,signal);
+      const connection=new AppServerConnection({...options,metadataOnly:true});
+      try {
+        await connection.initialize(signal);
+        const value=await connection.request('thread/read',{threadId:target.codexConversationId,includeTurns:true},signal);
+        check(summary(value,target.codexConversationId),expected,target);
+        const thread=row(value.thread),turns=Array.isArray(thread?.turns)?thread.turns.map(row):[];
+        const turn=original?.executionId ? turns.find(t=>t?.id===original.executionId) : turns.find(t=>Array.isArray(t?.items) && t.items.map(row).some(item=>item?.type==='userMessage' && item.id===original?.dispatchId && Array.isArray(item.content) && item.content.some(part=>row(part)?.text===content)));
+        if(!turn)throw new BridgeError('PROVENANCE','No exact original execution receipt; do not rerun');
+        const executionId=identifier(turn.id);
+        if(turn.status==='inProgress')return {executionId,codexConversationId:target.codexConversationId,workspacePath:target.workspacePath,running:true};
+        if(turn.status!=='completed' || turn.error!=null || !Array.isArray(turn.items))throw new BridgeError('EXECUTION','Original execution has no successful terminal receipt');
+        const replies=turn.items.map(row).filter(item=>item?.type==='agentMessage' && item.phase!=='commentary');
+        if(!replies.length || replies.some(item=>typeof item?.text!=='string' || !item.text.trim() || typeof item.id!=='string'))throw new BridgeError('PROVENANCE','Original execution has no complete final text');
+        return {executionId,codexConversationId:target.codexConversationId,workspacePath:target.workspacePath,output:{content:replies.map(item=>String(item!.text)).join('\n\n'),messageIds:replies.map(item=>String(item!.id))}};
+      }finally{connection.close();}
+
     },
   };
 }

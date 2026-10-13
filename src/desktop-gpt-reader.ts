@@ -8,14 +8,16 @@ import { redact } from './security.ts';
 
 export interface VisibleGptSnapshot {
   source: 'visible-dom' | 'windows-uia';
-  conversationId: string;
+  conversationId: string | null;
+  identityStatus?: 'identityVerified' | 'titleOnly' | 'unavailable';
   browserTitle: string;
+  reason?: string;
   kind: 'unknown';
-  completionVerified: false;
+  completionVerified: boolean;
   actualModel: null;
   actualReasoningEffort: null;
   responseInProgress: boolean;
-  messages: { role: string; text: string; sourceMessageId: string | null; hash: string }[];
+  messages: { role: string; text: string; sourceMessageId: string | null; hash: string; complete?: boolean }[];
 }
 export type DesktopGptReader = (conversationId: string) => Promise<VisibleGptSnapshot>;
 
@@ -37,6 +39,6 @@ export function createDesktopGptReader(config: BridgeConfig, configPath: string)
     });
     const snapshot = JSON.parse(stdout) as VisibleGptSnapshot;
     if (snapshot.source !== 'visible-dom' || snapshot.conversationId !== conversationId) throw new BridgeError('PROVENANCE', 'Visible GPT snapshot identity differs');
-    return snapshot;
+    return {...snapshot,identityStatus:'identityVerified'};
   };
 }

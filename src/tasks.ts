@@ -146,7 +146,7 @@ export class TaskStore {
     optionalText(reason);
     return this.#mutate(() => {
       const caller = this.#caller(context), task = this.#task(id, expectedVersion);
-      if (!caller.reviewer) reject('AUTH', 'Independent reviewer capability required');
+      if (!caller.reviewer || caller.controller || caller.executor==='codex') reject('AUTH', 'Independent reviewer capability required');
       if (!task.attempt_executor || caller.principal === task.attempt_executor) reject('AUTH', 'Executor principal cannot review its own attempt');
       if (typeof pass !== 'boolean') reject('INPUT', 'Explicit boolean review decision required');
       if (task.status !== 'WAITING_APPROVAL') reject('STATE', 'Task is not awaiting review');

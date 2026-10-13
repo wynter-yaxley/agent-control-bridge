@@ -5,7 +5,7 @@ import { NotificationOutbox, enqueueNotification } from '../src/outbox.ts';
 
 test('outbox: external receipt required; expired delivery can be replayed after restart', t => {
   const f = fixture(); t.after(() => f.db.close());
-  const caller = f.reviewer, principal = f.authority.resolve(caller)!.principal;
+  const caller = f.controller, principal = f.authority.resolve(caller)!.principal;
   const outbox = new NotificationOutbox(f.db, f.authority), id = enqueueNotification(f.db, principal, 'fixture-notice', { state: 'BLOCKED' });
   assert.equal(enqueueNotification(f.db, principal, 'fixture-notice', { state: 'BLOCKED' }), id);
   const first = outbox.pull(caller); assert.equal(first.length, 1); assert.equal(first[0].attempts, 1);

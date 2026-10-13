@@ -9,7 +9,7 @@ import { resolve, join } from 'node:path';
 import { createOrdinaryChatAdapter, type OrdinaryChatHost } from '../src/ordinary-chat.ts';
 function fixture(t: {after:(fn:()=>void)=>void}) {
  const db=createDb({dbPath:':memory:'});t.after(()=>db.close());const authority=new CallerAuthority();
- const controller=authority.issue({principal:'test:controller',instance:'one',executor:'hermes',reviewer:true});
+ const controller=authority.issue({principal:'test:controller',instance:'one',executor:'hermes',reviewer:false,controller:true});
  for(const id of ['project-a','project-b']) db.prepare('INSERT INTO projects VALUES(?,?,?,?,?,?)').run(id,id,resolve(id),'test',now(),now());
  const registry=new ConversationRegistry(db,authority),store=new TaskStore(db,authority);
  const mapping={projectId:'project-a',workspacePath:resolve('project-a'),chatgptConversationId:'test-gpt-a',chatgptConversationName:'project-a',codexConversationId:'test-codex-a'};

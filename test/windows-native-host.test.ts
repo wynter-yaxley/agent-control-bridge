@@ -29,7 +29,7 @@ test('windows native host: authorized UI identity setup registers READY without 
   const authority=new CallerAuthority(),context=authority.issue({principal:'fixture:controller',instance:'fixture',executor:'hermes',controller:true,reviewer:false});
   const provisioner=new ProjectProvisioner(scope.db,authority,{root:config.background.workspaceRoot,timeoutMs:1000,host});
   const operation=await provisioner.prepare('fixture-project','fixture-init',context);
-  assert.equal(operation.state,'READY');assert.equal(grants,1);assert.deepEqual(calls,['workspace-create','gpt-create']);
+  assert.equal(operation.state,'READY');assert.equal(grants,3);assert.deepEqual(calls,['workspace-create','gpt-create']);
   assert.equal(scope.db.prepare('SELECT app_project_id FROM conversation_workspaces').get()!.app_project_id,'fixture-native');
   const capabilities=await host.inspect(new AbortController().signal);
   assert.equal(capabilities.background,false);assert.equal(capabilities.actualGenerationParameters,false);
@@ -45,19 +45,6 @@ test('windows native host: enabled configuration cannot grant UI initialization'
   await assert.rejects(host.createWorkspace('fixture-project','D:\\fixture',new AbortController().signal),{code:'AUTH'});
   assert.equal(writes,0);
 });
-test('windows native host: observed Codex editor newline matches once and only final output is returned',async()=>{
-  const config=defaults(),path='D:\\fixture-project';let sent=false;
-  const ui=new class extends WindowsNativeUi {override async call(){sent=true;return {ok:true};}}(config);
-  const native:WindowsNativeTools={
-    listProjects:async()=>({projects:[{projectId:'fixture-native',projectKind:'local',hostId:'local',label:'fixture-project',path}]}),
-    listThreads:async()=>({pinnedThreads:[],threads:[{id:'fixture-codex',kind:'codex',title:'fixture-project Codex',projectId:'fixture-native',cwd:path}]}),
-    readThread:async()=>({thread:{id:'fixture-codex',kind:'codex',title:'fixture-project Codex',status:{type:'idle'}},turns:[{id:sent?'fixture-new':'fixture-old',status:'completed',error:null,items:sent?[{type:'userMessage',id:'fixture-user',content:[{type:'text',text:'[TEST] generated prompt\n'}]},{type:'agentMessage',id:'fixture-progress',text:'[TEST] progress',phase:'commentary'},{type:'agentMessage',id:'fixture-final',text:'[TEST] complete',phase:'final_answer'}]:[]}]}),
-  };
-  const {executor}=createWindowsNativeConversationHost({config,native,ui,authorizeUiOperation:async()=>true});
-  const receipt=await executor.execute('[TEST] generated prompt','fixture-run',{codexConversationId:'fixture-codex',workspacePath:path},new AbortController().signal);
-  assert.equal(receipt.executionId,'fixture-new');assert.deepEqual(receipt.output,{content:'[TEST] complete',messageIds:['fixture-final']});
-});
-
 // Component fixtures prove ordering and identity gates, not a live desktop send.
 test('windows native host: same title with a different UI conversation ID is rejected',async()=>{
   const config=defaults();
@@ -94,4 +81,12 @@ test('windows native host: synthetic native completion cannot approve unfinished
   const {ordinaryChat}=createWindowsNativeConversationHost({config,native,ui,authorizeUiOperation:async()=>true});
   await assert.rejects(ordinaryChat.observeGeneration!('target-id','[TEST] request',new AbortController().signal),{code:'PROVENANCE'});
   assert.equal(sends,0);
+});
+
+test('windows native host: title-only observer never grants conversation identity',async()=>{
+  const config=defaults(),ui=new class extends WindowsNativeUi {override async call(){return {ok:true,snapshot:{title:'same title',text:'',ordinaryComposer:true,pid:1,conversationId:null}};}}(config);
+  const {createWindowsNativeGptReader}=await import('../src/windows-native-host.ts');
+  const read=createWindowsNativeGptReader(config,undefined,ui);
+  const result=await read('requested-id','same title','carrier');
+  assert.equal(result.identityStatus,'titleOnly');assert.equal(result.conversationId,null);assert.equal(result.messages.length,0);
 });

@@ -32,7 +32,7 @@ EXTRACT = r"""
     else if (start > 0 && start < 64) body = fullText.slice(start + roleText.length);
     body = body.trim();
     const message = block.matches('[data-message-id]') ? block : block.querySelector('[data-message-id]');
-    if (body) msgs.push({role, text: body, sourceMessageId: message ? message.getAttribute('data-message-id') : null});
+    if (body) msgs.push({role, text: body, sourceMessageId: message ? message.getAttribute('data-message-id') : null, complete:role==='assistant' && !!message && message.getAttribute('data-is-streaming')==='false'});
   });
   const match=location.pathname.match(/\/c\/([A-Za-z0-9-]+)/);
   const stops=[...document.querySelectorAll('[data-testid="stop-button"]')].filter(e=>e.getBoundingClientRect().width>0&&e.getBoundingClientRect().height>0);
@@ -57,7 +57,7 @@ def read_messages(kind='webview', conversation_id=None):
             message['hash']=hashlib.sha256(message['text'].encode('utf-8')).hexdigest()
         result.update({'conversationId':conversation_id,'browserTitle':redact(value.get('browserTitle')),
                        'responseInProgress':value.get('responseInProgress'),'kind':'unknown',
-                       'actualModel':None,'actualReasoningEffort':None,'completionVerified':False})
+                       'actualModel':None,'actualReasoningEffort':None,'completionVerified':value.get('responseInProgress') is False and any(m.get('role')=='assistant' and m.get('complete') is True for m in messages)})
     return result
 
 def main():

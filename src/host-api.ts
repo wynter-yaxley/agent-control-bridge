@@ -26,3 +26,6 @@ export { inspectCodexThread, createCodexAppServerExecutor } from './codex-app-se
 export type { CodexAppServerExecutorOptions, CodexThreadSummary } from './codex-app-server.ts';
 export { NativeDesktopReadClient, NativeReadWorker, closeNativeReadWorker, checkNativeDesktop } from './native-readonly.ts';
 export type { NativeReadOptions, NativeConversationSummary, NativeProjectExpectation, NativeProjectSummary } from './native-readonly.ts';
+
+export {runWindowsHost} from './windows-host.ts';
+export {backupDatabase,restoreDatabase} from './db.ts';

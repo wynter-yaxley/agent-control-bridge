@@ -7,7 +7,7 @@ import { PromptPipeline, promptHash, type ChatgptAdapter } from '../src/prompts.
 import { createDb } from '../src/db.ts';
 function setup(t:{after:(fn:()=>void)=>void}, adapter?:ChatgptAdapter, failure=false) {
  const scope=isolatedDemo();t.after(()=>scope.close());const authority=new CallerAuthority(),store=new TaskStore(scope.db,authority);
- const controller=authority.issue({principal:'mock:controller',instance:'controller',executor:'hermes',reviewer:true});const worker=authority.issue({principal:'mock:worker',instance:'worker',executor:'codex',reviewer:false});
+ const controller=authority.issue({principal:'mock:controller',instance:'controller',executor:'hermes',reviewer:false,controller:true});const worker=authority.issue({principal:'mock:worker',instance:'worker',executor:'codex',reviewer:false});
  const task=store.createTask({kind:'test',title:'explicit mock prompt test',executor:'codex'},controller);let count=0;
  const source:ChatgptAdapter=adapter??{source:'mock-chatgpt',capabilities:async()=>({verified:true,models:['gpt-6'],reasoningEfforts:['high']}),generate:async()=>({content:'[MOCK TEST DATA] deterministic engineering prompt',sourceMessageId:'mock-1',actualModel:'mock:gpt-6',actualReasoningEffort:'mock:high'})};
  const pipeline=new PromptPipeline(scope.db,authority,source,{model:'gpt-6',reasoningEffort:'high'},{deliver:async()=>{count++;if(failure)throw new Error('synthetic failure');return{executionId:'mock-execution'};}});
@@ -61,10 +61,10 @@ test('prompt: timed-out generation is reconciled from the original host reply wi
 test('prompt: uncertain delivery remains fenced and requires independent explicit recovery',async t=>{
  const f=setup(t,undefined,true);const id=await f.pipeline.generate(f.task.id,'requirement',f.controller);await assert.rejects(()=>f.pipeline.deliver(id,f.controller));
  assert.equal(f.scope.db.prepare('SELECT delivery_status FROM prompts WHERE id=?').get(id)!.delivery_status,'DELIVERING');await assert.rejects(()=>f.pipeline.deliver(id,f.controller),/recovery/);assert.equal(f.count(),1);
- assert.equal(f.store.cancel(f.task.id,f.controller,undefined,0).ok,false);assert.throws(()=>f.pipeline.recoverDelivery(id,f.controller,false));f.pipeline.recoverDelivery(id,f.controller,true);
+ assert.equal(f.store.cancel(f.task.id,f.controller,undefined,0).ok,false);assert.throws(()=>f.pipeline.recoverDelivery(id,f.authority.issue({principal:'mock:reviewer',instance:'independent',executor:null,reviewer:true}),false));f.pipeline.recoverDelivery(id,f.authority.issue({principal:'mock:reviewer',instance:'independent',executor:null,reviewer:true}),true);
 });
 test('prompt: mock provenance is never accepted by a production database or env switch',async t=>{
- const db=createDb({dbPath:':memory:'});t.after(()=>db.close());const authority=new CallerAuthority();const caller=authority.issue({principal:'test',instance:'test',executor:'hermes',reviewer:true});
+ const db=createDb({dbPath:':memory:'});t.after(()=>db.close());const authority=new CallerAuthority();const caller=authority.issue({principal:'test',instance:'test',executor:'hermes',reviewer:false,controller:true});
  const pipeline=new PromptPipeline(db,authority,{source:'mock-chatgpt',capabilities:async()=>({verified:true,models:['gpt-6'],reasoningEfforts:['high']}),generate:async()=>{throw new Error();}},{model:'gpt-6',reasoningEffort:'high'},{deliver:async()=>{throw new Error();}});
  await assert.rejects(()=>pipeline.generate('fake','requirement',caller),/isolated Demo/);
 });

@@ -7,7 +7,8 @@
     "agent-control-bridge": "dist/cli.js",
     "agent-control-bridge-mcp": "dist/mcp.js",
     "agent-control-bridge-codex-check": "dist/codex-interface.js",
-    "agent-control-bridge-native-check": "dist/native-interface.js"
+    "agent-control-bridge-native-check": "dist/native-interface.js",
+    "agent-control-bridge-windows": "dist/windows-host.js"
   },
   "exports": {
     ".": "./dist/host-api.js",
@@ -15,7 +16,8 @@
     "./native-readonly": "./dist/native-readonly.js",
     "./background": "./dist/background.js",
     "./hermes-gateway": "./dist/hermes-gateway.js",
-    "./notification-delivery": "./dist/notification-delivery.js"
+    "./notification-delivery": "./dist/notification-delivery.js",
+    "./windows-host": "./dist/windows-host.js"
   },
   "files": [
     "dist",

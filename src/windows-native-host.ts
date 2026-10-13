@@ -2,7 +2,6 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { win32 } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { BridgeConfig } from './config.ts';
 import { BridgeError, EXIT_CODES, type ErrorCode } from './errors.ts';
@@ -11,7 +10,7 @@ import { requireNoSecrets, redact } from './security.ts';
 import type { NativeChatPage } from './native-messages.ts';
 import type { ProjectHost, ProjectHostCapabilities } from './project-provisioner.ts';
 import { NativeDesktopReadClient } from './native-readonly.ts';
-import type { VisibleGptSnapshot } from './desktop-gpt-reader.ts';
+import type { VisibleGptSnapshot,DesktopGptReader } from './desktop-gpt-reader.ts';
 import type { OrdinaryChatHost } from './ordinary-chat.ts';
 import type { BackgroundExecutor } from './background-runner.ts';
 
@@ -40,7 +39,7 @@ export class WindowsNativeUi {
   private queue: Promise<unknown> = Promise.resolve();
   constructor(config: BridgeConfig) { this.config = config; }
   close(): void { this.child?.kill(); this.child=undefined; uiWorkers.delete(this); }
-  call(operation: 'workspace-create' | 'gpt-create' | 'codex-create' | 'gpt-rename' | 'snapshot' | 'gpt-read' | 'chat-open' | 'chat-send' | 'chat-read-reply', fields: { name: string; conversationId?: string; path?: string; projectName?: string; prompt?: string; marker?: string; expectedTitle?: string; mode?: 'gpt' | 'codex' }, signal: AbortSignal): Promise<UiResult> {
+  call(operation: 'workspace-create' | 'gpt-create' | 'gpt-rename' | 'snapshot' | 'identity' | 'gpt-read' | 'chat-open' | 'chat-send' | 'chat-read-reply', fields: { name: string; conversationId?: string; path?: string; projectName?: string; prompt?: string; marker?: string; expectedTitle?: string; mode?: 'gpt' | 'codex' }, signal: AbortSignal): Promise<UiResult> {
     const pending=this.queue.then(()=>this.request(operation,fields,signal));
     // A failed operation is returned to its caller; subsequent requests are not replayed.
     this.queue=pending.then(()=>undefined,()=>undefined);
@@ -93,20 +92,16 @@ export class WindowsNativeUi {
   }
 }
 
-export function createWindowsNativeGptReader(config: BridgeConfig, callingThreadId?: string): (conversationId: string, name: string, carrierThreadId: string) => Promise<VisibleGptSnapshot> {
-  const ui=new WindowsNativeUi(config);
+export function createWindowsNativeGptReader(config: BridgeConfig, callingThreadId?: string, ui=new WindowsNativeUi(config)): (conversationId: string, name: string, carrierThreadId: string) => Promise<VisibleGptSnapshot> {
   return async(conversationId,name,carrierThreadId)=>{
     const signal=new AbortController().signal;
     // The desktop tool caller is transport context, not the project's executor.
     // It grants no role or target access; BackgroundBridge scopes both separately.
-    const page=await new NativeDesktopReadClient({carrierThreadId:callingThreadId ?? carrierThreadId,...config.nativeInterface,signal}).readConversationPage(conversationId);
-    if(page.thread.kind!=='chatgpt' || page.thread.title!==name)throw new BridgeError('PROVENANCE','Native GPT identity or title differs');
-    const turn=page.turns[0],user=turn?.items.find(item=>item.type==='userMessage'),replies=turn?.items.filter(item=>item.type==='agentMessage') ?? [];
-    const prompt=user?.content.find(part=>part.type==='text' && !part.truncated)?.text;
-    if(!prompt || replies.length!==1)throw new BridgeError('UNSUPPORTED','UI reply correlation requires one native assistant message and a complete user prompt');
-    const result=await ui.call('gpt-read',{name,prompt,conversationId},signal),text=result.body!;
-    return {source:'windows-uia',conversationId,browserTitle:name,kind:'unknown',completionVerified:false,actualModel:null,actualReasoningEffort:null,
-      responseInProgress:page.thread.status.type!=='idle',messages:[{role:'assistant',text,sourceMessageId:replies[0].id,hash:createHash('sha256').update(text,'utf8').digest('hex')}]};
+    let snapshot;
+    try{snapshot=(await ui.call('identity',{name:''},signal)).snapshot!;}
+    catch(error){if(!(error instanceof BridgeError))throw error;return {source:'windows-uia',conversationId:null,identityStatus:'unavailable',browserTitle:'',kind:'unknown',completionVerified:false,actualModel:null,actualReasoningEffort:null,responseInProgress:true,messages:[],reason:error.code};}
+    return {source:'windows-uia',conversationId:null,identityStatus:'titleOnly',browserTitle:snapshot.title,kind:'unknown',completionVerified:false,
+      actualModel:null,actualReasoningEffort:null,responseInProgress:true,messages:[]};
   };
 }
 
@@ -115,7 +110,7 @@ export function createWindowsNativeGptReader(config: BridgeConfig, callingThread
 export function createWindowsNativeProjectHost(options: { config: BridgeConfig; native: WindowsNativeTools; authorizeInitialization: (name: string, path: string, signal: AbortSignal) => Promise<boolean>; ui?: WindowsNativeUi }): ProjectHost {
   const { config, native } = options, ui = options.ui ?? new WindowsNativeUi(config);
   const ordinaryIds = new Set<string>();
-  const capabilities: ProjectHostCapabilities = { source: 'application-host', workspaceSurface: 'native-desktop', ordinaryChat: true, background: false,
+  const capabilities: ProjectHostCapabilities = { createCodexConversation:!!native.createCodexThread,source: 'application-host', workspaceSurface: 'native-desktop', ordinaryChat: true, background: false,
     exactConversation: true, completeMessages: false, actualGenerationParameters: false, createOrdinaryChat: true, createWorkspace: true, models: [], reasoningEfforts: [] };
   const poll = async <T>(read: () => Promise<T | undefined>, signal: AbortSignal): Promise<T> => {
     const deadline = Date.now() + config.nativeInterface.timeoutMs;
@@ -124,22 +119,25 @@ export function createWindowsNativeProjectHost(options: { config: BridgeConfig; 
   };
   return {
     inspect: async () => capabilities,
+    async authorizeInitialization(name,path,signal){if(!await options.authorizeInitialization(name,path,signal))throw new BridgeError('AUTH','Project-scoped initialization approval is required');},
     async createWorkspace(name, path, signal) {
       if (!await options.authorizeInitialization(name,path,signal)) throw new BridgeError('AUTH', 'One-time human authorization for this native UI initialization is required');
       await ui.call('workspace-create', {name,path},signal);
       const project = await poll(async () => (await native.listProjects(signal)).projects.find(item => item.projectKind === 'local' && item.hostId === 'local' && item.label === name && pathKey(item.path) === pathKey(path)),signal);
       return { appProjectId: project.projectId, workspacePath: project.path };
     },
-    async createOrdinaryChat(_appProjectId, name, signal) {
-      const marker = `ACB_INIT_${randomUUID()}`;
+    async createOrdinaryChat(_appProjectId, name, signal, operationKey) {
+      const project=(await native.listProjects(signal)).projects.find(item=>item.projectId===_appProjectId && item.label===name);
+      if(!project || !await options.authorizeInitialization(name,project.path,signal))throw new BridgeError('AUTH','This new GPT initialization requires target-bound host approval');
+      const marker = `ACB_INIT_${operationKey ?? randomUUID()}`;
       const prompt = `这是 Agent Control Bridge 的会话身份初始化，不执行工程任务。请只回复：${marker}。`;
       const before = await native.listThreads(signal), baseline = new Set([...before.threads,...before.pinnedThreads].map(item => item.id));
       const observed = await ui.call('gpt-create',{name,prompt,marker},signal);
-      if (observed.ordinaryModeObserved !== true || !observed.conversationId) throw new BridgeError('PROVENANCE', 'Ordinary chat mode or pre-send UI identity was not observed');
+      if (observed.ordinaryModeObserved !== true) throw new BridgeError('PROVENANCE', 'Ordinary chat mode or pre-send UI identity was not observed');
       const id = await poll(async () => {
         const inventory = await native.listThreads(signal);
         for (const item of [...inventory.threads,...inventory.pinnedThreads]) {
-          if (baseline.has(item.id) || item.id!==observed.conversationId || item.kind !== 'chatgpt' || item.title !== name) continue;
+          if (baseline.has(item.id) || (observed.conversationId && item.id!==observed.conversationId) || item.kind !== 'chatgpt' || item.title !== name) continue;
           const page = await native.readThread(item.id,signal);
           if (page.thread.title === name && page.turns.some(turn => turn.items.some(message => message.type === 'userMessage' && message.content.some(part => part.type === 'text' && part.text === prompt && !part.truncated)))) return item.id;
         }
@@ -147,19 +145,32 @@ export function createWindowsNativeProjectHost(options: { config: BridgeConfig; 
       },signal);
       ordinaryIds.add(id); return {conversationId:id};
     },
-    async createCodexConversation(appProjectId,_path,signal) {
+    async createCodexConversation(appProjectId,_path,signal,operationKey) {
       const project=(await native.listProjects(signal)).projects.find(item=>item.projectId===appProjectId)!;
       const name=`${project.label} Codex`;
       if(native.createCodexThread) {
         const created=await native.createCodexThread(appProjectId,name,signal);
         return {conversationId:created.threadId};
       }
-      const baseline=new Set((await native.listThreads(signal)).threads.map(item=>item.id));
-      const marker=`ACB_CODEX_INIT_${randomUUID()}`,prompt=`这是 Agent Control Bridge 的隔离会话登记，不执行工程任务。禁止调用工具或修改文件，请只回复：${marker}。`;
-      const observed=await ui.call('codex-create',{name,projectName:project.label,prompt,marker},signal);
-      if(!observed.conversationId)throw new BridgeError('PROVENANCE','New Codex pre-send UI identity is unavailable');
-      const thread=await poll(async()=>(await native.listThreads(signal)).threads.find(item=>!baseline.has(item.id) && item.id===observed.conversationId && item.kind==='codex' && item.title===name && item.projectId===appProjectId && item.cwd && pathKey(item.cwd)===pathKey(_path)),signal);
-      return {conversationId:thread.id};
+      throw new BridgeError('UNSUPPORTED','A formal native Codex creation callback is required; GPT URI cannot prove Work identity');
+    },
+    async observePartial(resources,phase,signal) {
+      if(phase==='workspace') {
+        const matches=(await native.listProjects(signal)).projects.filter(item=>item.projectKind==='local' && item.hostId==='local' && item.label===resources.name && pathKey(item.path)===pathKey(resources.workspacePath!));
+        if(matches.length!==1)throw new BridgeError('PROVENANCE','Original native workspace receipt is unavailable or ambiguous');
+        return {...resources,appProjectId:matches[0].projectId};
+      }
+      if(!resources.initializationKey)throw new BridgeError('PROVENANCE','Original initialization identity was not recorded');
+      const marker=`ACB_${phase==='gpt'?'INIT':'CODEX_INIT'}_${resources.initializationKey}`;
+      const candidates=[];
+      const inventory=await native.listThreads(signal);
+      for(const item of [...inventory.threads,...inventory.pinnedThreads]) {
+        if(item.kind!==(phase==='gpt'?'chatgpt':'codex'))continue;
+        const page=await native.readThread(item.id,signal);
+        if(page.turns.some(turn=>turn.items.some(message=>message.type==='userMessage' && message.content.some(part=>part.type==='text' && !part.truncated && part.text?.endsWith(`请只回复：${marker}。`)))))candidates.push(item.id);
+      }
+      if(candidates.length!==1)throw new BridgeError('PROVENANCE','Original initialization receipt is unavailable or ambiguous; do not repeat');
+      return {...resources,[phase==='gpt'?'chatgptConversationId':'codexConversationId']:candidates[0]};
     },
     async verifyBundle(resources,signal) {
       const snapshot = ordinaryIds.has(resources.chatgptConversationId) ? undefined : (await ui.call('snapshot',{name:resources.name,conversationId:resources.chatgptConversationId},signal)).snapshot!;
@@ -183,6 +194,7 @@ export function createWindowsNativeConversationHost(options: {
   native: WindowsNativeTools;
   authorizeUiOperation: (target: { conversationId: string; name: string }, action: 'read' | 'send', signal: AbortSignal) => Promise<boolean>;
   ui?: WindowsNativeUi;
+  gptReader?: DesktopGptReader;
 }): { ordinaryChat: OrdinaryChatHost; executor: BackgroundExecutor } {
   const { config, native } = options, ui = options.ui ?? new WindowsNativeUi(config);
   const ordinaryIds=new Set<string>();
@@ -214,7 +226,14 @@ export function createWindowsNativeConversationHost(options: {
       throw new BridgeError('PROVENANCE','No exact completed latest GPT turn; reconcile without resending');
     // Native GPT completion can be synthetic. Read the body only after this
     // boundary and require independent, message-scoped UI completion evidence.
-    const result=await ui.call('chat-read-reply',{name:completed.thread.title,conversationId:id,prompt,mode:'gpt'},signal);
+    let result: UiResult;
+    if(options.gptReader) {
+      const visible=await options.gptReader(id);
+      const user=turn.items.find(item=>item.type==='userMessage')!,reply=visible.messages.find(item=>item.role==='assistant' && item.sourceMessageId===replies[0].id);
+      if(visible.identityStatus!=='identityVerified' || visible.conversationId!==id || visible.responseInProgress || !visible.completionVerified || !reply?.complete ||
+         !visible.messages.some(item=>item.role==='user' && item.sourceMessageId===user.id && item.text===prompt))throw new BridgeError('PROVENANCE','CDP final body lacks exact user/assistant identity or explicit completion');
+      result={ok:true,conversationId:id,completionVerified:true,body:reply.text};
+    } else result=await ui.call('chat-read-reply',{name:completed.thread.title,conversationId:id,prompt,mode:'gpt'},signal);
     if(result.conversationId!==id || result.completionVerified!==true || !result.body?.trim())throw new BridgeError('PROVENANCE','Final GPT UI identity or completion is unverified');
     const after=await native.readThread(id,signal),latest=after.turns[0],messages=latest?.items.filter(item=>item.type==='agentMessage') ?? [];
     if(after.thread.id!==id || after.thread.kind!=='chatgpt' || after.thread.title!==completed.thread.title || after.thread.status.type!=='idle' ||
@@ -222,8 +241,8 @@ export function createWindowsNativeConversationHost(options: {
       throw new BridgeError('PROVENANCE','GPT turn changed while reading the final body');
     return {content:result.body,sourceConversationId:id,sourceConversationName:after.thread.title,sourceMessageId:messages[0].id,
       actualModel:null,actualReasoningEffort:null,complete:true,evidenceSource:'application-host' as const,
-      completionEvidence:{source:'windows-uia' as const,turnId:turn.id,userMessageId:turn.items.find(item=>item.type==='userMessage')!.id,
-        assistantMessageId:messages[0].id,observedAt:new Date().toISOString(),nativeCompleted:true as const,uiIdle:true as const,replyActions:true as const}};
+      completionEvidence:{source:options.gptReader?'visible-dom' as const:'windows-uia' as const,turnId:turn.id,userMessageId:turn.items.find(item=>item.type==='userMessage')!.id,
+        assistantMessageId:messages[0].id,observedAt:new Date().toISOString(),nativeCompleted:true as const,uiIdle:true as const,...(options.gptReader?{}:{replyActions:true as const})}};
   };
   const ordinaryChat: OrdinaryChatHost = {
     async inspect() {return {source:'application-host',ordinaryChat:true,background:false,exactConversation:true,completeMessages:true,actualGenerationParameters:false,
@@ -263,17 +282,7 @@ export function createWindowsNativeConversationHost(options: {
       if(!thread || thread.kind!=='codex' || !thread.cwd || !project || project.projectKind!=='local' || project.hostId!=='local' || pathKey(thread.cwd)!==pathKey(target.workspacePath) || pathKey(project.path)!==pathKey(target.workspacePath)) throw new BridgeError('PROVENANCE','Native Codex project and workspace do not match');
       return {source:'codex-app-state',conversationId:thread.id,appProjectId:project.projectId,workspacePath:project.path,local:true};
     },
-    async execute(content,_key,target,signal,onEvent) {
-      await executor.inspect(target,signal);
-      const before=await native.readThread(target.codexConversationId,signal);
-      if(before.thread.kind!=='codex' || !['idle','notLoaded'].includes(before.thread.status.type))throw new BridgeError('CONFLICT','Native Codex conversation is busy or differs');
-      await authorize(before,'send',signal);
-      await ui.call('chat-send',{name:before.thread.title,conversationId:target.codexConversationId,prompt:content,mode:'codex'},signal);
-      const {turn,replies}=await waitForTurn(target.codexConversationId,before,content,signal,onEvent);
-      if(replies.some(reply=>reply.truncated || !reply.text.trim() || reply.text.includes('::chatgpt-content-reference{')))throw new BridgeError('PROVENANCE','Native Codex result body is incomplete');
-      return {executionId:turn.id,codexConversationId:target.codexConversationId,workspacePath:target.workspacePath,
-        output:{content:replies.map(reply=>reply.text).join('\n\n'),messageIds:replies.map(reply=>reply.id)}};
-    },
+    async execute() {throw new BridgeError('UNSUPPORTED','UIA Work submission lacks native target identity; install the App Server executor');},
     async observeExecution(content,target,startedAfter,signal) {
       await executor.inspect(target,signal);
       const page=await native.readThread(target.codexConversationId,signal),turn=page.turns[0];

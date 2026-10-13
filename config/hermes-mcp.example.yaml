@@ -30,4 +30,8 @@ mcp_servers:
       prompts: false
 # Independent reviewer uses a separate protected caller identity/connection.
 # Never expose acb_review_submit on the Hermes executor/controller connection.
+# General MCP clients use the same stdio contract; Hermes is not required.
+# Writable deployment uses a protected runWindowsHost embedding and one separate
+# --worker runtime. Client timeout/disconnection must not rerun engineering.
+# --write alone does not install GUI approval, Codex delegation or a reviewer.
 # Optional read diagnostics: acb_codex_target_check, acb_native_target_check, acb_gpt_read.

@@ -79,7 +79,7 @@ export class NativeChatMessageHost {
             if (result.status === 'reply_content_unavailable' && replyReader) {
               const visible = await replyReader(target.conversationId);
               if (visible.conversationId !== target.conversationId || visible.source !== 'visible-dom') throw new BridgeError('PROVENANCE', 'Visible reply belongs to another conversation or source');
-              if (visible.responseInProgress) result.status = 'sent_reply_pending';
+              if (visible.responseInProgress || visible.completionVerified!==true) result.status = 'sent_reply_pending';
               else {
                 const replies = current.turns.find(turn => turn.id === result.turnId)!.items.filter(item => item.type === 'agentMessage');
                 const bodies = replies.map(reply => visible.messages.find(message => message.role === 'assistant' && message.sourceMessageId === reply.id));

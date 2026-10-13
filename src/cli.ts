@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 import { readFileSync, existsSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { createDb, now, uuid, transaction } from './db.ts';
+import { createDb, backupDatabase, restoreDatabase, now, uuid, transaction } from './db.ts';
 import { loadConfig } from './config.ts';
 import { BridgeError, classifyError, EXIT_CODES } from './errors.ts';
 import { safeText, readBounded } from './security.ts';
@@ -23,6 +23,9 @@ import { readHermesStatus } from './hermes.ts';
 import { codexAvailable, codexContentReadLimitation } from './codex-ops.ts';
 
 const HELP = `Agent Control Bridge CLI
+  db-backup --file <new-path>    Consistent snapshot including WAL
+  db-restore --file <backup> --db <new-path>  Restore into a new ledger only
+  mapping-default <projectId> --codex <registered-id>
   init                          Initialize schema only; no Agent actions
   migrate                       Explicit upgrade after operator backup
   schema-version | config-show | demo | watch
@@ -62,6 +65,7 @@ const definitions: Record<string, { args: number; write?: boolean; options?: Rec
   'project-register': { args: 1, write: true, options: {name:str(),root:str()} },
   'mapping-register': { args: 1, write: true, options: { workspace: str(), gpt: str(), 'gpt-name':str(), codex: str() } },
   'mapping-show': { args: 1 },
+  'mapping-default': {args:1,write:true,options:{codex:str()}},
   init: { args: 0, write: true }, migrate: { args: 0, write: true }, 'schema-version': { args: 0 }, 'config-show': { args: 0 }, projects: { args: 0 }, status: { args: 0 }, audit: { args: 0 }, sweep: { args: 0, write: true },
   'task-progress': { args: 1, write: true, options: { ...version, note: str() } },
   'task-requeue': { args: 1, write: true, options: version },
@@ -167,6 +171,7 @@ export function runCli(argv: string[], dependencies: CliDependencies = {}): numb
       case 'task-requeue': { const r = store!.transition(id, 'QUEUED', context!, expected); checkResult(r); print(r); break; }
       case 'task-recover': { const r = store!.recover(id, context!, String(v.reason ?? ''), expected!); checkResult(r); print(r); break; }
       case 'mapping-register': new ConversationRegistry(db!, authority).register({projectId:id,workspacePath:String(v.workspace ?? ''),chatgptConversationId:String(v.gpt ?? ''),chatgptConversationName:String(v['gpt-name']??''),codexConversationId:String(v.codex ?? '')}, context!); print({registered:true}); break;
+      case 'mapping-default': new ConversationRegistry(db!,authority).setDefault(id,String(v.codex),context!);print({updated:true});break;
       case 'mapping-show': print({workspace:db!.prepare('SELECT * FROM conversation_workspaces WHERE project_id=?').get(id),codex:db!.prepare('SELECT conversation_id FROM codex_conversations WHERE project_id=?').all(id)}); break;
       case 'projects': print(db!.prepare('SELECT * FROM projects').all()); break;
       case 'task-create': print(store!.createTask({ kind: String(v.kind ?? 'dev'), title: String(v.title ?? 'untitled'), executor: v.executor as Executor | undefined, projectId: v.project as string | undefined }, context!)); break;
@@ -215,6 +220,17 @@ export function runCli(argv: string[], dependencies: CliDependencies = {}): numb
   } finally { if (ownsDb && db) db.close(); }
 }
 export async function main(argv: string[]): Promise<number> {
+  if(['db-backup','db-restore'].includes(argv[0])) {
+    if(argv.includes('--help')){console.log('db-backup --file <new-path> [--config <file>] [--db <source>]; db-restore --file <backup> --db <new-ledger>');return 0;}
+    try {
+      const args=parseArgs({args:argv.slice(1),options:{file:{type:'string'},db:{type:'string'},config:{type:'string'}},strict:true});
+      if(!args.values.file || (argv[0]==='db-restore' && !args.values.db))throw new CliError('INPUT: explicit source and destination required',2);
+      const config=loadConfig({configPath:args.values.config,dbPath:args.values.db});
+      const authority=new CallerAuthority(),caller=localCaller(authority,fileURLToPath(new URL('../config/caller-policy.json',import.meta.url)));
+      const result=argv[0]==='db-backup'?await backupDatabase(config.database.path,args.values.file,caller.authorizedSids):await restoreDatabase(args.values.file,config.database.path,caller.authorizedSids);
+      console.log(JSON.stringify({ok:true,...result,agentsStarted:false,existingFilesOverwritten:false}));return 0;
+    }catch(error){const failure=classifyError(error);console.error(JSON.stringify({ok:false,code:failure.code,error:safeText(failure.message)}));return EXIT_CODES[failure.code];}
+  }
   if (argv[0] === 'demo') {
     if (argv.includes('--help')) { console.log('demo: runs only an isolated Mock workflow; no options'); return 0; }
     if (argv.length !== 1) { console.error(JSON.stringify({ok:false,code:'INPUT',error:'Demo accepts no production configuration'})); return 2; }

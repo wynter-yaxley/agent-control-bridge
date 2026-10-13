@@ -139,6 +139,7 @@ def find_target(kind):
 
 class Cdp:
     def __init__(self,url):
+        if os.name == 'nt': verify_cdp_owner(url)
         try: import websocket
         except ImportError: raise ToolError('DEPENDENCY','Install tools/desktop/requirements.txt',6)
         self.ws=websocket.create_connection(url,timeout=10,enable_multithread=True); self.number=0
@@ -155,6 +156,31 @@ class Cdp:
         raise ToolError('TIMEOUT','CDP response deadline exceeded',7)
     def evaluate(self,expression): return self.call('Runtime.evaluate',{'expression':expression,'returnByValue':True}).get('result',{}).get('result',{}).get('value')
     def close(self): self.ws.close()
+
+def verify_cdp_owner(url):
+    """Bind the loopback debugger to the existing interactive ChatGPT instance."""
+    import subprocess
+    port=urllib.parse.urlparse(url).port
+    script=r"""
+    $ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue'
+    $apps=@(Get-Process -Name ChatGPT | Where-Object {$_.MainWindowHandle -ne 0})
+    if ($apps.Count -ne 1) {throw 'OWNER'}
+    $processes=@(Get-CimInstance Win32_Process)
+    $owners=@(Get-NetTCPConnection -State Listen -LocalPort PORT | Select-Object -ExpandProperty OwningProcess -Unique)
+    if ($owners.Count -ne 1) {throw 'OWNER'}
+    $current=$owners[0]
+    while ($current -ne $apps[0].Id) {
+      $row=$processes | Where-Object {$_.ProcessId -eq $current}
+      if (-not $row -or $row.ParentProcessId -eq 0) {throw 'OWNER'}
+      $current=$row.ParentProcessId
+    }
+    $signature=Get-AuthenticodeSignature -LiteralPath $apps[0].Path
+    if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'OpenAI') {throw 'OWNER'}
+    [Console]::Out.Write('BOUND')
+    """.replace('PORT',str(port))
+    executable=Path(os.environ.get('SystemRoot',r'C:\Windows'))/'System32/WindowsPowerShell/v1.0/powershell.exe'
+    result=subprocess.run([str(executable),'-NoProfile','-NonInteractive','-Command',script],capture_output=True,timeout=10,creationflags=subprocess.CREATE_NO_WINDOW)
+    if result.returncode or result.stdout!=b'BOUND': raise ToolError('PROVENANCE','CDP listener is not bound to the current signed application',3)
 
 def redact(value):
     if isinstance(value,dict):

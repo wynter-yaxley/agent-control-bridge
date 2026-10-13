@@ -8,7 +8,8 @@ export async function runDemo() {
   const scope = isolatedDemo();
   try {
     const authority = new CallerAuthority(), store = new TaskStore(scope.db, authority);
-    const hermes = authority.issue({ principal: 'mock:hermes-reviewer', instance: 'demo-reviewer', executor: 'hermes', reviewer: true });
+    const hermes = authority.issue({ principal: 'mock:hermes-controller', instance: 'demo-controller', executor: 'hermes', reviewer: false, controller: true });
+    const reviewer=authority.issue({principal:'mock:independent-reviewer',instance:'demo-reviewer',executor:null,reviewer:true});
     const codex = authority.issue({ principal: 'mock:codex-executor', instance: 'demo-executor', executor: 'codex', reviewer: false });
     const task = store.createTask({ title: 'Explicit Mock workflow, no real model invoked', kind: 'demo', executor: 'codex' }, hermes);
     const config = defaults(scope.root); let deliveries = 0;
@@ -27,7 +28,7 @@ export async function runDemo() {
     if (denied.ok) throw new Error('Executor obtained review rights');
     const watcher = new Watcher(scope.db); const notifications = await watcher.runOnce();
     const duplicate = await new Watcher(scope.db).runOnce();
-    const verified = store.verify(task.id, hermes, true, 'Independent Mock acceptance only', finish.task.version); if (!verified.ok) throw new Error(verified.error);
+    const verified = store.verify(task.id, reviewer, true, 'Independent Mock acceptance only', finish.task.version); if (!verified.ok) throw new Error(verified.error);
     return { deliveryState: 'DELIVERED_PENDING_ACCEPTANCE', mode: 'ISOLATED_MOCK', realModelInvoked: false,
       simulatedTask: verified.task, promptId, deliveries, executorSelfReviewDenied: !denied.ok,
       notifications: [...notifications, ...await watcher.runOnce()], duplicateNotifications: duplicate.length,

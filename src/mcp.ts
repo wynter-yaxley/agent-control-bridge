@@ -47,7 +47,7 @@ export async function runMcp(args: string[], createHost?: (services: {config: Re
   process.once('SIGINT', () => { void close(); }); process.once('SIGTERM', () => { void close(); });
   try {
     await server.connect(new StdioServerTransport());
-    if (!readOnly && authority.resolve(caller.context)?.controller) bridge.start();
+    if (!readOnly && host.manageQueue!==false && authority.resolve(caller.context)?.controller) bridge.start();
   } catch (error) { await close(); throw error; }
 }
 if (import.meta.main) {

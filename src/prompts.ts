@@ -9,7 +9,7 @@ import { ConversationRegistry } from './topology.ts';
 import { isDemoDatabase } from './demo-scope.ts';
 export interface Generation {
   content: string; sourceConversationId?: string; sourceConversationName?: string; sourceMessageId: string; actualModel: string | null; actualReasoningEffort: string | null;
-  completionEvidence?: { source: 'windows-uia'; turnId: string; userMessageId: string; assistantMessageId: string; observedAt: string; nativeCompleted: true; uiIdle: true; replyActions: true };
+  completionEvidence?: { source: 'windows-uia' | 'visible-dom'; turnId: string; userMessageId: string; assistantMessageId: string; observedAt: string; nativeCompleted: true; uiIdle: true; replyActions?: true };
 }
 // Adapter objects are installed by trusted host code, never deserialized from CLI/Agent JSON.
 export interface ChatgptAdapter {
@@ -121,7 +121,7 @@ export class PromptPipeline {
   }
   private controller(context: CallerContext): void {
     const caller = this.authority.resolve(context);
-    if (!caller || caller.executor !== 'hermes' || !caller.controller) throw new BridgeError('AUTH', 'Trusted Hermes controller context required');
+    if (!caller || !caller.controller) throw new BridgeError('AUTH', 'Trusted Hermes controller context required');
     if (this.adapter.source === 'mock-chatgpt' && !isDemoDatabase(this.db)) throw new BridgeError('PROVENANCE', 'Mock adapters require a freshly created isolated Demo database');
   }
   async generate(taskId: string, requirement: string, context: CallerContext): Promise<string> {
@@ -257,8 +257,8 @@ export class PromptPipeline {
     }
   }
   recoverDelivery(id: string, context: CallerContext, confirmedNotDelivered: boolean): void {
-    this.controller(context);
-    if (!this.authority.resolve(context)?.reviewer) throw new BridgeError('AUTH', 'Independent reviewer capability required for recovery');
+    const caller=this.authority.resolve(context);
+    if (!caller?.reviewer || caller.controller || caller.executor==='codex') throw new BridgeError('AUTH', 'Independent reviewer capability required for recovery');
     if (!confirmedNotDelivered) throw new BridgeError('CONFLICT', 'External outcome must be independently checked before retry');
     transaction(this.db, () => {
       if (this.db.prepare("UPDATE prompts SET delivery_status='FAILED' WHERE id=? AND delivery_status='DELIVERING'").run(id).changes !== 1) throw new BridgeError('CONFLICT', 'Prompt is not awaiting delivery recovery');

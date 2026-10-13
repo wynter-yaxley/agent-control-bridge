@@ -31,7 +31,9 @@
       "reasoningEffort": "high"
     },
     "codex": {
-      "enabled": false
+      "enabled": false,
+      "model": null,
+      "reasoningEffort": null
     },
     "hermes": {
       "enabled": false

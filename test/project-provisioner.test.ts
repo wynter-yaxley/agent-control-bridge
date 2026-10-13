@@ -14,6 +14,7 @@ function fixture(t: { after: (fn: () => void) => void }) {
   const authority = new CallerAuthority(), context = authority.issue({ principal: 'fixture:controller', instance: 'one', executor: 'hermes', controller: true, reviewer: false });
   let creates = 0;
   const host: ProjectHost = {
+    authorizeInitialization:async()=>{},
     inspect: async () => ({ source: 'application-host', ordinaryChat: true, background: true, exactConversation: true, completeMessages: true, actualGenerationParameters: true, createOrdinaryChat: true, createWorkspace: true, workspaceSurface: 'native-desktop', models: ['fixture'], reasoningEfforts: ['fixture'] }),
     createWorkspace: async (_name, workspacePath) => { creates++; return { appProjectId: 'native-project-fixture', workspacePath }; },
     createOrdinaryChat: async () => ({ conversationId: 'fixture-gpt' }),
@@ -44,7 +45,7 @@ test('project provisioning: partial host failure keeps resources and never blind
   assert.equal(first.state, 'UNCERTAIN'); assert.equal(f.db.prepare('SELECT COUNT(*) n FROM projects').get()!.n, 0);
   assert.match(String(f.db.prepare('SELECT resources FROM project_operations WHERE id=?').get(first.id)!.resources), /native-project-fixture/);
   await project.prepare('fixture-project', 'fixture-event', f.context); assert.equal(f.creates(), 1);
-  await assert.rejects(() => project.prepare('another-project', 'another-event', f.context), /reconciliation/);
+  assert.equal((await project.prepare('another-project','another-event',f.context)).state,'UNCERTAIN');assert.equal(f.creates(),2);
 });
 
 test('project provisioning: two calls cannot mutate the shared host concurrently', async t => {
@@ -52,7 +53,7 @@ test('project provisioning: two calls cannot mutate the shared host concurrently
   f.host.inspect=async()=>{await gate;return {source:'application-host',ordinaryChat:true,background:true,exactConversation:true,completeMessages:true,actualGenerationParameters:true,createOrdinaryChat:true,createWorkspace:true,workspaceSurface:'native-desktop',models:['fixture'],reasoningEfforts:['fixture']};};
   const project=new ProjectProvisioner(f.db,f.authority,{root:join(f.root,'workspaces'),timeoutMs:1000,host:f.host});
   const first=project.prepare('first-project','first-event',f.context);
-  await assert.rejects(()=>project.prepare('second-project','second-event',f.context),/active/);
+  await assert.rejects(()=>project.prepare('second-project','second-event',f.context),/GUI/);
   assert.equal(f.db.prepare('SELECT COUNT(*) n FROM project_operations').get()!.n,1);
   release();assert.equal((await first).state,'READY');assert.equal(f.creates(),1);
 });
@@ -128,4 +129,14 @@ test('project reconciliation: mismatched readback and concurrent reconcile prese
   await assert.rejects(project.reconcile(first.id, f.context), { code: 'STATE' });
   release(); assert.equal((await active).state, 'UNCERTAIN'); assert.equal(f.creates(), 1);
   assert.equal(f.db.prepare('SELECT COUNT(*) n FROM conversation_workspaces').get()!.n, 0);
+});
+
+test('project reconciliation: original GPT receipt resumes only the missing Codex phase',async t=>{
+  const f=fixture(t);let gpt=0,codex=0;
+  f.host.createOrdinaryChat=async()=>{gpt++;throw new Error('receipt lost');};
+  f.host.createCodexConversation=async()=>{codex++;return {conversationId:'fixture-codex'};};
+  f.host.observePartial=async(resources,phase)=>{assert.equal(phase,'gpt');return {...resources,chatgptConversationId:'fixture-gpt'};};
+  const p=new ProjectProvisioner(f.db,f.authority,{root:join(f.root,'workspaces'),timeoutMs:100,host:f.host});
+  const first=await p.prepare('recover-project','recover-event',f.context);assert.equal(first.phase,'gpt');
+  assert.equal((await p.reconcile(first.id,f.context)).state,'READY');assert.equal(gpt,1);assert.equal(codex,1);assert.equal(f.creates(),1);
 });

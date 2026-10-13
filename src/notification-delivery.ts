@@ -39,7 +39,7 @@ export class NotificationDispatcher {
   }
   async flush(limit = 20): Promise<{ acknowledged: number; blocked: number }> {
     const caller = this.authority.resolve(this.context);
-    if (!caller?.controller || caller.executor !== 'hermes') throw new BridgeError('AUTH', 'Trusted Hermes controller required');
+    if (!caller?.controller) throw new BridgeError('AUTH', 'Trusted controller required');
     let acknowledged = 0, blocked = 0;
     for (const item of this.outbox.pull(this.context, limit, this.options.leaseMs)) {
       let ownsSend = false;

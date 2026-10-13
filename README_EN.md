@@ -1,8 +1,8 @@
 # Agent Control Bridge
 
-Hermes coordinates existing signed-in ChatGPT/Codex desktop applications through Feishu. GPT produces engineering prompts; the bridge verifies authentic conversation/message provenance and hashes; Codex executes; GPT reviews results; an independent authorized reviewer accepts delivery.
+A configurable Windows 10/11 local stdio MCP tool. Hermes/Feishu is the preferred controller; other compatible MCP clients can use the same protocol. GPT produces engineering prompts; the bridge verifies conversation/message provenance and hashes; Codex executes; GPT reviews results; an independent authorized reviewer accepts delivery. No extra token-billed inference API is introduced.
 
-Each project has a native Codex workspace, one same-name ordinary GPT chat, and registered Codex chats. Version 0.2.0 is development delivery pending acceptance. A real isolated loop completed with UI interaction and recovery. Under the 2026-10-13 user instruction, workspace and ordinary GPT creation may use normal UIA, directory confirmation and page/editor focus changes; fully silent creation is no longer an acceptance requirement. Hermes/Feishu deployment remains unverified. Unknown model/effort values stay null and no longer block authentic prompts.
+Each project has a native Codex workspace, one same-name ordinary GPT chat, and registered Codex chats. Version 0.2.0 remains pending independent acceptance. A historical isolated loop needed UI intervention and recovery; it does not establish acceptance of the current stricter path. Workspace/GPT creation may change pages and editor focus with trusted approval. Current live checks found no CDP endpoint and UIA returned titleOnly. No live GUI writes or Hermes/Feishu loop were performed in this round. Unknown GPT model/effort values stay null.
 
 ## Install
 
@@ -16,15 +16,22 @@ Copy config.example.json to .bridge.config.json and protect config/caller-policy
 
 ## MCP and automation boundaries
 
-Default dist/mcp.js --read-only exposes 8 read tools against an existing current-schema database; it neither migrates nor starts queued tasks. A trusted Windows embedding installs ProjectHost, ConversationHost and a real executor context through runMcp(args, createHost). Hermes tools.include defaults to the 8 read tools; writes require a protected per-run host approval binding; reviewer uses a separate protected connection.
+Default dist/mcp.js --read-only and dist/windows-host.js expose 8 read tools against an existing schema-v6 database, without migration or queue startup. dist/windows-host.js --write permits protected controller ledger operations but does not grant GUI/executor authority. runWindowsHost(args, createBindings) installs real trusted callbacks. Run one separate --worker runtime with the same ledger for durable execution independent of MCP disconnection. Without real delegation it refuses CODEX_EXECUTOR_HOST_MISSING. The writable tool surface has 20 tools, including an explicit registered default Codex target; it is not a ready-made approval host.
 
-Native IPC is read-only and verifies the signed same-user peer. UIA uses the interactive desktop and may change pages/editor focus; it needs approval for that run. CDP needs an already exposed endpoint. App Server supports background execution but cannot establish native desktop project ownership alone.
+Native IPC is read-only and verifies the signed same-user peer. CDP verifies listener ownership and a unique existing ChatGPT WebView before observing /c/UUID. Unavailable CDP falls back to UIA Document.Current.Name with titleOnly, null ID and no messages; unavailable UI is reported separately. UIA requires an interactive desktop and per-run approval. Formal App Server execution can continue without GUI, but needs native membership, a delegated executor and target-bound command/file approval callbacks; it cannot establish native desktop ownership alone.
 
-No second instance/profile/browser/WebView, application restart/termination, injection, credential extraction, private-state edits or physical input takeover. Existing UIA remains one adapter. Title-only navigation has been removed: the public accessibility document URI must prove the exact /c/UUID before submission. The current application exposes only a generic index URI, so UIA sending/initialization is blocked with PROVENANCE. GPT final text is reread after native completion and independent UI idle/reply-action checks, then correlated again. This positive path has component tests, not a new live write acceptance.
+No second instance/profile/browser/WebView, application restart/termination, injection, credential extraction, private-state edits or physical input takeover. Existing-chat writes require exact identity before draft changes and submission, followed by native receipt verification; atomic cross-CDP/UIA targeting is not implemented, so that route remains blocked. A trusted-approved newly created blank ordinary chat may send one identity-only marker and correlate its new native ID/user message/type/title. Uncertainty never resends. Codex UIA Work creation/execution is refused; native creation requires a formal host callback. GPT final text is read only after native completion with matching message IDs and independent end-of-stream evidence. Positive paths are component-tested, not live acceptance.
 
 Execution-result MCP calls now return IDs/hashes/lengths by default. Add includeContent:true for complete output/feedback. Project operations return recorded resources directly. Prefer notifications; reconcile uncertain original generation/execution/feedback without resending/rerunning.
 
-Only independent acceptance produces SUCCEEDED. Test results and GPT review cannot grant that authority.
+Only independent acceptance produces SUCCEEDED. Controller, Codex executor and reviewer do not overlap. No policy hot reload or authority from config/env/MCP text. Same-OS malicious code is outside the strong-isolation claim. Crash recovery preserves original IDs/phases and observes original turns without rerun; uncertainty in one project no longer freezes unrelated prepared background work. Tasks use an explicit registered Codex target/default rather than lexical ordering.
+
+## Data and deployment
+
+    node dist/cli.js db-backup --config <file> --file <new-backup-path>
+    node dist/cli.js db-restore --file <backup> --db <new-ledger-path>
+
+SQLite online backup includes committed WAL data. Both commands reject existing destinations; restore checks integrity and writes a new ledger only. Stop the owned Bridge runtime, inspect the recovered ledger/mappings, then switch configuration under operator control. Do not overwrite live state, stop desktop apps, upload the database by default, or delete unknown resources. Schema-v6 migration is explicit; old multi-chat mappings need an explicit default.
 
 ## Verify
 
@@ -40,4 +47,4 @@ Node discovery includes e2e/workflow. Clean-install checks dependency/build/comp
 
 See the [main README](README.md) for capability matrices, configuration, host integration, workflow/recovery and measured limits. [Rules](docs/PROJECT_RULES.md), [acceptance template](docs/ACCEPTANCE_TEMPLATE.md), [license](LICENSE), [third-party notices](THIRD_PARTY_NOTICES.md).
 
-The installed Hermes MCP SDK connected to the real Windows entry and OS policy with an isolated ledger (8 read tools, HOST_MISSING). Gateway/Feishu writes remain unverified; production ledger v2 requires an explicitly authorized migration, and the current controller/reviewer policy needs separation before write deployment. Hermes elicitation is present, but no protected Windows approval binding exists. No new research/stage/test-summary Markdown by default.
+The installed Hermes MCP SDK connected to the Windows entry and real OS policy with an isolated ledger (8 read tools, HOST_MISSING). The local controller/reviewer overlap was removed; a real independent reviewer is still not configured. The existing production ledger remains v2 and was not migrated. Gateway/Feishu, actual durable App Server deployment and protected GUI approval binding remain unverified or externally blocked. No new research/stage/test-summary Markdown by default.
