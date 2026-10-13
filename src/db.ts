@@ -10,7 +10,7 @@ import { BridgeError } from './errors.ts';
 import { installReviewBoundary } from './review-boundary.ts';
 
 export const DEFAULT_DB_PATH = fileURLToPath(new URL('../data/bridge.db', import.meta.url));
-export interface DbOptions { dbPath?: string; schemaPath?: string; authorizedSids?: readonly string[]; allowMigrations?: boolean; busyTimeoutMs?: number }
+export interface DbOptions { dbPath?: string; schemaPath?: string; authorizedSids?: readonly string[]; allowMigrations?: boolean; busyTimeoutMs?: number; readOnly?: boolean }
 
 export function transaction<T>(db: DatabaseSync, operation: () => T): T {
   const nested = db.isTransaction;
@@ -29,6 +29,14 @@ export function transaction<T>(db: DatabaseSync, operation: () => T): T {
 
 export function createDb(options: DbOptions = {}): DatabaseSync {
   const path = options.dbPath === ':memory:' ? ':memory:' : resolve(options.dbPath ?? DEFAULT_DB_PATH);
+  if (options.readOnly) {
+    const db=new DatabaseSync(path,{readOnly:true});
+    try {
+      if(schemaVersion(db)!==SCHEMA_VERSION)throw new BridgeError('SCHEMA','Read-only MCP requires an existing current-schema database; no migration attempted');
+      db.exec(`PRAGMA query_only=ON; PRAGMA busy_timeout=${options.busyTimeoutMs ?? 5000};`);
+      return db;
+    }catch(error){db.close();throw error;}
+  }
   if (path !== ':memory:') {
     const parent=dirname(path);
     if([resolve(homedir()),resolve(tmpdir()),parse(path).root].includes(parent)||(existsSync(parent)&&lstatSync(parent).isSymbolicLink())) throw new BridgeError('CONFIG','Database requires a dedicated non-symlink data directory; refusing to change shared root permissions');

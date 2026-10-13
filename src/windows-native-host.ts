@@ -21,8 +21,8 @@ export interface WindowsNativeTools {
   readThread(id: string, signal: AbortSignal): Promise<NativeChatPage>;
   createCodexThread?(projectId: string, name: string, signal: AbortSignal): Promise<{ threadId: string }>;
 }
-export interface WindowsUiSnapshot { title: string; text: string; ordinaryComposer: boolean; pid: number }
-interface UiResult { ok: boolean; code?: string; stage?: string; errorType?: string; line?: number; ordinaryModeObserved?: boolean; snapshot?: WindowsUiSnapshot; body?: string }
+export interface WindowsUiSnapshot { title: string; text: string; ordinaryComposer: boolean; pid: number; conversationId: string | null }
+interface UiResult { ok: boolean; code?: string; stage?: string; errorType?: string; line?: number; ordinaryModeObserved?: boolean; snapshot?: WindowsUiSnapshot; body?: string; conversationId?: string; completionVerified?: boolean; timings?: { initMs: number; actionMs: number } }
 const pathKey = (value: string) => win32.normalize(value).toLowerCase();
 
 export function createWindowsNativeReadTools(config: BridgeConfig, carrierThreadId: string, createCodexThread?: WindowsNativeTools['createCodexThread']): WindowsNativeTools {
@@ -32,39 +32,63 @@ export function createWindowsNativeReadTools(config: BridgeConfig, carrierThread
 }
 
 /** Fixed OS control operations. There is no public arbitrary UI/RPC tool. */
+const uiWorkers = new Set<WindowsNativeUi>();
+export const closeWindowsNativeUiWorkers = () => { for (const worker of uiWorkers) worker.close(); };
 export class WindowsNativeUi {
   private readonly config: BridgeConfig;
+  private child?: ReturnType<typeof spawn>;
+  private queue: Promise<unknown> = Promise.resolve();
   constructor(config: BridgeConfig) { this.config = config; }
-  async call(operation: 'workspace-create' | 'gpt-create' | 'codex-create' | 'gpt-rename' | 'snapshot' | 'gpt-read' | 'chat-open' | 'chat-send' | 'chat-read-reply', fields: { name: string; path?: string; projectName?: string; prompt?: string; marker?: string; expectedTitle?: string; mode?: 'gpt' | 'codex' }, signal: AbortSignal): Promise<UiResult> {
+  close(): void { this.child?.kill(); this.child=undefined; uiWorkers.delete(this); }
+  call(operation: 'workspace-create' | 'gpt-create' | 'codex-create' | 'gpt-rename' | 'snapshot' | 'gpt-read' | 'chat-open' | 'chat-send' | 'chat-read-reply', fields: { name: string; conversationId?: string; path?: string; projectName?: string; prompt?: string; marker?: string; expectedTitle?: string; mode?: 'gpt' | 'codex' }, signal: AbortSignal): Promise<UiResult> {
+    const pending=this.queue.then(()=>this.request(operation,fields,signal));
+    // A failed operation is returned to its caller; subsequent requests are not replayed.
+    this.queue=pending.then(()=>undefined,()=>undefined);
+    return pending;
+  }
+  private async request(operation: string, fields: Record<string,unknown>, signal: AbortSignal): Promise<UiResult> {
     if (process.platform !== 'win32') throw new BridgeError('UNSUPPORTED', 'Native UI controls require Windows');
+    if (signal.aborted) throw new BridgeError('TIMEOUT','Native UI request cancelled before dispatch');
     requireNoSecrets(JSON.stringify(fields));
-    const helper = fileURLToPath(new URL('./windows-native-worker.ps1', import.meta.url));
-    const script = `& ([scriptblock]::Create([System.IO.File]::ReadAllText('${helper.replaceAll("'", "''")}')))`;
-    const executable = win32.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-    return new Promise((resolve, reject) => {
-      const child = spawn(executable, ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], { windowsHide: true, shell: false, env: controlledProcessEnv(), stdio: ['pipe', 'pipe', 'pipe'] });
-      let output = '', diagnostics = '', failure: BridgeError | undefined;
-      const abort = () => { failure = new BridgeError('TIMEOUT', 'Native UI operation interrupted; reconcile its original resources'); child.kill(); };
-      const timer = setTimeout(abort, this.config.background.timeoutMs);
-      signal.addEventListener('abort', abort, { once: true });
-      child.stdout.on('data', chunk => { output += String(chunk); if (output.length > 1048576) abort(); });
-      child.stderr.on('data', chunk => { diagnostics = (diagnostics + String(chunk)).slice(0,4096); if(String(chunk).startsWith('ACB_UI_STAGE='))process.stderr.write(String(chunk)); });
-      child.once('error', () => { clearTimeout(timer); signal.removeEventListener('abort', abort); reject(new BridgeError('DEPENDENCY', 'Windows UI worker could not start')); });
-      child.stdin.on('error', () => { failure = new BridgeError('IO', 'Windows UI worker input failed'); });
-      child.once('close', code => {
-        clearTimeout(timer); signal.removeEventListener('abort', abort);
-        if (failure) { reject(failure); return; }
-        if (code !== 0) { reject(new BridgeError('EXECUTION', `Windows UI worker failed: ${redact(diagnostics)}`)); return; }
+    if (!this.child) {
+      const helper=fileURLToPath(new URL('./windows-native-worker.ps1',import.meta.url));
+      const script="& ([scriptblock]::Create([System.IO.File]::ReadAllText('"+helper.replaceAll("'","''")+"')))";
+      const executable=win32.join(process.env.SystemRoot ?? 'C:\\Windows','System32','WindowsPowerShell','v1.0','powershell.exe');
+      this.child=spawn(executable,['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(script,'utf16le').toString('base64')],{windowsHide:true,shell:false,env:controlledProcessEnv(),stdio:['pipe','pipe','pipe']});
+      this.child.stdout!.setEncoding('utf8');
+      const started=this.child;
+      started.once('close',()=>{if(this.child===started){this.child=undefined;uiWorkers.delete(this);}});
+      started.stderr!.on('data',chunk=>{if(String(chunk).startsWith('ACB_UI_STAGE='))process.stderr.write(String(chunk));});
+      uiWorkers.add(this);
+    }
+    const child=this.child;
+    return new Promise((resolve,reject)=>{
+      let output='';
+      const finish=(error?: BridgeError,result?: UiResult)=>{
+        clearTimeout(timer);signal.removeEventListener('abort',abort);
+        child.stdout!.removeListener('data',read);child.removeListener('error',failed);child.removeListener('close',closed);child.stdin!.removeListener('error',inputFailed);
+        if(error){this.close();reject(error);}else resolve(result!);
+      };
+      const abort=()=>finish(new BridgeError('TIMEOUT','Native UI operation interrupted; reconcile without resending'));
+      const failed=()=>finish(new BridgeError('DEPENDENCY','Windows UI worker could not start'));
+      const closed=()=>finish(new BridgeError('IO','Windows UI worker exited; reconcile without resending'));
+      const inputFailed=()=>finish(new BridgeError('IO','Windows UI worker input failed'));
+      const read=(chunk: Buffer)=>{
+        output+=String(chunk);
+        if(output.length>1048576){finish(new BridgeError('PROVENANCE','Native UI response exceeds its bound'));return;}
+        if(!output.includes('\n'))return;
         try {
-          const result = JSON.parse(output) as UiResult;
-          if (!result.ok) throw new BridgeError(Object.hasOwn(EXIT_CODES,result.code ?? '') ? result.code as ErrorCode : 'EXECUTION', `Native UI operation failed at ${result.stage} (${result.errorType}, line ${result.line})`);
-          if (result.snapshot) result.snapshot.text = redact(result.snapshot.text);
-          if (result.body) result.body = redact(result.body);
-          resolve(result);
-        } catch (error) { reject(error instanceof BridgeError ? error : new BridgeError('IO', 'Windows UI worker returned an unreadable result')); }
-      });
-      if (signal.aborted) abort();
-      else child.stdin.end(JSON.stringify({ operation, ...fields, timeoutMs: this.config.background.timeoutMs, pollMs: this.config.desktop.uiPollMs }));
+          const result=JSON.parse(output) as UiResult;
+          if(!result.ok)throw new BridgeError(Object.hasOwn(EXIT_CODES,result.code ?? '')?result.code as ErrorCode:'EXECUTION',`Native UI operation failed at ${result.stage} (${result.errorType}, line ${result.line})`);
+          if(result.snapshot)result.snapshot.text=redact(result.snapshot.text);
+          if(result.body)result.body=redact(result.body);
+          finish(undefined,result);
+        }catch(error){finish(error instanceof BridgeError?error:new BridgeError('IO','Windows UI worker returned an unreadable result'));}
+      };
+      const timer=setTimeout(abort,this.config.background.timeoutMs);
+      signal.addEventListener('abort',abort,{once:true});
+      child.stdout!.on('data',read);child.once('error',failed);child.once('close',closed);child.stdin!.on('error',inputFailed);
+      child.stdin!.write(JSON.stringify({operation,...fields,timeoutMs:this.config.background.timeoutMs,pollMs:this.config.desktop.uiPollMs})+'\n');
     });
   }
 }
@@ -80,7 +104,7 @@ export function createWindowsNativeGptReader(config: BridgeConfig, callingThread
     const turn=page.turns[0],user=turn?.items.find(item=>item.type==='userMessage'),replies=turn?.items.filter(item=>item.type==='agentMessage') ?? [];
     const prompt=user?.content.find(part=>part.type==='text' && !part.truncated)?.text;
     if(!prompt || replies.length!==1)throw new BridgeError('UNSUPPORTED','UI reply correlation requires one native assistant message and a complete user prompt');
-    const result=await ui.call('gpt-read',{name,prompt},signal),text=result.body!;
+    const result=await ui.call('gpt-read',{name,prompt,conversationId},signal),text=result.body!;
     return {source:'windows-uia',conversationId,browserTitle:name,kind:'unknown',completionVerified:false,actualModel:null,actualReasoningEffort:null,
       responseInProgress:page.thread.status.type!=='idle',messages:[{role:'assistant',text,sourceMessageId:replies[0].id,hash:createHash('sha256').update(text,'utf8').digest('hex')}]};
   };
@@ -111,11 +135,11 @@ export function createWindowsNativeProjectHost(options: { config: BridgeConfig; 
       const prompt = `这是 Agent Control Bridge 的会话身份初始化，不执行工程任务。请只回复：${marker}。`;
       const before = await native.listThreads(signal), baseline = new Set([...before.threads,...before.pinnedThreads].map(item => item.id));
       const observed = await ui.call('gpt-create',{name,prompt,marker},signal);
-      if (observed.ordinaryModeObserved !== true) throw new BridgeError('PROVENANCE', 'Ordinary chat mode was not observed');
+      if (observed.ordinaryModeObserved !== true || !observed.conversationId) throw new BridgeError('PROVENANCE', 'Ordinary chat mode or pre-send UI identity was not observed');
       const id = await poll(async () => {
         const inventory = await native.listThreads(signal);
         for (const item of [...inventory.threads,...inventory.pinnedThreads]) {
-          if (baseline.has(item.id) || item.kind !== 'chatgpt' || item.title !== name) continue;
+          if (baseline.has(item.id) || item.id!==observed.conversationId || item.kind !== 'chatgpt' || item.title !== name) continue;
           const page = await native.readThread(item.id,signal);
           if (page.thread.title === name && page.turns.some(turn => turn.items.some(message => message.type === 'userMessage' && message.content.some(part => part.type === 'text' && part.text === prompt && !part.truncated)))) return item.id;
         }
@@ -132,19 +156,20 @@ export function createWindowsNativeProjectHost(options: { config: BridgeConfig; 
       }
       const baseline=new Set((await native.listThreads(signal)).threads.map(item=>item.id));
       const marker=`ACB_CODEX_INIT_${randomUUID()}`,prompt=`这是 Agent Control Bridge 的隔离会话登记，不执行工程任务。禁止调用工具或修改文件，请只回复：${marker}。`;
-      await ui.call('codex-create',{name,projectName:project.label,prompt,marker},signal);
-      const thread=await poll(async()=>(await native.listThreads(signal)).threads.find(item=>!baseline.has(item.id) && item.kind==='codex' && item.title===name && item.projectId===appProjectId && item.cwd && pathKey(item.cwd)===pathKey(_path)),signal);
+      const observed=await ui.call('codex-create',{name,projectName:project.label,prompt,marker},signal);
+      if(!observed.conversationId)throw new BridgeError('PROVENANCE','New Codex pre-send UI identity is unavailable');
+      const thread=await poll(async()=>(await native.listThreads(signal)).threads.find(item=>!baseline.has(item.id) && item.id===observed.conversationId && item.kind==='codex' && item.title===name && item.projectId===appProjectId && item.cwd && pathKey(item.cwd)===pathKey(_path)),signal);
       return {conversationId:thread.id};
     },
     async verifyBundle(resources,signal) {
-      const snapshot = ordinaryIds.has(resources.chatgptConversationId) ? undefined : (await ui.call('snapshot',{name:resources.name},signal)).snapshot!;
+      const snapshot = ordinaryIds.has(resources.chatgptConversationId) ? undefined : (await ui.call('snapshot',{name:resources.name,conversationId:resources.chatgptConversationId},signal)).snapshot!;
       const projects=await native.listProjects(signal), threads=await native.listThreads(signal), chat=await native.readThread(resources.chatgptConversationId,signal);
       const project=projects.projects.find(item=>item.projectId===resources.appProjectId), codex=threads.threads.find(item=>item.id===resources.codexConversationId);
       if (!project || project.projectKind!=='local' || project.hostId!=='local' || project.label!==resources.name || pathKey(project.path)!==pathKey(resources.workspacePath) ||
           !codex || codex.kind!=='codex' || codex.projectId!==resources.appProjectId || !codex.cwd || pathKey(codex.cwd)!==pathKey(resources.workspacePath) || chat.thread.id!==resources.chatgptConversationId || chat.thread.kind!=='chatgpt' || chat.thread.title!==resources.name) throw new BridgeError('PROVENANCE','Native bundle identity, directory, name or Codex membership differs');
       if (snapshot) {
         const prompt=chat.turns.flatMap(turn=>turn.items).filter(item=>item.type==='userMessage').flatMap(item=>item.content).find(part=>part.type==='text' && part.text && !part.truncated)?.text;
-        if (!snapshot.ordinaryComposer || !prompt || !snapshot.text.includes(prompt)) throw new BridgeError('PROVENANCE','Current ordinary GPT view cannot be correlated with this native conversation');
+        if (snapshot.conversationId!==resources.chatgptConversationId || !snapshot.ordinaryComposer || !prompt || !snapshot.text.includes(prompt)) throw new BridgeError('PROVENANCE','Current ordinary GPT view cannot be correlated with this native conversation');
       }
       return {...resources,source:'application-host',kind:'ordinary-chat',workspaceSurface:'native-desktop',codexNativeProjectId:codex.projectId};
     },
@@ -182,6 +207,24 @@ export function createWindowsNativeConversationHost(options: {
     } while (Date.now()<deadline && !signal.aborted);
     throw new BridgeError('TIMEOUT','Desktop turn completion is pending; reconcile this turn without resending');
   };
+  const finalGptReply = async (id: string, prompt: string, completed: NativeChatPage, signal: AbortSignal) => {
+    const turn=completed.turns[0],replies=turn?.items.filter(item=>item.type==='agentMessage') ?? [];
+    if (completed.thread.id!==id || completed.thread.status.type!=='idle' || turn?.status!=='completed' || turn.error || replies.length!==1 ||
+        !turn.items.some(item=>item.type==='userMessage' && item.content.some(part=>part.type==='text' && !part.truncated && part.text===prompt)))
+      throw new BridgeError('PROVENANCE','No exact completed latest GPT turn; reconcile without resending');
+    // Native GPT completion can be synthetic. Read the body only after this
+    // boundary and require independent, message-scoped UI completion evidence.
+    const result=await ui.call('chat-read-reply',{name:completed.thread.title,conversationId:id,prompt,mode:'gpt'},signal);
+    if(result.conversationId!==id || result.completionVerified!==true || !result.body?.trim())throw new BridgeError('PROVENANCE','Final GPT UI identity or completion is unverified');
+    const after=await native.readThread(id,signal),latest=after.turns[0],messages=latest?.items.filter(item=>item.type==='agentMessage') ?? [];
+    if(after.thread.id!==id || after.thread.kind!=='chatgpt' || after.thread.title!==completed.thread.title || after.thread.status.type!=='idle' ||
+        latest?.id!==turn.id || latest.status!=='completed' || latest.error || messages.length!==1 || messages[0].id!==replies[0].id)
+      throw new BridgeError('PROVENANCE','GPT turn changed while reading the final body');
+    return {content:result.body,sourceConversationId:id,sourceConversationName:after.thread.title,sourceMessageId:messages[0].id,
+      actualModel:null,actualReasoningEffort:null,complete:true,evidenceSource:'application-host' as const,
+      completionEvidence:{source:'windows-uia' as const,turnId:turn.id,userMessageId:turn.items.find(item=>item.type==='userMessage')!.id,
+        assistantMessageId:messages[0].id,observedAt:new Date().toISOString(),nativeCompleted:true as const,uiIdle:true as const,replyActions:true as const}};
+  };
   const ordinaryChat: OrdinaryChatHost = {
     async inspect() {return {source:'application-host',ordinaryChat:true,background:false,exactConversation:true,completeMessages:true,actualGenerationParameters:false,
       createOrdinaryChat:false,createWorkspace:false,models:[],reasoningEfforts:[]};},
@@ -190,8 +233,8 @@ export function createWindowsNativeConversationHost(options: {
       if(page.thread.id!==id || page.thread.kind!=='chatgpt')throw new BridgeError('PROVENANCE','Native conversation is not ChatGPT');
       if(!ordinaryIds.has(id)) {
         await authorize(page,'read',signal);
-        const snapshot=(await ui.call('chat-open',{name:page.thread.title},signal)).snapshot!;
-        if(!snapshot.ordinaryComposer)throw new BridgeError('PROVENANCE','Target is not an ordinary GPT conversation');
+        const snapshot=(await ui.call('chat-open',{name:page.thread.title,conversationId:id},signal)).snapshot!;
+        if(snapshot.conversationId!==id || !snapshot.ordinaryComposer)throw new BridgeError('PROVENANCE','Target is not the exact ordinary GPT conversation');
         ordinaryIds.add(id);
       }
       return {source:'application-host',kind:'ordinary-chat',conversationId:id,name:page.thread.title};
@@ -201,21 +244,15 @@ export function createWindowsNativeConversationHost(options: {
       if(before.thread.id!==id || before.thread.kind!=='chatgpt')throw new BridgeError('PROVENANCE','Native generation target differs');
       if(before.thread.status.type!=='idle')throw new BridgeError('CONFLICT','GPT conversation is busy');
       await authorize(before,'send',signal);
-      const result=await ui.call('chat-send',{name:before.thread.title,prompt,mode:'gpt'},signal);
-      const {replies}=await waitForTurn(id,before,prompt,signal);
-      if(replies.length!==1)throw new BridgeError('PROVENANCE','GPT reply body requires one exact native assistant message');
-      return {content:result.body!,sourceConversationId:id,sourceConversationName:before.thread.title,sourceMessageId:replies[0].id,
-        actualModel:null,actualReasoningEffort:null,complete:true,evidenceSource:'application-host'};
+      await ui.call('chat-send',{name:before.thread.title,conversationId:id,prompt,mode:'gpt'},signal);
+      const {page}=await waitForTurn(id,before,prompt,signal);
+      return finalGptReply(id,prompt,page,signal);
     },
     async observeGeneration(id,prompt,signal) {
       const before=await native.readThread(id,signal);
       if(before.thread.id!==id || before.thread.kind!=='chatgpt' || !before.turns[0]?.items.some(item=>item.type==='userMessage' && item.content.some(part=>part.type==='text' && !part.truncated && part.text===prompt)))throw new BridgeError('PROVENANCE','The original GPT request is not the latest native turn');
       await authorize(before,'read',signal);
-      const result=await ui.call('chat-read-reply',{name:before.thread.title,prompt},signal);
-      const page=await native.readThread(id,signal),turn=page.turns[0],replies=turn.items.filter(item=>item.type==='agentMessage');
-      if(page.thread.title!==before.thread.title || page.thread.status.type!=='idle' || turn.id!==before.turns[0].id || turn.status!=='completed' || replies.length!==1)throw new BridgeError('PROVENANCE','Original GPT completion or exact message changed');
-      return {content:result.body!,sourceConversationId:id,sourceConversationName:page.thread.title,sourceMessageId:replies[0].id,
-        actualModel:null,actualReasoningEffort:null,complete:true,evidenceSource:'application-host'};
+      return finalGptReply(id,prompt,before,signal);
     },
   };
   const executor: BackgroundExecutor = {
@@ -231,7 +268,7 @@ export function createWindowsNativeConversationHost(options: {
       const before=await native.readThread(target.codexConversationId,signal);
       if(before.thread.kind!=='codex' || !['idle','notLoaded'].includes(before.thread.status.type))throw new BridgeError('CONFLICT','Native Codex conversation is busy or differs');
       await authorize(before,'send',signal);
-      await ui.call('chat-send',{name:before.thread.title,prompt:content,mode:'codex'},signal);
+      await ui.call('chat-send',{name:before.thread.title,conversationId:target.codexConversationId,prompt:content,mode:'codex'},signal);
       const {turn,replies}=await waitForTurn(target.codexConversationId,before,content,signal,onEvent);
       if(replies.some(reply=>reply.truncated || !reply.text.trim() || reply.text.includes('::chatgpt-content-reference{')))throw new BridgeError('PROVENANCE','Native Codex result body is incomplete');
       return {executionId:turn.id,codexConversationId:target.codexConversationId,workspacePath:target.workspacePath,

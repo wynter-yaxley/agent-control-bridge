@@ -9,12 +9,19 @@ test('help and invalid command/parameters never open a database', () => {
     else {assert.equal(code,2);assert.equal(out,'');assert.match(err,/INPUT/);}
   }
 });
-test('CLI contract: required title, canonical aliases, per-command help, and structured errors',()=>{
+test('CLI contract: required title, canonical aliases, per-command help, and structured errors',async()=>{
  for(const args of [['task-create'],['task-create','-t','one','--title','two'],['task-create','--invalid']]) {
   let out='',err='';assert.equal(runCli(args,{stdout:s=>out+=s,stderr:s=>err+=s}),2);assert.equal(out,'');assert.equal(JSON.parse(err).code,'INPUT');
  }
- for(const command of ['init','task-create','task-claim','task-progress','task-verify','task-recover','migrate','schema-version','chatgpt-import']) {
-  assert.equal(runCli([command,'--help'],{stdout:()=>{},stderr:()=>assert.fail('help error')}),0);
+ const commands=['project-register','help','init','migrate','schema-version','config-show','demo','watch','task-create','task-claim','task-progress','task-finish','task-renew','task-verify','task-cancel','task-resume','task-requeue','task-recover','task-list','task-show','approval-request','approval-decide','mapping-register','mapping-show','projects','status','audit','sweep','codex-status','codex-sync','codex-limits','pi-status','hermes-status','chatgpt-status','chatgpt-import','markdown-import','codex-fork-request'];
+ for(const command of commands) {
+  let out='',err='';
+  if(command==='demo' || command==='watch') {
+   const {spawnSync}=await import('node:child_process');
+   const result=spawnSync(process.execPath,['src/cli.ts',command,'--help'],{encoding:'utf8',windowsHide:true});
+   assert.equal(result.status,0);out=result.stdout;err=result.stderr;
+  }else assert.equal(runCli([command,'--help'],{stdout:value=>out+=value,stderr:value=>err+=value}),0);
+  assert.ok(out.trim());assert.equal(err,'');
  }
 });
 for(const flags of [[],['--pass','--fail'],['--pass','--pass'],['--pass','--unknown']]) test(`review decision flags ${JSON.stringify(flags)} reject before mutation`, t => {

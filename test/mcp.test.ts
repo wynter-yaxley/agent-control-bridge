@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname, resolve, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { controlledProcessEnv } from '../src/silent-process.ts';
+import { createDb } from '../src/db.ts';
 import { ConversationRegistry } from '../src/topology.ts';
 
 test('MCP: closing waits for an active host operation before the database is closed',async t=>{
@@ -123,6 +124,8 @@ test('MCP: isolated stdio installation starts and closes without a browser, Agen
   cpSync(new URL('../src',import.meta.url),join(root,'src'),{recursive:true});
   cpSync(new URL('../package.json',import.meta.url),join(root,'package.json'));
   symlinkSync(fileURLToPath(new URL('../node_modules',import.meta.url)),join(root,'node_modules'),process.platform==='win32'?'junction':'dir');
+  const fixturePath=join(root,'data','fixture.db');
+  const fixtureDb=createDb({dbPath:fixturePath});fixtureDb.close();
   const transport=new StdioClientTransport({command:process.execPath,args:[join(root,'src','mcp.ts'),'--db',join(root,'data','fixture.db')],cwd:root,env:controlledProcessEnv(),stderr:'pipe'});
   let errors='';transport.stderr?.on('data',(value:Buffer)=>{errors+=value.toString();});
   await client.connect(transport,{timeout:30000});
@@ -130,7 +133,9 @@ test('MCP: isolated stdio installation starts and closes without a browser, Agen
   const result=JSON.parse((status.content as {text:string}[])[0].text);
   assert.equal(result.fullWorkflowReady,false);assert.ok(result.blockers.includes('ORDINARY_CHAT_HOST_MISSING'));
   const denied=await client.callTool({name:'acb_project_prepare',arguments:{name:'fixture',eventKey:'fixture'}});
-  assert.equal(denied.isError,true);assert.equal(JSON.parse((denied.content as {text:string}[])[0].text).code,'AUTH');
+  assert.equal(denied.isError,true);
+  const discovered=(await client.listTools()).tools;assert.equal(discovered.length,8);assert.ok(discovered.every(tool=>tool.annotations?.readOnlyHint===true));
+  const check=createDb({dbPath:fixturePath,readOnly:true});try {assert.throws(()=>check.exec("DELETE FROM projects"));assert.equal(check.prepare('SELECT COUNT(*) n FROM projects').get()!.n,0);}finally{check.close();}
   assert.ok(!/Unhandled|TypeError|SyntaxError/.test(errors));
 });
 

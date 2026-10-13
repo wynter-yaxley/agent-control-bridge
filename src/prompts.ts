@@ -9,6 +9,7 @@ import { ConversationRegistry } from './topology.ts';
 import { isDemoDatabase } from './demo-scope.ts';
 export interface Generation {
   content: string; sourceConversationId?: string; sourceConversationName?: string; sourceMessageId: string; actualModel: string | null; actualReasoningEffort: string | null;
+  completionEvidence?: { source: 'windows-uia'; turnId: string; userMessageId: string; assistantMessageId: string; observedAt: string; nativeCompleted: true; uiIdle: true; replyActions: true };
 }
 // Adapter objects are installed by trusted host code, never deserialized from CLI/Agent JSON.
 export interface ChatgptAdapter {
@@ -197,7 +198,7 @@ export class PromptPipeline {
       if (existing) return String(existing.id);
       this.db.prepare(`INSERT INTO prompts(id,task_id,source,requested_model,actual_model,requested_reasoning,actual_reasoning,generated_at,prompt_hash,content,source_message_id,verified,delivery_status,source_conversation_id)
         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, taskId, this.adapter.source, this.requested.model, result.actualModel, this.requested.reasoningEffort, result.actualReasoningEffort, now(), hash, result.content, result.sourceMessageId, verified ? 1 : 0, verified ? 'PENDING' : 'REVIEW_REQUIRED', result.sourceConversationId ?? null);
-      this.db.prepare('INSERT INTO audit_log(at,actor,action,detail) VALUES(?,?,?,?)').run(now(), this.authority.resolve(context)!.principal, 'prompt_generated', `prompt=${id} hash=${hash} source=${this.adapter.source}`);
+      this.db.prepare('INSERT INTO audit_log(at,actor,action,detail) VALUES(?,?,?,?)').run(now(), this.authority.resolve(context)!.principal, 'prompt_generated', `prompt=${id} hash=${hash} source=${this.adapter.source} completion=${JSON.stringify(result.completionEvidence ?? null)}`);
       return id;
     });
   }

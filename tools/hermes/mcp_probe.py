@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import shutil
 import sys
+import subprocess
 import tempfile
 
 phase = 'preflight'
@@ -32,30 +33,13 @@ async def probe(root, node, timeout):
                 initialization = await session.initialize()
                 phase = 'tools'
                 names = {tool.name for tool in (await session.list_tools()).tools}
-                if not {'acb_capabilities', 'acb_project_prepare', 'acb_project_reconcile', 'acb_notifications_pull', 'acb_native_target_check'}.issubset(names):
+                if len(names) != 8 or 'acb_project_prepare' in names or 'acb_review_submit' in names:
                     raise ValueError('TOOLS')
                 phase = 'capabilities'
                 capability = await session.call_tool('acb_capabilities', {})
                 facts = json.loads(capability.content[0].text)
                 if facts['fullWorkflowReady'] or 'ORDINARY_CHAT_HOST_MISSING' not in facts['blockers']:
                     raise ValueError('CAPABILITIES')
-                phase = 'project'
-                prepared = await session.call_tool('acb_project_prepare', {'name': '隔离互通项目', 'eventKey': 'isolated-probe-event'})
-                operation = json.loads(prepared.content[0].text)
-                if getattr(prepared, 'is_error', getattr(prepared, 'isError', False)) or operation['state'] != 'BLOCKED':
-                    raise ValueError('PROJECT')
-                phase = 'dedupe'
-                replay = await session.call_tool('acb_project_prepare', {'name': '隔离互通项目', 'eventKey': 'isolated-probe-event'})
-                if json.loads(replay.content[0].text)['id'] != operation['id']:
-                    raise ValueError('DEDUPE')
-                phase = 'project_reconcile'
-                reconcile = await session.call_tool('acb_project_reconcile', {'operationId': operation['id']})
-                if not getattr(reconcile, 'is_error', getattr(reconcile, 'isError', False)) or json.loads(reconcile.content[0].text)['code'] != 'STATE':
-                    raise ValueError('RECONCILE')
-                phase = 'authorization'
-                denied = await session.call_tool('acb_review_submit', {'taskId': 'isolated-nonexistent', 'expectedVersion': 0, 'pass': True})
-                if not getattr(denied, 'is_error', getattr(denied, 'isError', False)):
-                    raise ValueError('AUTH')
                 phase = 'native_scope'
                 native_denied = await session.call_tool('acb_native_target_check', {'projectId': 'isolated-unregistered', 'conversationId': 'isolated-unregistered'})
                 if not getattr(native_denied, 'is_error', getattr(native_denied, 'isError', False)) or json.loads(native_denied.content[0].text)['code'] != 'AUTH':
@@ -63,10 +47,8 @@ async def probe(root, node, timeout):
                 phase = 'completed'
                 return {'ok': True, 'mcpSdk': importlib.metadata.version('mcp'),
                         'negotiatedProtocol': getattr(initialization, 'protocol_version', getattr(initialization, 'protocolVersion', None)), 'tools': len(names),
-                        'sameEventDeduplicated': True, 'ordinaryChatBlockObserved': True,
-                        'reviewerAuthorizationDenied': True, 'productionConfigModified': False,
+                        'readOnlyEntry': True, 'hostMissingObserved': True, 'productionConfigModified': False,
                         'unregisteredNativeTargetDenied': True,
-                        'unreadyReconciliationDenied': True,
                         'realAgentInvoked': False, 'liveMessageReceived': False}
 
 
@@ -92,6 +74,7 @@ def main():
             'executor': 'hermes', 'controller': True, 'reviewer': False,
         }]), encoding='utf8')
         os.chmod(root / 'config/caller-policy.json', 0o600)
+        subprocess.run([args.node, str(root / 'dist/cli.js'), 'init', '--db', str(root / 'data/probe.sqlite')], check=True, capture_output=True, timeout=args.timeout)
         result = asyncio.run(asyncio.wait_for(probe(root, args.node, args.timeout), args.timeout + 5))
     result['temporaryResourcesRemoved'] = not root.exists()
     print(json.dumps(result, ensure_ascii=False))

@@ -16,11 +16,11 @@ Copy config.example.json to .bridge.config.json and protect config/caller-policy
 
 ## MCP and automation boundaries
 
-Default dist/mcp.js provides the ledger and configured diagnostics. A trusted Windows embedding installs ProjectHost, ConversationHost and a real executor context through runMcp(args, createHost). Hermes tools.include defaults to 15 workflow tools; reviewer uses a separate protected connection.
+Default dist/mcp.js --read-only exposes 8 read tools against an existing current-schema database; it neither migrates nor starts queued tasks. A trusted Windows embedding installs ProjectHost, ConversationHost and a real executor context through runMcp(args, createHost). Hermes tools.include defaults to the 8 read tools; writes require a protected per-run host approval binding; reviewer uses a separate protected connection.
 
 Native IPC is read-only and verifies the signed same-user peer. UIA uses the interactive desktop and may change pages/editor focus; it needs approval for that run. CDP needs an already exposed endpoint. App Server supports background execution but cannot establish native desktop project ownership alone.
 
-No second instance/profile/browser/WebView, application restart/termination, injection, credential extraction, private-state edits or physical input takeover. Existing UIA remains one adapter.
+No second instance/profile/browser/WebView, application restart/termination, injection, credential extraction, private-state edits or physical input takeover. Existing UIA remains one adapter. Title-only navigation has been removed: the public accessibility document URI must prove the exact /c/UUID before submission. The current application exposes only a generic index URI, so UIA sending/initialization is blocked with PROVENANCE. GPT final text is reread after native completion and independent UI idle/reply-action checks, then correlated again. This positive path has component tests, not a new live write acceptance.
 
 Execution-result MCP calls now return IDs/hashes/lengths by default. Add includeContent:true for complete output/feedback. Project operations return recorded resources directly. Prefer notifications; reconcile uncertain original generation/execution/feedback without resending/rerunning.
 
@@ -36,6 +36,8 @@ Only independent acceptance produces SUCCEEDED. Test results and GPT review cann
     npm audit --audit-level=high
     npm run test:install
 
-Node discovery includes e2e/workflow. Clean-install checks dependency/build/compiled-entry behavior without repeating the source matrix. Native reads reuse one serial Bridge-owned worker. Direct API users close it with closeNativeReadWorker() or NativeReadWorker.close(); runMcp handles shutdown.
+Node discovery includes e2e/workflow. Clean-install checks dependency/build/compiled-entry behavior without repeating the source matrix. Native reads reuse one serial Bridge-owned worker. Direct API users close it with closeNativeReadWorker() or NativeReadWorker.close(); runMcp handles shutdown. UIA now reuses one serial worker with fresh elements per request (one cold/hot read sample: 1320/53ms); direct users close it with ui.close() or closeWindowsNativeUiWorkers().
 
 See the [main README](README.md) for capability matrices, configuration, host integration, workflow/recovery and measured limits. [Rules](docs/PROJECT_RULES.md), [acceptance template](docs/ACCEPTANCE_TEMPLATE.md), [license](LICENSE), [third-party notices](THIRD_PARTY_NOTICES.md).
+
+The installed Hermes MCP SDK connected to the real Windows entry and OS policy with an isolated ledger (8 read tools, HOST_MISSING). Gateway/Feishu writes remain unverified; production ledger v2 requires an explicitly authorized migration, and the current controller/reviewer policy needs separation before write deployment. Hermes elicitation is present, but no protected Windows approval binding exists. No new research/stage/test-summary Markdown by default.

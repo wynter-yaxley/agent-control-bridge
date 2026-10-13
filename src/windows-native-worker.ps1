@@ -1,3 +1,4 @@
+$initClock=[Diagnostics.Stopwatch]::StartNew()
 $ErrorActionPreference='Stop'
 $ProgressPreference='SilentlyContinue'
 [Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false)
@@ -20,11 +21,14 @@ public static class AcbFolderControls {
 }
 '@
 [Console]::Error.WriteLine('ACB_UI_STAGE=worker-loaded')
+$initMs=$initClock.ElapsedMilliseconds
+function RunRequest($request) {
+$actionClock=[Diagnostics.Stopwatch]::StartNew()
+function Respond($result) {$result.timings=@{initMs=$initMs;actionMs=$actionClock.ElapsedMilliseconds};[Console]::Out.WriteLine(($result | ConvertTo-Json -Depth 5 -Compress))}
 $script:stage='input'
 $mutex=$null
 $locked=$false
 try {
- $request=[Console]::In.ReadToEnd() | ConvertFrom-Json
  $deadline=[DateTime]::UtcNow.AddMilliseconds($request.timeoutMs)
  $windows=@(Get-Process -Name ChatGPT | Where-Object {$_.MainWindowHandle -ne 0})
  if ($windows.Count -ne 1) {throw 'OWNER'}
@@ -55,24 +59,29 @@ try {
   [void](Wait { $current=Find $scope 'Edit' $name $id; if ($current -and (Value $current) -eq $text) {$current} })
  }
  function Document {return Find $script:root 'Document' ''}
+ function ConversationId {
+  $doc=Document
+  $pattern=$null
+  if (-not $doc.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern,[ref]$pattern)) {return $null}
+  # Public accessibility URI only; generic app://index.html contains no identity.
+  $uri=[Uri]$pattern.Current.Value
+  if ($uri.AbsolutePath -match '^/c/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})$') {return $Matches[1]}
+  return $null
+ }
+ function AssertConversation([string]$id) {
+  $script:stage='conversation-identity'
+  if (-not $id -or (ConversationId) -ne $id) {throw 'PROVENANCE'}
+ }
  function Snapshot {
   $doc=Document
   $text=([System.Windows.Automation.TextPattern]$doc.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern)).DocumentRange.GetText(65537)
   if ($text.Length -gt 65536) {throw 'PROVENANCE'}
-  return @{title=$doc.Current.Name;text=$text;ordinaryComposer=($null -ne (Find $doc 'Edit' '询问 ChatGPT'));pid=$window.Id}
+  return @{title=$doc.Current.Name;text=$text;ordinaryComposer=($null -ne (Find $doc 'Edit' '询问 ChatGPT'));pid=$window.Id;conversationId=(ConversationId)}
  }
  function OpenChat([string]$title) {
-  [Console]::Error.WriteLine('ACB_UI_STAGE=chat-open-check')
-  if ((Document).Current.Name -eq $title) {return}
-  $edits=$script:root.FindAll([System.Windows.Automation.TreeScope]::Descendants,[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Edit))
-  foreach ($edit in $edits) {if (-not $edit.Current.IsOffscreen) {$draft=Value $edit;if ($draft -and $draft -ne $edit.Current.Name) {throw 'CONFLICT'}}}
-  $condition=[System.Windows.Automation.AndCondition]::new(
-   [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::NameProperty,$title),
-   [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::IsInvokePatternAvailableProperty,$true))
-  $button=Wait {$script:root.FindFirst([System.Windows.Automation.TreeScope]::Descendants,$condition)}
-  Invoke $button
-  [Console]::Error.WriteLine('ACB_UI_STAGE=chat-open-invoked')
-  [void](Wait {if ((Document).Current.Name -eq $title) {$true}})
+  # No title-only navigation: the current public UI identity must already match.
+  AssertConversation $request.conversationId
+  if ((Document).Current.Name -ne $title) {throw 'PROVENANCE'}
  }
  function Reply([string]$prompt) {
   $nodes=(Document).FindAll([System.Windows.Automation.TreeScope]::Descendants,[System.Windows.Automation.Condition]::TrueCondition)
@@ -83,28 +92,33 @@ try {
   if ($start -lt 0) {return $null}
   $parts=[System.Collections.Generic.List[string]]::new()
   $finished=$false
+  $readAloud=$false
   for ($index=$start;$index -lt $nodes.Count;$index++) {
    $node=$nodes.Item($index)
+   if ($node.Current.Name -in @('您说：','ChatGPT 说：')) {return $null}
+   if ($node.Current.ControlType -eq [System.Windows.Automation.ControlType]::Button -and $node.Current.Name -eq '朗读' -and $node.Current.IsEnabled) {$readAloud=$true}
    if ($node.Current.ControlType -eq [System.Windows.Automation.ControlType]::Button -and $node.Current.Name -eq '更多操作') {$finished=$true;break}
    if ($node.Current.ControlType -eq [System.Windows.Automation.ControlType]::Text) {$parts.Add($node.Current.Name)}
   }
   $body=($parts -join "`n").Trim()
-  if (-not $finished -or -not $body) {return $null}
+  if (-not $finished -or -not $readAloud -or -not $body) {return $null}
   if ($body.Length -gt 65536) {throw 'PROVENANCE'}
   return $body
  }
+ function GptBusy {return ($null -ne (Find (Document) 'Button' '停止') -or $null -ne (Find (Document) 'Text' 'ChatGPT 正在回应'))}
  if ($request.operation -in @('snapshot','gpt-read')) {
   $script:stage='current-gpt-view'
   $snapshot=Snapshot
-  if ($snapshot.title -ne $request.name) {throw 'PROVENANCE'}
+  if ($request.name -and $snapshot.title -ne $request.name) {throw 'PROVENANCE'}
+  if ($request.conversationId -or $request.operation -eq 'gpt-read') {AssertConversation $request.conversationId}
   if ($request.operation -eq 'gpt-read') {
    if (-not $snapshot.ordinaryComposer) {throw 'PROVENANCE'}
    $script:stage='gpt-read-correlate'
    $body=Reply $request.prompt
    if (-not $body) {throw 'PROVENANCE'}
-   [Console]::Out.WriteLine((@{ok=$true;body=$body} | ConvertTo-Json -Depth 5 -Compress));exit 0
+   Respond @{ok=$true;body=$body;conversationId=(ConversationId)};return
   }
-  [Console]::Out.WriteLine((@{ok=$true;snapshot=$snapshot} | ConvertTo-Json -Depth 5 -Compress)); exit 0
+  Respond @{ok=$true;snapshot=$snapshot};return
  }
  if ($request.operation -notin @('workspace-create','gpt-create','codex-create','gpt-rename','chat-open','chat-send','chat-read-reply')) {throw 'INPUT'}
  $mutex=[Threading.Mutex]::new($false,'ACB_Desktop_Write_Lock')
@@ -114,7 +128,7 @@ try {
   $script:stage='chat-open'
   OpenChat $request.name
   if ($request.operation -eq 'chat-open') {
-   [Console]::Out.WriteLine((@{ok=$true;snapshot=(Snapshot)} | ConvertTo-Json -Depth 5 -Compress));exit 0
+   Respond @{ok=$true;snapshot=(Snapshot)};return
   }
   if ($request.operation -eq 'chat-send') {
    $script:stage='chat-compose-find';[Console]::Error.WriteLine("ACB_UI_STAGE=$script:stage")
@@ -123,16 +137,29 @@ try {
    $draft=Value $edit
    if ($draft -and $draft -ne $edit.Current.Name -and $draft -ne $request.prompt) {throw 'CONFLICT'}
    $script:stage='chat-compose-set';[Console]::Error.WriteLine("ACB_UI_STAGE=$script:stage")
+   AssertConversation $request.conversationId
    if ($draft -ne $request.prompt) {SetValue (Document) $composer '' $request.prompt}
    $script:stage='chat-send-button';[Console]::Error.WriteLine("ACB_UI_STAGE=$script:stage")
-   Invoke (Wait {Find (Document) 'Button' '发送'})
+   $send=Wait {Find (Document) 'Button' '发送'}
+   AssertConversation $request.conversationId
+   Invoke $send
+   Respond @{ok=$true;conversationId=(ConversationId)};return
   }
   if ($request.mode -ne 'codex') {
    $script:stage='gpt-reply';[Console]::Error.WriteLine("ACB_UI_STAGE=$script:stage")
-   $body=Wait {if ((Document).Current.Name -ne $request.name) {throw 'PROVENANCE'}; Reply $request.prompt}
-   [Console]::Out.WriteLine((@{ok=$true;body=$body} | ConvertTo-Json -Depth 5 -Compress));exit 0
+   $body=Wait {
+    AssertConversation $request.conversationId
+    if ((Document).Current.Name -ne $request.name) {throw 'PROVENANCE'}
+    $composer=Find (Document) 'Edit' '询问 ChatGPT'
+    if ($composer -and $composer.Current.IsEnabled -and -not (GptBusy)) {
+     $final=Reply $request.prompt
+     AssertConversation $request.conversationId
+     if (-not (GptBusy)) {return $final}
+    }
+   }
+   Respond @{ok=$true;body=$body;conversationId=(ConversationId);completionVerified=$true};return
   }
-  [Console]::Out.WriteLine('{"ok":true}');exit 0
+  Respond @{ok=$true};return
  }
  if ($request.operation -eq 'workspace-create') {
   $script:stage='workspace-dialog'
@@ -166,6 +193,7 @@ try {
  } else {
   if ($request.operation -in @('gpt-create','codex-create')) {
    $script:stage='new-gpt'
+   $initialConversationId=ConversationId
    $edits=$script:root.FindAll([System.Windows.Automation.TreeScope]::Descendants,[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Edit))
    foreach ($edit in $edits) {if (-not $edit.Current.IsOffscreen) {$draft=Value $edit;if ($draft -and $draft -ne $edit.Current.Name) {throw 'CONFLICT'}}}
    if ($request.operation -eq 'codex-create') {
@@ -183,11 +211,20 @@ try {
    if ($toggle.Current.ToggleState -ne [System.Windows.Automation.ToggleState]::On) {$toggle.Toggle()}
    [void](Wait {$current=Find $script:root 'Button' $mode;if (([System.Windows.Automation.TogglePattern]$current.GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern)).Current.ToggleState -eq [System.Windows.Automation.ToggleState]::On) {$true}})
    if ($request.operation -eq 'codex-create') {[void](Wait {Find $script:root 'Button' "更改项目：$($request.projectName)"})}
+   # Initialization also cannot submit into an unidentified page. New chat
+   # creation needs a supported pre-send identity from the application host.
+   $newId=ConversationId
+   if (-not $newId -or $newId -eq $initialConversationId) {throw 'PROVENANCE'}
+   $request | Add-Member -NotePropertyName conversationId -NotePropertyValue $newId -Force
+   AssertConversation $newId
    SetValue $script:root $composer '' $request.prompt
    $script:stage='gpt-send-once'
-   Invoke (Wait {Find $script:root 'Button' '发送'})
+   $send=Wait {Find $script:root 'Button' '发送'}
+   AssertConversation $request.conversationId
+   Invoke $send
    [void](Wait {Find $script:root 'Text' $request.marker})
   } else {
+   AssertConversation $request.conversationId
    if ((Snapshot).title -ne $request.expectedTitle) {throw 'PROVENANCE'}
   }
   $script:stage='gpt-rename'
@@ -198,12 +235,17 @@ try {
   Invoke (Find $rename 'Button' '保存')
   [void](Wait {if ((Document).Current.Name -eq $request.name) {$true}})
  }
- [Console]::Out.WriteLine((@{ok=$true;operation=$request.operation;ordinaryModeObserved=($request.operation -eq 'gpt-create');physicalInput=$false;appActivated=$false} | ConvertTo-Json -Compress))
+ if ($request.operation -ne 'workspace-create') {AssertConversation $request.conversationId}
+ Respond @{ok=$true;conversationId=$request.conversationId;operation=$request.operation;ordinaryModeObserved=($request.operation -eq 'gpt-create');physicalInput=$false;appActivated=$false}
 } catch {
  $code=$_.Exception.Message
  if ($code -notin @('INPUT','OWNER','IO','TIMEOUT','CONFLICT','PROVENANCE')) {$code='EXECUTION'}
- [Console]::Out.WriteLine((@{ok=$false;code=$code;stage=$script:stage;errorType=$_.Exception.GetType().Name;line=$_.InvocationInfo.ScriptLineNumber;privateDiagnosticsOmitted=$true} | ConvertTo-Json -Compress))
+ Respond @{ok=$false;code=$code;stage=$script:stage;errorType=$_.Exception.GetType().Name;line=$_.InvocationInfo.ScriptLineNumber;privateDiagnosticsOmitted=$true}
 } finally {
  if ($locked) {$mutex.ReleaseMutex()}
  if ($mutex) {$mutex.Dispose()}
+ $script:root=$null
 }
+
+}
+while ($null -ne ($inputText=[Console]::In.ReadLine())) {RunRequest ($inputText | ConvertFrom-Json)}

@@ -8,7 +8,7 @@ Hermes 通过飞书协调现有 ChatGPT/Codex：GPT 生成工程 Prompt，Bridge
              ↑                    Bridge / SQLite          ↓
              └──── 通知、实际交付、独立验收 ←───────────────┘
 
-0.2.0 为待验收开发版本。已完成真实隔离 GPT → 原生桌面 Codex → GPT 闭环，过程中需要页面定位、停止生成与对账恢复。**按用户 2026-10-13 要求，创建 Workspace 和普通 GPT 不要求完全静默，允许正常 UIA、目录确认和页面/编辑焦点变化；完全静默不再是这两项创建的验收门槛。** 默认 MCP 仍须接入可信桌面写宿主。实际 GPT 模型/思考强度未知记录 null，不再阻断；真实来源、完整正文、精确会话/消息 ID 和哈希仍须核验。
+0.2.0 为待验收开发版本。已完成真实隔离 GPT → 原生桌面 Codex → GPT 闭环，过程中需要页面定位、停止生成与对账恢复。**按用户 2026-10-13 要求，创建 Workspace 和普通 GPT 不要求完全静默，允许正常 UIA、目录确认和页面/编辑焦点变化；完全静默不再是这两项创建的验收门槛。** 默认 MCP 已改为真正只读；写入仍须接入可信桌面宿主。当前 UIA 页面没有可核验会话 ID，整改后会在发送前拒绝，历史闭环不能当作当前写链路已通过。实际 GPT 模型/思考强度未知记录 null，不再阻断；真实来源、完整正文、精确会话/消息 ID 和哈希仍须核验。
 
 ## 能力与自动化边界
 
@@ -68,28 +68,29 @@ demo 使用唯一临时库与明确 Mock 来源，退出清理，不调用真实
 
 ## Hermes / MCP 接入
 
-    node <项目绝对目录>/dist/mcp.js --config <配置绝对路径> --db <专用数据库绝对路径>
+    node <项目绝对目录>/dist/mcp.js --read-only --config <配置绝对路径> --db <已有专用数据库绝对路径>
 
-stdout 只承载 MCP，安全错误写 stderr。默认入口提供台账和按配置启用的诊断；**真实工作流由可信 Windows 组合根通过 runMcp(args, createHost) 安装宿主**。开关不授予桌面写权，也不能从业务消息加载任意脚本。
+stdout 只承载 MCP，安全错误写 stderr。默认入口只注册 8 个只读工具，以 SQLite readOnly/query_only 打开已有 v5 库，不建库、不迁移、不改 ACL、不启动队列；**真实工作流由可信 Windows 组合根通过 runMcp(args, createHost) 安装宿主**。开关不授予桌面写权，也不能从业务消息加载任意脚本。
 
 受保护启动代码复用既有实现，trusted 必须来自实际宿主，提供本次批准和真实执行者绑定，没有自动批准默认值：
 
     import {
-      runMcp, createWindowsNativeReadTools,
+      runMcp, WindowsNativeUi, createWindowsNativeReadTools,
       createWindowsNativeProjectHost, createWindowsNativeConversationHost,
     } from './dist/host-api.js';
 
     export async function startDesktopBridge(args, trusted) {
       await runMcp(args, ({ config, authority, context }) => {
+        const ui = new WindowsNativeUi(config);
         const native = createWindowsNativeReadTools(
           config, trusted.carrierThreadId, trusted.createCodexThread,
         );
         return {
           projects: createWindowsNativeProjectHost({
-            config, native, authorizeInitialization: trusted.authorizeInitialization,
+            config, native, ui, authorizeInitialization: trusted.authorizeInitialization,
           }),
           ...createWindowsNativeConversationHost({
-            config, native, authorizeUiOperation: trusted.authorizeUiOperation,
+            config, native, ui, authorizeUiOperation: trusted.authorizeUiOperation,
           }),
           executorContext: trusted.bindExecutor(authority, context),
         };
@@ -98,9 +99,21 @@ stdout 只承载 MCP，安全错误写 stderr。默认入口提供台账和按�
 
 carrierThreadId 是现有工具调用上下文，不是角色授权。正式 Codex 创建回调可选，否则走已有 UIA Work 分支。授权绑定本次项目名/目录、会话 ID、动作和事件；一次批准可覆盖明确列出的初始化、生成、执行、反馈和清理，不能保存为永久配置。
 
-[Hermes MCP 样例](config/hermes-mcp.example.yaml) 默认开放 15 个流程工具，诊断按需加入，reviewer 使用单独受保护连接。路径变量替换为实际非秘密路径。同步项目调用预算覆盖五个顺序阶段：120000ms 示例为 630 秒，600000ms 示例为 3030 秒；客户端超时不能触发盲目重发。
+[Hermes MCP 样例](config/hermes-mcp.example.yaml) 使用上述只读入口，开放 8 个查询/诊断工具。写宿主就绪后才能使用原 19 个接口；reviewer 使用单独受保护连接。路径变量替换为实际非秘密路径。同步项目调用预算覆盖五个顺序阶段：120000ms 示例为 630 秒，600000ms 示例为 3030 秒；客户端超时不能触发盲目重发。
 
-WSL Hermes 的管道/UIA 宿主运行在当前登录桌面的 Windows 会话，通过既有合法传输连接。tools/hermes/mcp_probe.py 只验证隔离协议，不是真实写宿主。HermesGatewayAdapter 复用已验证飞书事件和可信项目路由；NotificationDispatcher 持久保存回执，不另起事件消费者。
+WSL Hermes 使用可执行的 Windows Node 绝对路径（WSL 下为 /mnt/c/.../node.exe），入口/配置/库参数使用 Windows 绝对路径，Node >=24.19.0；不要把 Linux Node 当作 Windows UIA 宿主。tools/hermes/mcp_probe.py 只验证隔离协议，不是真实写宿主。HermesGatewayAdapter 复用已验证飞书事件和可信项目路由；NotificationDispatcher 持久保存回执，不另起事件消费者。
+
+2026-10-13 已用现有 Hermes 虚拟环境的 MCP SDK 连接 Windows 编译入口，复用真实 OS 策略，发现 8 个只读工具并回读隔离库登记操作，观察到 HOST_MISSING；没有启动 Hermes Agent/飞书消费者、修改实际 profile 或发送消息。现有业务库 v2 被明确 SCHEMA 拒绝，需部署者备份后显式迁移；本轮未改业务库。实际策略同时赋予 controller/reviewer，写部署前须分离；只读连接没有验收或写工具。
+
+已检查 Hermes 的 MCP trust gate 与 form elicitation：它们能询问用户，但没有现成的受保护 Windows 回调，把批准与本次会话 ID/动作/事件及 executor 绑定。不能把客户端 JSON accept 当作宿主授权。最小写接入条件是受保护 Windows 组合根提供已有 authorizeInitialization/authorizeUiOperation 与 bindExecutor，批准可撤销且限定本次范围，独立 reviewer 分离；本项目不另建认证/RPC 框架。
+
+## 精确会话与完成边界
+
+UIA 只接受公共无障碍 Document Value URI 中完整 /c/<UUID> 路径作为当前页面身份，不读取私有状态。OpenChat 已取消标题导航；现有页面必须先匹配登记 ID，再匹配标题。写入草稿前和提交前均核验 ID。新会话初始化必须先取得不同于原页面的 UI ID，再通过原生新增 ID 基线和 Prompt 对账，身份未知时不提交。当前实机 Document 只有通用 app://…/index.html，477 个控件没有会话 UUID，发送/初始化因此 PROVENANCE；正式宿主 Codex 创建回调和原生只读不受此限制。需要应用公开页面身份或正式导航/发送能力后才能恢复写链路，不能仅凭同名放行。
+
+生成只发送一次，chat-send 不再采集回复；原生最新轮次 completed/idle 后才调用 chat-read-reply。UI 还须普通编辑器就绪、停止按钮及“ChatGPT 正在回应”消失、精确用户 Prompt 对应回复的朗读/更多操作按钮可用；之后重读最终正文，并再次核对原生轮次/助手 ID。合成 completed 或更多操作按钮单独存在均不足。最终正文、哈希、来源 ID 沿用 prompts/feedback 台账；轮次、用户/助手 ID、观察时间和双重完成证据写现有审计/反馈字段，无 schema 变化。未证明完成即进入原 UNCERTAIN/reconciliation，不重发。
+
+这些正向完成路径本轮只经组件测试，当前界面缺 ID，不能宣称实机最终正文已验收。NativeChatMessageHost 已有正式发送/回读及可见正文关联能力；本轮没有改写其 IPC 协议，也不把 content-reference 当完整正文。
 
 ## MCP 工具
 
@@ -156,7 +169,7 @@ WSL Hermes 的管道/UIA 宿主运行在当前登录桌面的 Windows 会话，�
 
 每个 Bridge 进程/Windows 用户会话串行复用一个自有 PowerShell worker，JSON 行和原 JSON-RPC ID 关联请求。新 pipe handle 均核对签名宿主 PID/启动时间；签名/同用户检查只对同一存活进程缓存。超时只结束自有 worker，不重放请求、不动桌面应用。runMcp 在在途操作结束后关闭 worker；直接底层宿主退出时调用 closeNativeReadWorker() 或 NativeReadWorker.close()。
 
-2026-10-13 少量同机只读采样：原两次启动耗时 4583/1628ms，复用冷/热为 3828/219ms，启动数 2→1，59 字节摘要一致、前台未变。只测一次冷/热组合，不是 SLA 或实际 Token Usage；没有遥测服务。App Server 在单次执行内已复用连接读事件和结果，不引入进程池。UIA 操作算法未改，不增加未经批准的写测试。
+2026-10-13 少量同机只读采样：原两次启动耗时 4583/1628ms，复用冷/热为 3828/219ms，启动数 2→1，59 字节摘要一致、前台未变。只测一次冷/热组合，不是 SLA 或实际 Token Usage；没有遥测服务。App Server 在单次执行内已复用连接读事件和结果，不引入进程池。UIA 现复用一个串行自有 Worker，每次重新获取窗口/root/控件并释放 mutex，不缓存 UI 元素。只读测量：初始实验初始化 220ms、查询 188ms；同进程第二次 3ms/51ms，含两次查询的进程总计 906ms。改动后实际调用冷/热 1320ms/53ms，初始化 235ms 仅发生一次、控件查询 225ms/51ms；另一次错误身份检查在导航前 PROVENANCE，零写操作。可调用时现有组合路径约 8–9 次 UIA 调用，未实测整项业务总时长，当前身份阻断不能推算端到端提速。runMcp 退出在途操作后关闭自有 UIA Worker；直接 API 用户调用 closeWindowsNativeUiWorkers() 或 ui.close()。
 
     npm run typecheck
     npm run build
@@ -165,6 +178,8 @@ WSL Hermes 的管道/UIA 宿主运行在当前登录桌面的 Windows 会话，�
     npm run check
     npm audit --audit-level=high
     npm run test:install
+
+37 个帮助命令子进程实测共 5780ms；同一命令集转入既有 CLI 单元测试（35 个直接调用、demo/watch 保留入口进程验证），静态 check 不再重复启动。完整祖先安全扫描保留，未测得收益的 CI/安装矩阵不改。
 
 npm test 已发现全部 Node 测试，包含 e2e/workflow；CI 不再重复同一 e2e 集合。test:e2e 仍可定向执行。干净安装只验证依赖/构建/编译入口/Mock 演练，不重跑源码矩阵。Mock 通过不等于桌面、Hermes/飞书验收。
 
@@ -175,3 +190,5 @@ npm test 已发现全部 Node 测试，包含 e2e/workflow；CI 不再重复同�
 实际源码参考：[WPS 常驻 JSON 行宿主](https://github.com/sueccku/dsh-plugin-wps-office-next/blob/bc69b96fca0c30e63680a151ebf96a093404d2da/host/wps-com-host.ps1)、[mcp-windows 局部查询](https://github.com/sbroenne/mcp-windows/blob/655b9fc92d03ad52a270067c6844ea1231c90559/src/Sbroenne.WindowsMcp/Automation/Tools/UIFindTool.cs)、[FlaUI 批量动作](https://github.com/shanselman/FlaUI-MCP/blob/da1d2a24eae6ccdfbbd40a1375b6617536552351/src/FlaUI.Mcp/Tools/BatchTool.cs)、[winapp Pattern 操作](https://github.com/microsoft/winappCli/blob/96f487615872f7c0e4032e0361856e3109a477e3/src/winapp-CLI/WinApp.Cli/Commands/UiInvokeCommand.cs)、[mcp-compressor 门面转换](https://github.com/atlassian-labs/mcp-compressor/blob/86dc1dfd414d68914d2fbb7b2421420c3f74bbea/python/mcp-compressor/mcp_compressor/transforms.py)。只借鉴原则，不复制/执行源码或引入框架。当前 19 个工具没有证据需要动态 Catalog。
 
 规则见 [PROJECT_RULES](docs/PROJECT_RULES.md)，独立报告用 [验收模板](docs/ACCEPTANCE_TEMPLATE.md)。保留 [MIT LICENSE](LICENSE) 和 [第三方声明](THIRD_PARTY_NOTICES.md)。报告存项目 docs，私有历史不发布，不再写个人文件夹。
+
+默认不新增调研、阶段报告或一次性测试 Markdown；使用说明更新本文、行为更新 CHANGELOG，过程留在 PR/CI。只有用户明确要求才新增独立报告。

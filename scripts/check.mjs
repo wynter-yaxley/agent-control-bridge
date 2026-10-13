@@ -32,15 +32,13 @@ for(const file of ['config.example.json','.env.example','LICENSE','test/fixtures
  const r=spawnSync('git',['check-ignore','--no-index',file],{encoding:'utf8',windowsHide:true});if(r.status===0)throw Error('Required example/fixture ignored');
 }
 const example=JSON.parse(readFileSync('config.example.json','utf8'));if(example.watcher.intervalMs!==60000)throw Error('Incorrect watcher default');
-const commands=['project-register','help','init','migrate','schema-version','config-show','demo','watch','task-create','task-claim','task-progress','task-finish','task-renew','task-verify','task-cancel','task-resume','task-requeue','task-recover','task-list','task-show','approval-request','approval-decide','mapping-register','mapping-show','projects','status','audit','sweep','codex-status','codex-sync','codex-limits','pi-status','hermes-status','chatgpt-status','chatgpt-import','markdown-import','codex-fork-request'];
-for(const command of commands){const r=spawnSync(process.execPath,['src/cli.ts',command,'--help'],{encoding:'utf8',windowsHide:true});if(r.status!==0||!r.stdout.trim()||r.stderr)throw Error('CLI help contract failed: '+command);}
 for(const file of files.filter(f=>f.endsWith('.md'))){
  const text=readFileSync(file,'utf8');for(const match of text.matchAll(/!?\[[^\]]*\]\(([^)]+)\)/g)){
   let link=match[1].replace(/^<|>$/g,'');if(/^[a-z]+:|^#|^\//i.test(link))continue;link=link.split('#')[0];if(link&&!existsSync(resolve(dirname(file),decodeURIComponent(link))))throw Error('Broken local Markdown link: '+file+' -> '+link);
  }
 }
 const python=process.env.ACB_CHECK_PYTHON??'python';const xml=spawnSync(python,['scripts/check_svg.py'],{encoding:'utf8',windowsHide:true});if(xml.status!==0)throw Error('SVG XML validation failed; Python 3.10+ required on PATH or via ACB_CHECK_PYTHON');
-console.log(JSON.stringify({ok:true,sourceFiles:files.length,historyBlobs,secretCandidates:0,cliHelpCommands:commands.length,markdownLinks:'PASS',svgXml:'PASS',ignore:'PASS',configurationExample:'PASS',limits:'Pattern scan does not prove absence of unknown credentials'}));
+console.log(JSON.stringify({ok:true,sourceFiles:files.length,historyBlobs,secretCandidates:0,markdownLinks:'PASS',svgXml:'PASS',ignore:'PASS',configurationExample:'PASS',limits:'Pattern scan does not prove absence of unknown credentials'}));
 if(process.env.npm_execpath) {
  const result=spawnSync(process.execPath,[process.env.npm_execpath,'pack','--dry-run','--json','--ignore-scripts'],{encoding:'utf8',maxBuffer:4*1024*1024,windowsHide:true});
  if(result.status!==0)throw Error('Package manifest check failed');

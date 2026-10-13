@@ -12,7 +12,7 @@ export { ConversationRegistry } from './topology.ts';
 export { ProjectProvisioner } from './project-provisioner.ts';
 export type { ProjectHost, ProjectHostCapabilities, ProjectBundleEvidence, ProjectResources, ProjectOperation } from './project-provisioner.ts';
 export { createOrdinaryChatAdapter } from './ordinary-chat.ts';
-export { createWindowsNativeProjectHost, createWindowsNativeReadTools, createWindowsNativeGptReader, createWindowsNativeConversationHost, WindowsNativeUi } from './windows-native-host.ts';
+export { createWindowsNativeProjectHost, createWindowsNativeReadTools, createWindowsNativeGptReader, createWindowsNativeConversationHost, WindowsNativeUi, closeWindowsNativeUiWorkers } from './windows-native-host.ts';
 export type { WindowsNativeTools, WindowsUiSnapshot } from './windows-native-host.ts';
 export type { OrdinaryChatHost, OrdinaryChatCapabilities } from './ordinary-chat.ts';
 export { NativeChatMessageHost, observeNativeChatMessage } from './native-messages.ts';
