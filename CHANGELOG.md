@@ -4,6 +4,7 @@ Versions follow Semantic Versioning. Development delivery remains pending indepe
 
 ## Unreleased
 
+- User policy on 2026-10-13 permits normal current-instance UI interaction for native Workspace and ordinary GPT creation; fully silent creation is no longer an acceptance requirement. Per-run trusted authorization and existing identity/safety protections remain.
 - Native read-only IPC reuses one serial Bridge-owned PowerShell worker, caches startup/type/signature work for the same live host and verifies every connected pipe identity. Cancellation/shutdown terminates only owned workers, without request replay.
 - MCP descriptions are shorter; execution_result defaults to ID/hash/length summaries with includeContent for complete evidence. Existing names remain stable. Project operations return recorded resources; capabilities expose UI interaction requirements. Hermes defaults to 15 workflow tools with optional diagnostics.
 - Preserve existing-instance UIA project/GPT creation and conversation execution/review. Real GPT provenance, complete message, exact identity and hash remain mandatory; unknown actual model/effort are null and do not block under the latest user policy.

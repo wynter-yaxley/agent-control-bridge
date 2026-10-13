@@ -2,7 +2,7 @@
 
 Hermes coordinates existing signed-in ChatGPT/Codex desktop applications through Feishu. GPT produces engineering prompts; the bridge verifies authentic conversation/message provenance and hashes; Codex executes; GPT reviews results; an independent authorized reviewer accepts delivery.
 
-Each project has a native Codex workspace, one same-name ordinary GPT chat, and registered Codex chats. Version 0.2.0 is development delivery pending acceptance. A real isolated loop completed with UI interaction and recovery. Silent unattended operation and Hermes/Feishu deployment remain unverified. Unknown model/effort values stay null and no longer block authentic prompts.
+Each project has a native Codex workspace, one same-name ordinary GPT chat, and registered Codex chats. Version 0.2.0 is development delivery pending acceptance. A real isolated loop completed with UI interaction and recovery. Under the 2026-10-13 user instruction, workspace and ordinary GPT creation may use normal UIA, directory confirmation and page/editor focus changes; fully silent creation is no longer an acceptance requirement. Hermes/Feishu deployment remains unverified. Unknown model/effort values stay null and no longer block authentic prompts.
 
 ## Install
 
