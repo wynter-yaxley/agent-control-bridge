@@ -4,6 +4,10 @@ Versions follow Semantic Versioning. Development delivery remains pending indepe
 
 ## Unreleased
 
+- Make the release check deterministic: local user paths are matched for any concrete /home or \\Users account (placeholders excepted) instead of only the account running the check. Two reviewed blobs of the published initial import are listed by hash in scripts/check-history-baseline.json and reported as acknowledgedHistory; current-tree or new findings still fail.
+- Record the project holder atomically with PROVISIONING. Reconciling an operation that crashed before any resource receipt (no phase, no resources, no directory) returns it to BLOCKED so the same request can retry; an unexplained directory stays UNCERTAIN.
+- Windows ordinary GPT creation requires the recorded operation key; a random marker could never be verified after restart. The CDP reader maps the worker's zero-selector exit to PROVENANCE instead of an unstructured IO failure.
+- Add an isolated v2 ledger test with committed but un-checkpointed WAL pages: online backup keeps them (a raw main-file copy does not), the backup migrates to v6 with integrity/foreign keys/rows intact, grants no project access, and restores only into new files.
 - Fix cross-process project recovery: bundle verification no longer depends on an in-process GPT ID cache that a restarted Bridge lacks, nor on a UIA conversation ID the current ChatGPT build does not expose. A fresh host re-reads native project/thread membership and the operation's exact ACB_INIT receipt; no GUI, recreation or resend. Foreign same-title chats and Codex threads of other projects stay rejected.
 - UIA title fallback reports the failed worker stage (interactive desktop, ChatGPT process, unique window, document) and treats an empty Document name as unavailable instead of titleOnly. A missing ChatGPT process no longer surfaces as a generic EXECUTION error.
 - Synchronize original RUNNING_OBSERVED completion across task/run/request, check affected rows, and make completed reconciliation avoid duplicate feedback/notifications. Reject unrelated normal RUNNING recovery.

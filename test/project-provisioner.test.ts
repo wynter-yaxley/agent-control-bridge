@@ -159,3 +159,17 @@ test('project reconciliation: lost Codex receipt uses only original host evidenc
   assert.equal(p.get(first.id,f.context).resources!.workspacePath,first.resources!.workspacePath);
  }
 });
+
+test('project reconciliation: a crash before any resource receipt releases the reservation without guessing',async t=>{
+  const f=fixture(t),{promptHash}=await import('../src/prompts.ts'),{processOwner}=await import('../src/db.ts');
+  const root=join(f.root,'workspaces'),path=join(root,'fixture-project'),p=new ProjectProvisioner(f.db,f.authority,{root,timeoutMs:100,host:f.host});
+  const insert=(id:string,key:string,name:string,target:string)=>f.db.prepare("INSERT INTO project_operations(id,principal,event_key,request_hash,project_id,name,root_path,state,owner_token,created_at,updated_at) VALUES(?,'fixture:controller',?,?,?,?,?,'UNCERTAIN','0:dead','2000','2000')").run(id,key,promptHash(JSON.stringify({name,path:target})),`${id}-project`,name,target);
+  insert('never-started','fixture-event','fixture-project',path);
+  assert.equal((await p.reconcile('never-started',f.context)).state,'BLOCKED');assert.equal(f.creates(),0);
+  const ready=await p.prepare('fixture-project','fixture-event',f.context);
+  assert.equal(ready.id,'never-started');assert.equal(ready.state,'READY');assert.equal(f.creates(),1);
+  assert.equal(f.db.prepare('SELECT owner_token FROM project_operations WHERE id=?').get('never-started')!.owner_token,processOwner());
+  // A directory without a saved receipt has unknown ownership and is never released or reused.
+  const other=join(root,'unknown-dir');(await import('node:fs')).mkdirSync(other,{recursive:true});insert('unknown-dir','other-event','unknown-dir',other);
+  await assert.rejects(p.reconcile('unknown-dir',f.context),{code:'PROVENANCE'});assert.equal(p.get('unknown-dir',f.context).state,'UNCERTAIN');
+});

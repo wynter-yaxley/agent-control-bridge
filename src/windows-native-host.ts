@@ -1,7 +1,6 @@
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { win32 } from 'node:path';
-import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { BridgeConfig } from './config.ts';
 import { BridgeError, EXIT_CODES, type ErrorCode } from './errors.ts';
@@ -136,9 +135,11 @@ export function createWindowsNativeProjectHost(options: { config: BridgeConfig; 
       return { appProjectId: project.projectId, workspacePath: project.path };
     },
     async createOrdinaryChat(_appProjectId, name, signal, operationKey) {
+      // Without a recorded operation key the receipt could never be verified after a restart.
+      if(!operationKey)throw new BridgeError('PROVENANCE','A recorded initialization operation key is required');
       const project=(await native.listProjects(signal)).projects.find(item=>item.projectId===_appProjectId && item.label===name);
       if(!project || !await options.authorizeInitialization(name,project.path,signal))throw new BridgeError('AUTH','This new GPT initialization requires target-bound host approval');
-      const key = operationKey ?? randomUUID(), marker = `ACB_INIT_${key}`, prompt = initializationPrompt(key);
+      const key = operationKey, marker = `ACB_INIT_${key}`, prompt = initializationPrompt(key);
       const before = await native.listThreads(signal), baseline = new Set([...before.threads,...before.pinnedThreads].map(item => item.id));
       const observed = await ui.call('gpt-create',{name,prompt,marker},signal);
       if (observed.ordinaryModeObserved !== true) throw new BridgeError('PROVENANCE', 'Ordinary chat mode or pre-send UI identity was not observed');

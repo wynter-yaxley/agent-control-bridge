@@ -84,6 +84,7 @@ test('windows native host: enabled configuration cannot grant UI initialization'
   const native={} as WindowsNativeTools;
   const host=createWindowsNativeProjectHost({config,native,ui,authorizeInitialization:async()=>false});
   await assert.rejects(host.createWorkspace('fixture-project','D:\\fixture',new AbortController().signal),{code:'AUTH'});
+  await assert.rejects(host.createOrdinaryChat('fixture-native','fixture-project',new AbortController().signal),{code:'PROVENANCE'});
   assert.equal(writes,0);
 });
 

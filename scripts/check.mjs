@@ -1,30 +1,27 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { homedir } from 'node:os';
+import { scanText } from './check-rules.mjs';
 const git=(...args)=>{const r=spawnSync('git',args,{encoding:'utf8',maxBuffer:32*1024*1024,windowsHide:true});if(r.status!==0)throw Error('Git check failed');return r.stdout;};
 const split=text=>text.split('\0').filter(Boolean);
 const files=split(git('ls-files','--cached','--others','--exclude-standard','-z')).filter(file=>existsSync(file));
-const patterns={
- privateKey:/-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----/,
- githubToken:/\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{40,})\b/,
- providerKey:/\bsk-(?:proj-|ant-)?[A-Za-z0-9_-]{32,}\b/,
- jwt:/\beyJ[A-Za-z0-9_-]{15,}\.[A-Za-z0-9_-]{15,}\.[A-Za-z0-9_-]{15,}\b/,
- localIdentifier:/\b(?:LAPTOP|DESKTOP)-[A-Z0-9]+\b/,
-};
-const username=homedir().split(/[\\/]/).at(-1);
 const violations=[];
-function scan(path,text,scope){
- for(const [kind,pattern]of Object.entries(patterns))if(pattern.test(text))violations.push({path,kind,scope});
- const userPath=username?.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
- if(userPath && new RegExp(`(?:[\\\\/]Users[\\\\/]|[\\\\/]home[\\\\/])${userPath}(?:[\\\\/]|["'])`,'i').test(text))violations.push({path,kind:'localUserPath',scope});
- if(/^(data|node_modules|dist|coverage|exports?|tmp|temp|profiles|browser-profile)\//.test(path)||/\.(db|sqlite3?)(-wal|-shm)?$|\.log$|(?:^|\/)\.env(?:$|\.(?!example$))|(?:^|\/)caller-policy\.json$|(?:^|\/)\.bridge\.config\.json$/.test(path))violations.push({path,kind:'privatePath',scope});
+// Published history cannot be rewritten. Only these exact reviewed blobs are
+// reported as acknowledged; any other or current-tree finding still fails.
+const baseline=JSON.parse(readFileSync(new URL('./check-history-baseline.json',import.meta.url),'utf8'));
+const headBlobs=new Set(split(git('ls-tree','-r','-z','HEAD')).map(row=>/^\d+ blob ([a-f0-9]+)\t/.exec(row)?.[1]));
+const acknowledged=[];
+function scan(path,text,scope,blob){
+ for(const kind of scanText(path,text)){
+  const known=scope==='history' && !headBlobs.has(blob) && baseline.some(entry=>entry.blob===blob && entry.path===path && entry.kind===kind);
+  (known?acknowledged:violations).push({path,kind,scope,...(blob?{blob}:{})});
+ }
 }
 for(const file of files){if(!existsSync(file))continue;const data=readFileSync(file);if(data.includes(0))throw Error('Unexpected binary source file');scan(file,data.toString('utf8'),'working-tree');}
 let historyBlobs=0;const seen=new Set();
 // Scan the complete ancestry being published; other local branches are not pushed.
 for(const commit of git('rev-list','HEAD').trim().split('\n').filter(Boolean)){
- for(const row of split(git('ls-tree','-r','-z',commit))){const match=/^\d+ blob ([a-f0-9]+)\t(.*)$/s.exec(row);if(!match||seen.has(match[1]))continue;seen.add(match[1]);historyBlobs++;scan(match[2],git('show',match[1]),'history');}
+ for(const row of split(git('ls-tree','-r','-z',commit))){const match=/^\d+ blob ([a-f0-9]+)\t(.*)$/s.exec(row);if(!match||seen.has(match[1]))continue;seen.add(match[1]);historyBlobs++;scan(match[2],git('show',match[1]),'history',match[1]);}
 }
 if(violations.length){console.error(JSON.stringify({ok:false,violations}));process.exit(1);}
 for(const file of ['data/check.db','data/check.db-wal','data/check.db-shm','local.sqlite3','local.sqlite3-wal','local.sqlite3-shm','.env','.env.local','.bridge.config.json','node_modules/x','dist/x','coverage/x','tools/desktop/__pycache__/x.pyc','tools/desktop/.venv/x','profiles/x','exports/x','x.log'])if(!git('check-ignore','--no-index',file).trim())throw Error('Ignore protection missing');
@@ -38,7 +35,7 @@ for(const file of files.filter(f=>f.endsWith('.md'))){
  }
 }
 const python=process.env.ACB_CHECK_PYTHON??'python';const xml=spawnSync(python,['scripts/check_svg.py'],{encoding:'utf8',windowsHide:true});if(xml.status!==0)throw Error('SVG XML validation failed; Python 3.10+ required on PATH or via ACB_CHECK_PYTHON');
-console.log(JSON.stringify({ok:true,sourceFiles:files.length,historyBlobs,secretCandidates:0,markdownLinks:'PASS',svgXml:'PASS',ignore:'PASS',configurationExample:'PASS',limits:'Pattern scan does not prove absence of unknown credentials'}));
+console.log(JSON.stringify({ok:true,sourceFiles:files.length,historyBlobs,acknowledgedHistory:acknowledged,secretCandidates:0,markdownLinks:'PASS',svgXml:'PASS',ignore:'PASS',configurationExample:'PASS',limits:'Pattern scan does not prove absence of unknown credentials'}));
 if(process.env.npm_execpath) {
  const result=spawnSync(process.execPath,[process.env.npm_execpath,'pack','--dry-run','--json','--ignore-scripts'],{encoding:'utf8',maxBuffer:4*1024*1024,windowsHide:true});
  if(result.status!==0)throw Error('Package manifest check failed');

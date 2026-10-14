@@ -15,15 +15,18 @@ test('v3 notifications are preserved by an explicit v5 migration',t=>{
  const before=readFileSync(path);assert.throws(()=>createDb({dbPath:path}),/explicitly/);assert.deepEqual(readFileSync(path),before);
  db=createDb({dbPath:path,allowMigrations:true});try{assert.equal(db.prepare('PRAGMA user_version').get()!.user_version,6);assert.equal(db.prepare('SELECT state FROM notification_outbox WHERE id=?').get('kept-notice')!.state,'PENDING');assert.equal(db.prepare('SELECT COUNT(*) n FROM notification_delivery').get()!.n,0);assert.ok(db.prepare('PRAGMA table_info(execution_runs)').all().some(column=>column.name==='result_json'));assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(),[]);}finally{db.close();}
 });
-test('v2 to current requires explicit migration and preserves existing project, mapping and task data',t=>{
- const root=temporary(t),path=join(root,'v2.db');let db=createDb({dbPath:path});
+// Builds an isolated v2-layout ledger with one project, mapping and task; never a business database.
+function legacyV2(path: string) {
+ const db=createDb({dbPath:path});
  try{
   db.exec("INSERT INTO projects(id,name,root_path,kind,created_at,updated_at) VALUES('kept-project','Kept project','fixture-root','fixture','2000-01-01','2000-01-01'); INSERT INTO conversation_workspaces(project_id,workspace_path,workspace_key,chatgpt_conversation_id,chatgpt_conversation_name,registered_at) VALUES('kept-project','fixture-root','fixture-root','kept-gpt','Kept project','2000-01-01'); INSERT INTO codex_conversations(conversation_id,project_id) VALUES('kept-codex','kept-project'); INSERT INTO tasks(id,kind,title,status,project_id,created_at,updated_at) VALUES('kept-task','fixture','Kept task','QUEUED','kept-project','2000-01-01','2000-01-01');");
-  // Reduce this isolated fixture to the pre-existing v2 layout, never a business database.
   db.exec('PRAGMA foreign_keys=OFF; ALTER TABLE tasks DROP COLUMN execution_prompt_id; ALTER TABLE conversation_workspaces DROP COLUMN app_project_id; ALTER TABLE watcher_notifications DROP COLUMN delivered_at;');
   for(const table of ['notification_delivery','execution_events','execution_runs','background_requests','prompt_dispatches','prompt_generation_ops','project_access','project_operations','notification_outbox'])db.exec(`DROP TABLE ${table}`);
   db.exec('ALTER TABLE conversation_workspaces DROP COLUMN default_codex_conversation_id; PRAGMA user_version=2');
  }finally{db.close();}
+}
+test('v2 to current requires explicit migration and preserves existing project, mapping and task data',t=>{
+ const root=temporary(t),path=join(root,'v2.db');let db;legacyV2(path);
  const before=readFileSync(path);assert.throws(()=>createDb({dbPath:path}),/explicitly/);assert.deepEqual(readFileSync(path),before);
  db=createDb({dbPath:path,allowMigrations:true});
  try{
@@ -97,6 +100,40 @@ test('isolated subprocess retains OS ACL runtime while excluding arbitrary envir
  writeFileSync(script,`import {createDb} from ${JSON.stringify(new URL('../src/db.ts',import.meta.url).href)};try{const db=createDb({dbPath:process.argv[2]});try{console.log(JSON.stringify({schema:db.prepare('PRAGMA user_version').get().user_version,extraEnvironmentAbsent:process.env[process.argv[3]]===undefined}));}finally{db.close();}}catch(error){console.log(JSON.stringify({aclError:/^Cannot restrict NTFS ACL; database access refused \\(phase=(startup|entered|read|rules|apply|verify|done)\\)$/.test(error.message)?error.message:'Isolated database probe failed'}));}`);
  const result=await silentProcess('isolated-acl',process.execPath,[script,path,key],{timeoutMs:30000});
  assert.ok(result.ok,result.summary);assert.deepEqual(JSON.parse(result.stdout!),{schema:6,extraEnvironmentAbsent:true});
+});
+
+test('v2 ledger with uncheckpointed WAL: online backup -> migrated copy -> restore to a new file only',async t=>{
+ const root=temporary(t),source=join(root,'data','v2.db'),raw=join(root,'raw','v2.db'),copy=join(root,'backup','v2.db'),restored=join(root,'restore','v2.db');
+ const {backupDatabase,restoreDatabase}=await import('../src/db.ts'),{copyFileSync,mkdirSync,statSync}=await import('node:fs');
+ legacyV2(source);
+ const live=new DatabaseSync(source);
+ try{
+  // A committed task and Prompt stay only in the WAL while this writer is open.
+  live.exec("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; INSERT INTO tasks(id,kind,title,status,project_id,created_at,updated_at) VALUES('wal-task','fixture','WAL task','QUEUED','kept-project','2000','2000'); INSERT INTO prompts(id,task_id,source,requested_model,requested_reasoning,generated_at,prompt_hash,content,verified,delivery_status,source_conversation_id,codex_conversation_id) VALUES('wal-prompt','wal-task','mock-chatgpt','fixture','fixture','2000','fixture-hash','[TEST] prompt',1,'PENDING','kept-gpt','kept-codex');");
+  assert.ok(statSync(source+'-wal').size>0);
+  mkdirSync(join(root,'raw'));copyFileSync(source,raw);
+  const stale=new DatabaseSync(raw,{readOnly:true});
+  try{assert.equal(stale.prepare("SELECT COUNT(*) n FROM tasks WHERE id='wal-task'").get()!.n,0);}finally{stale.close();}
+  const before=readFileSync(source);
+  await backupDatabase(source,copy);
+  assert.deepEqual(readFileSync(source),before);
+ }finally{live.close();}
+ // Restore is verified from the unmigrated backup into a fresh ledger.
+ await restoreDatabase(copy,restored);
+ const view=new DatabaseSync(restored,{readOnly:true});
+ try{assert.equal(view.prepare('PRAGMA user_version').get()!.user_version,2);assert.equal(view.prepare("SELECT COUNT(*) n FROM prompts WHERE id='wal-prompt'").get()!.n,1);}finally{view.close();}
+ const migrated=createDb({dbPath:copy,allowMigrations:true});
+ try{
+  assert.equal(migrated.prepare('PRAGMA user_version').get()!.user_version,6);
+  assert.equal(migrated.prepare('PRAGMA integrity_check').get()!.integrity_check,'ok');assert.deepEqual(migrated.prepare('PRAGMA foreign_key_check').all(),[]);
+  assert.deepEqual(migrated.prepare('SELECT id,status FROM tasks ORDER BY id').all().map(row=>({...row})),[{id:'kept-task',status:'QUEUED'},{id:'wal-task',status:'QUEUED'}]);
+  assert.equal(migrated.prepare('SELECT content FROM prompts WHERE task_id=?').get('wal-task')!.content,'[TEST] prompt');
+  const mapping=migrated.prepare('SELECT * FROM conversation_workspaces').get()!;
+  assert.equal(mapping.chatgpt_conversation_id,'kept-gpt');assert.equal(mapping.app_project_id,null);assert.equal(mapping.default_codex_conversation_id,'kept-codex');
+  // Structural migration grants no controller access or native project identity.
+  assert.equal(migrated.prepare('SELECT COUNT(*) n FROM project_access').get()!.n,0);
+ }finally{migrated.close();}
+ await assert.rejects(restoreDatabase(copy,restored),{code:'CONFLICT'});await assert.rejects(backupDatabase(copy,source),{code:'CONFLICT'});
 });
 
 test('online backup includes WAL and restore refuses an existing ledger',async t=>{

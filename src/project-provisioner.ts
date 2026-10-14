@@ -62,6 +62,13 @@ export class ProjectProvisioner {
     let resources:Partial<ProjectResources>={...operation.resources,initializationKey:operation.resources?.initializationKey ?? id};
     const row=this.db.prepare('SELECT owner_token,phase FROM project_operations WHERE id=?').get(id)!;
     if(ownerAlive(row.owner_token as string | null)===true && row.owner_token!==processOwner())throw new BridgeError('CONFLICT','The original project holder is still alive');
+    // Resources are saved before any native effect, so none means none started.
+    // A directory without a saved receipt has unknown ownership and stays uncertain.
+    if(operation.resources===null && row.phase===null) {
+      if(existsSync(operation.workspacePath))throw new BridgeError('PROVENANCE','Workspace directory exists without a recorded creation receipt');
+      if(this.db.prepare("UPDATE project_operations SET state='BLOCKED',updated_at=? WHERE id=? AND state='UNCERTAIN' AND resources IS NULL AND phase IS NULL").run(now(),id).changes!==1)throw new BridgeError('CONFLICT','Project operation changed');
+      return this.get(id, context);
+    }
     if(row.phase && !['workspace.done','gpt.done','codex.done','verify'].includes(String(row.phase))) {
       if(!this.host.observePartial)throw new BridgeError('PROVENANCE','Incomplete resources cannot be recreated during reconciliation');
       resources=await withDeadline(signal=>this.host!.observePartial!(resources,String(row.phase),signal),this.timeoutMs);
@@ -89,16 +96,16 @@ export class ProjectProvisioner {
     const existing = this.db.prepare('SELECT * FROM project_operations WHERE principal=? AND event_key=?').get(caller.principal, eventKey);
     if (existing && existing.request_hash !== fingerprint) throw new BridgeError('CONFLICT', 'Project request key was reused');
     if (existing && !(existing.state === 'BLOCKED' && existing.resources === null && this.host)) return this.get(String(existing.id), context);
-    const id = existing ? String(existing.id) : uuid();
+    const id = existing ? String(existing.id) : uuid(), owner = processOwner();
+    // The holder is recorded atomically with PROVISIONING so a crash is always attributable.
     transaction(this.db, () => {
       this.assertGuiFree(id);
       if (!existing) {
         const pathKey = process.platform === 'win32' ? path.toLowerCase() : path;
         if (this.db.prepare('SELECT 1 FROM project_operations WHERE root_path=?').get(pathKey)) throw new BridgeError('CONFLICT', 'Workspace is already reserved');
-        this.db.prepare("INSERT INTO project_operations(id,principal,event_key,request_hash,project_id,name,root_path,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,'PROVISIONING',?,?)").run(id, caller.principal, eventKey, fingerprint, uuid(), name, pathKey, now(), now());
-      } else if (this.db.prepare("UPDATE project_operations SET state='PROVISIONING',error_code=NULL,updated_at=? WHERE id=? AND state='BLOCKED' AND resources IS NULL").run(now(), id).changes !== 1) throw new BridgeError('CONFLICT', 'Project operation changed');
+        this.db.prepare("INSERT INTO project_operations(id,principal,event_key,request_hash,project_id,name,root_path,state,owner_token,created_at,updated_at) VALUES(?,?,?,?,?,?,?,'PROVISIONING',?,?,?)").run(id, caller.principal, eventKey, fingerprint, uuid(), name, pathKey, owner, now(), now());
+      } else if (this.db.prepare("UPDATE project_operations SET state='PROVISIONING',owner_token=?,error_code=NULL,updated_at=? WHERE id=? AND state='BLOCKED' AND resources IS NULL").run(owner, now(), id).changes !== 1) throw new BridgeError('CONFLICT', 'Project operation changed');
     });
-    this.db.prepare('UPDATE project_operations SET owner_token=? WHERE id=?').run(processOwner(),id);
     let effectsStarted = false;
     try {
       if (!this.host) throw new BridgeError('UNSUPPORTED', 'No authorized ordinary GPT project host is installed');
