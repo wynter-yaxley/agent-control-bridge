@@ -41,7 +41,7 @@ test('MCP: actual client handshake, tools discovery, blocked creation and strict
   const tools = (await client.listTools()).tools.map(tool => tool.name);
   assert.ok(tools.includes('acb_request_submit')); assert.ok(tools.includes('acb_notifications_ack')); assert.ok(!tools.some(name => /prompt_import|source_register|browser/.test(name)));
   assert.ok(tools.includes('acb_codex_target_check'));
-  for (const name of ['acb_project_adopt','acb_approvals_pending','acb_approval_decide']) assert.ok(tools.includes(name), name);
+  for (const name of ['acb_project_adopt','acb_approvals_pending','acb_approval_decide','acb_project_attach_codex','acb_project_restart_workspace']) assert.ok(tools.includes(name), name);
   assert.ok(tools.includes('acb_native_target_check'));
   assert.ok(tools.includes('acb_gpt_read')); assert.ok(tools.includes('acb_execution_result')); assert.ok(tools.includes('acb_execution_review'));
   assert.ok(tools.includes('acb_project_reconcile'));

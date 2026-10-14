@@ -37,6 +37,16 @@ export function createWindowsNativeReadTools(config: BridgeConfig, carrierThread
     readThread: (id,signal) => client(signal).readConversationPage(id), createCodexThread };
 }
 
+type NativeInventory = Awaited<ReturnType<WindowsNativeTools['listThreads']>>;
+/** list_threads returns only a bounded recent window. A recorded ID outside it
+ * is read exactly, and its fields count only if that read names the same thread. */
+export async function findNativeThread(native: WindowsNativeTools, id: string, signal: AbortSignal, inventory?: NativeInventory): Promise<NativeInventory['threads'][number] | undefined> {
+  const listed = inventory ?? await native.listThreads(signal), row = [...listed.threads, ...listed.pinnedThreads].find(item => item.id === id);
+  if (row) return row;
+  const thread = (await native.readThread(id, signal)).thread;
+  return thread.id === id ? { id: thread.id, kind: thread.kind, title: thread.title, projectId: thread.projectId ?? null, cwd: thread.cwd } : undefined;
+}
+
 /** Fixed OS control operations. There is no public arbitrary UI/RPC tool. */
 const uiWorkers = new Set<WindowsNativeUi>();
 export const closeWindowsNativeUiWorkers = () => { for (const worker of uiWorkers) worker.close(); };
@@ -153,6 +163,12 @@ export function createWindowsNativeProjectHost(options: { config: BridgeConfig; 
       },signal);
       return { appProjectId: project.projectId, workspacePath: project.path };
     },
+    async verifyCodexMember(input, signal) {
+      const project = (await native.listProjects(signal)).projects.find(item => item.projectId === input.appProjectId);
+      if (!project || project.projectKind !== 'local' || project.hostId !== 'local' || pathKey(project.path) !== pathKey(input.workspacePath)) throw new BridgeError('PROVENANCE', 'Recorded native workspace is missing or has moved');
+      const thread = await findNativeThread(native, input.conversationId, signal);
+      if (!thread || thread.kind !== 'codex' || thread.projectId !== input.appProjectId || !thread.cwd || pathKey(thread.cwd) !== pathKey(input.workspacePath)) throw new BridgeError('PROVENANCE', 'Conversation is not a Codex member of this native workspace and directory');
+    },
     async nativeWorkspaces(path, signal) {
       return (await native.listProjects(signal)).projects.filter(item => pathKey(item.path) === pathKey(path)).map(item => ({ projectId: item.projectId, label: item.label }));
     },
@@ -198,7 +214,7 @@ export function createWindowsNativeProjectHost(options: { config: BridgeConfig; 
       if(phase==='codex.extra')throw new BridgeError('UNSUPPORTED','Formal Codex creation has no durable operation-to-thread receipt; do not infer an ID from titles or resend');
       if(phase==='codex') {
         if(!resources.codexConversationId)throw new BridgeError('UNSUPPORTED','Formal Codex creation has no durable operation-to-thread receipt; do not infer an ID from titles or resend');
-        const inventory=await native.listThreads(signal),thread=[...inventory.threads,...inventory.pinnedThreads].find(item=>item.id===resources.codexConversationId);
+        const thread=await findNativeThread(native,resources.codexConversationId,signal);
         if(!thread || thread.kind!=='codex' || thread.projectId!==resources.appProjectId || !thread.cwd || pathKey(thread.cwd)!==pathKey(resources.workspacePath!))throw new BridgeError('PROVENANCE','Recorded Codex receipt has different native membership');
         return resources;
       }
@@ -216,8 +232,8 @@ export function createWindowsNativeProjectHost(options: { config: BridgeConfig; 
     // the recorded Codex threads' membership, then must match path and name; a
     // name alone never selects a project.
     async verifyExisting(input,signal) {
-      const projects=(await native.listProjects(signal)).projects,inventory=await native.listThreads(signal),threads=[...inventory.threads,...inventory.pinnedThreads];
-      const members=input.codexConversationIds.map(id=>threads.find(item=>item.id===id));
+      const projects=(await native.listProjects(signal)).projects,inventory=await native.listThreads(signal),members=[];
+      for(const id of input.codexConversationIds)members.push(await findNativeThread(native,id,signal,inventory));
       const appProjectId=members[0]?.projectId;
       if(!appProjectId || members.some(item=>!item || item.kind!=='codex' || item.projectId!==appProjectId || !item.cwd || pathKey(item.cwd)!==pathKey(input.workspacePath)))throw new BridgeError('PROVENANCE','Recorded Codex conversations do not share this native workspace');
       const project=projects.find(item=>item.projectId===appProjectId);
@@ -231,10 +247,11 @@ export function createWindowsNativeProjectHost(options: { config: BridgeConfig; 
     async verifyBundle(resources,signal) {
       if(!resources.initializationKey)throw new BridgeError('PROVENANCE','Original initialization identity was not recorded');
       const projects=await native.listProjects(signal), threads=await native.listThreads(signal), chat=await native.readThread(resources.chatgptConversationId,signal);
-      const all=[...threads.threads,...threads.pinnedThreads],project=projects.projects.find(item=>item.projectId===resources.appProjectId), codex=all.find(item=>item.id===resources.codexConversationId);
+      const project=projects.projects.find(item=>item.projectId===resources.appProjectId), codex=await findNativeThread(native,resources.codexConversationId,signal,threads);
       // Every additional Codex conversation must be a distinct member of the same workspace.
-      const extras=resources.extraCodexConversationIds ?? [];
-      if(new Set([resources.codexConversationId,...extras]).size!==extras.length+1 || extras.some(id=>{const item=all.find(thread=>thread.id===id);return !item || item.kind!=='codex' || item.projectId!==resources.appProjectId || !item.cwd || pathKey(item.cwd)!==pathKey(resources.workspacePath);}))
+      const extras=resources.extraCodexConversationIds ?? [],members=[];
+      for(const id of extras)members.push(await findNativeThread(native,id,signal,threads));
+      if(new Set([resources.codexConversationId,...extras]).size!==extras.length+1 || members.some(item=>!item || item.kind!=='codex' || item.projectId!==resources.appProjectId || !item.cwd || pathKey(item.cwd)!==pathKey(resources.workspacePath)))
         throw new BridgeError('PROVENANCE','Additional Codex conversations are missing, duplicated or belong elsewhere');
       if (!project || project.projectKind!=='local' || project.hostId!=='local' || project.label!==resources.name || pathKey(project.path)!==pathKey(resources.workspacePath) ||
           !codex || codex.kind!=='codex' || codex.projectId!==resources.appProjectId || !codex.cwd || pathKey(codex.cwd)!==pathKey(resources.workspacePath) || chat.thread.id!==resources.chatgptConversationId || chat.thread.kind!=='chatgpt' || chat.thread.title!==resources.name) throw new BridgeError('PROVENANCE','Native bundle identity, directory, name or Codex membership differs');
@@ -334,7 +351,7 @@ export function createWindowsNativeConversationHost(options: {
   const executor: BackgroundExecutor = {
     mode:'codex-desktop',
     async inspect(target,signal) {
-      const inventory=await native.listThreads(signal),thread=inventory.threads.find(item=>item.id===target.codexConversationId);
+      const thread=await findNativeThread(native,target.codexConversationId,signal);
       const project=(await native.listProjects(signal)).projects.find(item=>item.projectId===thread?.projectId);
       if(!thread || thread.kind!=='codex' || !thread.cwd || !project || project.projectKind!=='local' || project.hostId!=='local' || pathKey(thread.cwd)!==pathKey(target.workspacePath) || pathKey(project.path)!==pathKey(target.workspacePath)) throw new BridgeError('PROVENANCE','Native Codex project and workspace do not match');
       return {source:'codex-app-state',conversationId:thread.id,appProjectId:project.projectId,workspacePath:project.path,local:true};

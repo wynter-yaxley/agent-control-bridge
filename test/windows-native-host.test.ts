@@ -184,3 +184,17 @@ test('windows native host: two Codex conversations are distinct members of the n
   assert.deepEqual(await host.nativeWorkspaces!(ready.resources!.workspacePath!.toUpperCase(),signal),[{projectId:appProjectId,label:'two-codex'}]);
   assert.equal(desktop.load().creates.workspace,1);
 });
+
+test('windows native host: recorded threads outside the recent inventory window are read exactly, never assumed',async()=>{
+  const config=defaults(),signal=new AbortController().signal;let read:Record<string,unknown>={id:'old-codex',kind:'codex',title:'legacy Codex',status:{type:'idle'},projectId:'native-old',cwd:'D:\\old'};
+  const native:WindowsNativeTools={listProjects:async()=>({projects:[{projectId:'native-old',projectKind:'local',hostId:'local',label:'old',path:'D:\\old'}]}),
+    listThreads:async()=>({threads:[],pinnedThreads:[]}),readThread:async()=>({thread:read,turns:[]}) as unknown as Awaited<ReturnType<WindowsNativeTools['readThread']>>};
+  const host=createWindowsNativeProjectHost({config,native,authorizeInitialization:async()=>false});
+  await host.verifyCodexMember!({appProjectId:'native-old',workspacePath:'d:\\OLD',conversationId:'old-codex'},signal);
+  const {executor}=createWindowsNativeConversationHost({config,native,authorizeUiOperation:async()=>false});
+  assert.equal((await executor.inspect({codexConversationId:'old-codex',workspacePath:'D:\\old'},signal)).appProjectId,'native-old');
+  for(const change of [{projectId:'native-other'},{cwd:'D:\\elsewhere'},{kind:'chatgpt'},{id:'different-id'},{projectId:undefined}]) {
+    read={id:'old-codex',kind:'codex',title:'legacy Codex',status:{type:'idle'},projectId:'native-old',cwd:'D:\\old',...change};
+    await assert.rejects(host.verifyCodexMember!({appProjectId:'native-old',workspacePath:'D:\\old',conversationId:'old-codex'},signal),{code:'PROVENANCE'},JSON.stringify(change));
+  }
+});

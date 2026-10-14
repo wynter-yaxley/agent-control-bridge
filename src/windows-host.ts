@@ -9,14 +9,14 @@ import {createDb} from './db.ts';
 import {BackgroundBridge,type BackgroundHostBindings} from './background.ts';
 import {runMcp} from './mcp.ts';
 import {createCodexAppServerExecutor} from './codex-app-server.ts';
-import {createWindowsNativeReadTools,closeWindowsNativeUiWorkers,createWindowsNativeProjectHost,WindowsNativeUi,type WindowsNativeTools} from './windows-native-host.ts';
-import {createLedgerCodexApproval} from './trusted-host.ts';
+import {createWindowsNativeReadTools,closeWindowsNativeUiWorkers,createWindowsNativeProjectHost,findNativeThread,WindowsNativeUi,type WindowsNativeTools} from './windows-native-host.ts';
+import {createLedgerCodexApproval,createLedgerInitializationApproval} from './trusted-host.ts';
 import {DatabaseSync} from 'node:sqlite';
 import {existsSync} from 'node:fs';
 import {connect} from 'node:net';
 import {SCHEMA_VERSION} from './migrations.ts';
 import type {BridgeConfig} from './config.ts';
-import {closeNativeReadWorker} from './native-readonly.ts';
+import {closeNativeReadWorker,NativeDesktopReadClient} from './native-readonly.ts';
 import {BridgeError,classifyError,EXIT_CODES} from './errors.ts';
 
 const POLICY=fileURLToPath(new URL('../config/caller-policy.json',import.meta.url));
@@ -27,13 +27,15 @@ type HostServices={config:BridgeConfig;authority:CallerAuthority;context:CallerC
  * back), and for a controller only the executor its policy entry delegates,
  * with ledger approvals decided by an independent reviewer. No GUI approval. */
 export function policyBindings(services:HostServices,native?:WindowsNativeTools,policyPath=POLICY):BackgroundHostBindings {
-  const bindings:BackgroundHostBindings={};
+  const bindings:BackgroundHostBindings={},controller=services.authority.resolve(services.context)?.controller===true;
   if(native) {
-    const host=createWindowsNativeProjectHost({config:services.config,native,authorizeInitialization:async()=>false});
-    // Report creation as unavailable so prepare blocks before any approval prompt.
-    bindings.projects={...host,inspect:async signal=>({...await host.inspect(signal),createWorkspace:false,createOrdinaryChat:false})};
+    // Creation needs desktop.enabled and an independent reviewer's ledger approval;
+    // otherwise the host only reads back (reconcile/adopt/attach) and refuses creation.
+    const creation=controller && services.config.desktop.enabled;
+    const host=createWindowsNativeProjectHost({config:services.config,native,authorizeInitialization:creation?createLedgerInitializationApproval({db:services.db,authority:services.authority,controller:services.context,timeoutMs:services.config.background.timeoutMs}):async()=>false});
+    bindings.projects=creation?host:{...host,inspect:async signal=>({...await host.inspect(signal),createWorkspace:false,createOrdinaryChat:false})};
   }
-  if(!services.authority.resolve(services.context)?.controller)return bindings;
+  if(!controller)return bindings;
   const executorContext=delegatedExecutor(services.authority,policyPath,services.context);
   if(executorContext)Object.assign(bindings,{executorContext,approveCodex:createLedgerCodexApproval({db:services.db,authority:services.authority,executor:executorContext,timeoutMs:services.config.background.timeoutMs})});
   return bindings;
@@ -63,7 +65,9 @@ async function preflight(parsed:{config?:string;db?:string;'carrier-thread'?:str
   await step('cdp',async()=>{const open=await listening(config.desktop.cdpUrl);if(!open)blockers.push('CDP_UNAVAILABLE');return {listening:open};});
   await step('uia',async()=>{const ui=new WindowsNativeUi(config);try{return await ui.call('uia-diagnose',{name:''},new AbortController().signal);}finally{ui.close();}});
   if(parsed['carrier-thread'])await step('native',async()=>{const tools=createWindowsNativeReadTools(config,parsed['carrier-thread']!),signal=new AbortController().signal;
-    try{const projects=await tools.listProjects(signal),threads=await tools.listThreads(signal);return {projects:projects.projects.length,threads:threads.threads.length+threads.pinnedThreads.length};}finally{closeNativeReadWorker();}});
+    // Tool names only: shows whether the host advertises any formal creation tool.
+    try{const catalogTools=(await new NativeDesktopReadClient({carrierThreadId:parsed['carrier-thread']!,...config.nativeInterface,signal}).catalog()).map(tool=>tool.name);
+      const projects=await tools.listProjects(signal),threads=await tools.listThreads(signal);return {catalogTools,projects:projects.projects.length,threads:threads.threads.length+threads.pinnedThreads.length,recentThreadWindow:30};}finally{closeNativeReadWorker();}});
   else blockers.push('CARRIER_THREAD_MISSING');
   process.stdout.write(JSON.stringify({...report,blockers})+'\n');
 }
@@ -83,7 +87,7 @@ export async function runWindowsHost(args:string[],trusted?: (services:Parameter
     // context issued by the real trusted delegation host, never a synthetic SID.
     if(!bindings.executor && native && bindings.executorContext && services.config.agents.codex.executable && services.config.agents.codex.model && services.config.agents.codex.reasoningEffort) {
       const inspect=async(target:DeliveryTarget,signal:AbortSignal)=>{
-        const inventory=await native.listThreads(signal),item=[...inventory.threads,...inventory.pinnedThreads].find(t=>t.id===target.codexConversationId);
+        const item=await findNativeThread(native,target.codexConversationId,signal);
         const project=(await native.listProjects(signal)).projects.find(p=>p.projectId===item?.projectId);
         if(!item || item.kind!=='codex' || !project || project.projectKind!=='local' || project.hostId!=='local' || !item.cwd || win32.normalize(item.cwd).toLowerCase()!==win32.normalize(target.workspacePath).toLowerCase() || win32.normalize(project.path).toLowerCase()!==win32.normalize(target.workspacePath).toLowerCase())throw new BridgeError('PROVENANCE','Native Codex thread/project/directory membership differs');
         return {source:'codex-app-state' as const,local:true,conversationId:item.id,appProjectId:project.projectId,workspacePath:project.path};

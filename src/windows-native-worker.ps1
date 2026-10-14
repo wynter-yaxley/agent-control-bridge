@@ -272,21 +272,24 @@ try {
   [void](Wait {if (-not (Find $script:root 'Window' '信任此文件夹吗？')) {$true}})
  } else {
   if ($request.operation -eq 'gpt-create') {
-   $script:stage='new-gpt'
+   Stage 'gpt-draft-check' 'Edit:visible drafts'
    $initialConversationId=ConversationId
    $edits=$script:root.FindAll([System.Windows.Automation.TreeScope]::Descendants,[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Edit))
    foreach ($edit in $edits) {if (-not $edit.Current.IsOffscreen) {$draft=Value $edit;if ($draft -and $draft -ne $edit.Current.Name) {throw 'CONFLICT'}}}
+    Stage 'gpt-new-chat' 'Button:新聊天'
     $newChats=$script:root.FindAll([System.Windows.Automation.TreeScope]::Descendants,[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::NameProperty,'新聊天'))
     $new=@($newChats | Where-Object {$_.Current.ControlType -eq [System.Windows.Automation.ControlType]::Button -and -not $_.Current.IsOffscreen})
     if ($new.Count -ne 1) {throw 'PROVENANCE'}
     Invoke $new[0]
     $mode='聊天';$composer='询问 ChatGPT'
+   Stage 'gpt-chat-mode' 'Button:聊天 (toggle)'
    $chat=Wait {Find $script:root 'Button' $mode}
    $toggle=[System.Windows.Automation.TogglePattern]$chat.GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern)
    if ($toggle.Current.ToggleState -ne [System.Windows.Automation.ToggleState]::On) {if (-not [AcbFolderControls]::Interactive()) {throw 'OWNER'};$toggle.Toggle()}
    [void](Wait {$current=Find $script:root 'Button' $mode;if (([System.Windows.Automation.TogglePattern]$current.GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern)).Current.ToggleState -eq [System.Windows.Automation.ToggleState]::On) {$true}})
     function AssertNewBlank {
-     $doc=Document
+     # The page Document can appear after the new-chat click; wait within the budget.
+     $doc=Wait {Document}
      $edit=Find $doc 'Edit' '询问 ChatGPT'
      if ($doc.Current.Name -notin @('ChatGPT','新聊天') -or -not $edit -or (GptBusy) -or (Find $doc 'Text' '您说：') -or (Find $doc 'Text' 'ChatGPT 说：') -or (Find $doc 'Button' '复制消息')) {throw 'PROVENANCE'}
      $draft=Value $edit
@@ -294,27 +297,37 @@ try {
      if ($initialConversationId -and (ConversationId) -eq $initialConversationId) {throw 'PROVENANCE'}
     }
     if ($request.marker -notmatch '^ACB_INIT_[a-f0-9-]{36}$' -or $request.prompt -ne "这是 Agent Control Bridge 的会话身份初始化，不执行工程任务。请只回复：$($request.marker)。") {throw 'PROVENANCE'}
+    Stage 'gpt-document' 'Document:blank ordinary chat'
     AssertNewBlank
+   Stage 'gpt-compose' 'Edit:询问 ChatGPT'
    SetValue $script:root $composer '' $request.prompt
+   Stage 'gpt-send-button' 'Button:发送'
    $send=Wait {Find $script:root 'Button' '发送'}
    AssertNewBlank
-   $script:stage='gpt-send-once'
+   Stage 'gpt-send-once' 'Button:发送 (invoked once)'
    Invoke $send
+   Stage 'gpt-init-reply' 'Text:ACB_INIT marker'
    [void](Wait {Find $script:root 'Text' $request.marker})
   } else {
    AssertConversation $request.conversationId
    if ((Snapshot).title -ne $request.expectedTitle) {throw 'PROVENANCE'}
   }
   if ($request.operation -eq 'gpt-create') {
+   Stage 'gpt-init-view' 'Document:marker and prompt'
    $view=Snapshot
    if (-not $view.ordinaryComposer -or -not $view.text.Contains($request.marker) -or -not $view.text.Contains($request.prompt)) {throw 'PROVENANCE'}
   }
-  $script:stage='gpt-rename'
+  Stage 'gpt-rename-menu' 'Button:更多'
   Expand (Wait {Find $script:root 'Button' '更多'})
+  Stage 'gpt-rename-item' 'MenuItem:重命名'
   Invoke (Wait {Find $script:root 'MenuItem' '重命名'})
+  Stage 'gpt-rename-dialog' 'Window:重命名聊天'
   $rename=Wait {Find $script:root 'Window' '重命名聊天'}
+  Stage 'gpt-rename-title' 'Edit:聊天标题'
   SetValue $rename '聊天标题' '' $request.name
-  Invoke (Find $rename 'Button' '保存')
+  Stage 'gpt-rename-save' 'Button:保存'
+  Invoke (Wait {Find $rename 'Button' '保存'})
+  Stage 'gpt-rename-confirm' 'Document.Name:requested title'
   [void](Wait {if ((Document).Current.Name -eq $request.name) {$true}})
  }
  if ($request.operation -eq 'gpt-rename') {AssertConversation $request.conversationId}

@@ -69,7 +69,7 @@ test('project provisioning: identity setup can precede GPT model evidence, but g
   assert.equal(f.db.prepare('SELECT COUNT(*) n FROM execution_runs').get()!.n, 0);
 });
 
-for (const change of [{ createCodexConversation: false }, { source: 'unknown' }, { ordinaryChat: false }, { exactConversation: false }, { createOrdinaryChat: false }, { createWorkspace: false }, { ordinaryChat: 'true' }, { workspaceSurface: 'isolated-app-server' }, { workspaceSurface: 'unknown' }, { workspaceSurface: undefined }]) {
+for (const change of [{ source: 'unknown' }, { ordinaryChat: false }, { exactConversation: false }, { createOrdinaryChat: false }, { createWorkspace: false }, { ordinaryChat: 'true' }, { workspaceSurface: 'isolated-app-server' }, { workspaceSurface: 'unknown' }, { workspaceSurface: undefined }]) {
   test(`project provisioning: missing trusted creation capability ${JSON.stringify(change)} creates no resources`, async t => {
     const f = fixture(t), capabilities = await f.host.inspect(new AbortController().signal);
     f.host.inspect = async () => ({ ...capabilities, ...change }) as typeof capabilities;
@@ -270,4 +270,31 @@ test('project provisioning: two Codex conversations get distinct formal receipts
   let extra=0;f.host.createCodexConversation=async(_project,_path,_signal,_key,index=0)=>{if(index){extra++;throw new BridgeError('IO','[TEST] receipt lost');}return {conversationId:'lost-codex-0'};};
   const lost=await p.prepare('lost-codex','lost-event',f.context,{codexConversations:2});
   assert.equal(lost.phase,'codex.extra');await assert.rejects(p.reconcile(lost.id,f.context),{code:'UNSUPPORTED'});assert.equal(extra,1);
+});
+
+test('project provisioning: without a formal Codex creator the bundle waits for verified operator-created conversations',async t=>{
+  const f=fixture(t),capabilities=await f.host.inspect(new AbortController().signal);let created=0;const verified:string[]=[];
+  f.host.inspect=async()=>({...capabilities,createCodexConversation:false});
+  f.host.createCodexConversation=async()=>{created++;throw new BridgeError('UNSUPPORTED','[TEST] no formal creator');};
+  const p=new ProjectProvisioner(f.db,f.authority,{root:join(f.root,'workspaces'),timeoutMs:100,host:f.host});
+  const waiting=await p.prepare('attach-project','attach-event',f.context,{codexConversations:2});
+  assert.equal(waiting.state,'BLOCKED');assert.equal(waiting.errorCode,'CODEX_ATTACH_REQUIRED');assert.equal(waiting.phase,'codex.attach');
+  assert.deepEqual(waiting.stages,{directoryCreated:true,nativeWorkspace:true,gptConversation:true,codexConversations:0,codexRequested:2});
+  assert.match(String(f.db.prepare("SELECT payload FROM notification_outbox WHERE dedupe_key LIKE '%codex-attach%'").get()!.payload),/acb_project_attach_codex/);
+  await assert.rejects(p.attachCodex(waiting.id,'operator-codex-1',f.context),{code:'UNSUPPORTED'});
+  f.host.verifyCodexMember=async input=>{if(input.conversationId==='foreign-codex')throw new BridgeError('PROVENANCE','[TEST] other workspace');assert.equal(input.appProjectId,'native-project-fixture');verified.push(input.conversationId);};
+  await assert.rejects(p.attachCodex(waiting.id,'foreign-codex',f.context),{code:'PROVENANCE'});
+  await assert.rejects(p.attachCodex(waiting.id,'fixture-gpt',f.context),{code:'CONFLICT'});
+  await assert.rejects(p.attachCodex(waiting.id,'bad id!',f.context),{code:'INPUT'});
+  assert.equal(p.get(waiting.id,f.context).stages!.codexConversations,0);
+  const half=await p.attachCodex(waiting.id,'operator-codex-1',f.context);
+  assert.equal(half.state,'BLOCKED');assert.equal(half.stages!.codexConversations,1);
+  assert.equal((await p.attachCodex(waiting.id,'operator-codex-1',f.context)).stages!.codexConversations,1);
+  const foreign=f.authority.issue({principal:'fixture:foreign',instance:'two',executor:'hermes',controller:true,reviewer:false});
+  await assert.rejects(p.attachCodex(waiting.id,'operator-codex-2',foreign),{code:'NOT_FOUND'});
+  const ready=await p.attachCodex(waiting.id,'operator-codex-2',f.context);
+  assert.equal(ready.state,'READY');assert.deepEqual(verified,['operator-codex-1','operator-codex-2']);assert.equal(created,0);
+  assert.deepEqual(f.db.prepare('SELECT conversation_id FROM codex_conversations WHERE project_id=? ORDER BY conversation_id').all(ready.projectId).map(row=>row.conversation_id),['operator-codex-1','operator-codex-2']);
+  assert.equal(f.db.prepare("SELECT COUNT(*) n FROM audit_log WHERE action='project_codex_attach'").get()!.n,2);
+  await assert.rejects(p.attachCodex(waiting.id,'operator-codex-3',f.context),{code:'STATE'});
 });

@@ -4,7 +4,7 @@ import { withDeadline } from './deadline.ts';
 import type { DesktopGptReader } from './desktop-gpt-reader.ts';
 
 export interface NativeChatPage {
-  thread: { id: string; kind: string; title: string; status: { type: string } };
+  thread: { id: string; kind: string; title: string; status: { type: string }; projectId?: string | null; cwd?: string };
   turns: { id: string; status: string; error: unknown; startedAt?: number; items: (
     { type: 'userMessage'; id: string; content: { type: string; text?: string; truncated?: boolean }[] } |
     { type: 'agentMessage'; id: string; text: string; truncated?: boolean; phase?: string }

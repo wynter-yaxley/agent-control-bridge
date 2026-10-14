@@ -49,3 +49,36 @@ export function pendingApprovals(db: DatabaseSync, authority: CallerAuthority, c
   return db.prepare(`SELECT a.id approvalId,a.task_id taskId,t.project_id projectId,a.action,a.requested_by requestedBy,a.requested_at requestedAt FROM approvals a JOIN tasks t ON t.id=a.task_id
     WHERE a.decision='pending' AND (?=1 OR EXISTS(SELECT 1 FROM project_access p WHERE p.project_id=t.project_id AND p.principal=?)) ORDER BY a.requested_at LIMIT 100`).all(caller.reviewer ? 1 : 0, caller.principal).map(row => ({ ...row }));
 }
+
+/** Native workspace + ordinary GPT initialization becomes a ledger approval that
+ * only an independent reviewer can decide. One approval covers this exact
+ * name/path for a short window, so a single bundle is not asked three times.
+ * Rejection, cancellation or no decision before the deadline refuse. The helper
+ * task carrying the approval is cancelled once the decision is closed. */
+export function createLedgerInitializationApproval(options: { db: DatabaseSync; authority: CallerAuthority; controller: CallerContext; timeoutMs: number; pollMs?: number; reuseMs?: number }): (name: string, path: string, signal: AbortSignal) => Promise<boolean> {
+  const { db, authority, controller } = options, pollMs = options.pollMs ?? 1000, reuseMs = options.reuseMs ?? 600000, approved = new Map<string, number>();
+  return async (name, path, signal) => {
+    const scope = `${name}\0${key(path)}`;
+    if ((approved.get(scope) ?? 0) > Date.now()) return true;
+    const store = new TaskStore(db, authority);
+    let created: ReturnType<TaskStore['createTaskWithApproval']>;
+    try { created = store.createTaskWithApproval({ kind: 'gui-initialization', title: 'Approve native workspace and ordinary GPT initialization', executor: null },
+      JSON.stringify({ kind: 'gui-initialization', name, path, effects: ['native-workspace', 'ordinary-gpt'], reuseSeconds: reuseMs / 1000 }), controller); }
+    catch { return false; }
+    try {
+      const deadline = Date.now() + options.timeoutMs;
+      while (!signal.aborted && Date.now() < deadline) {
+        const decision = db.prepare('SELECT decision FROM approvals WHERE id=?').get(created.approvalId)?.decision;
+        if (decision !== 'pending') break;
+        try { await delay(pollMs, undefined, { signal }); } catch { break; }
+      }
+      db.prepare("UPDATE approvals SET decision='rejected',decided_by='acb:expired',decided_at=?,reason='No reviewer decision before the deadline; refused' WHERE id=? AND decision='pending'").run(now(), created.approvalId);
+      const accepted = db.prepare('SELECT decision FROM approvals WHERE id=?').get(created.approvalId)?.decision === 'approved' && !signal.aborted;
+      if (accepted) approved.set(scope, Date.now() + reuseMs);
+      return accepted;
+    } finally {
+      const task = store.getTask(created.task.id);
+      if (task?.status === 'QUEUED') store.cancel(task.id, controller, 'Initialization approval closed', task.version);
+    }
+  };
+}

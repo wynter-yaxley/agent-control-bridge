@@ -9,7 +9,7 @@ import { defaults } from '../src/config.ts';
 import { ConversationRegistry } from '../src/topology.ts';
 import { TaskStore } from '../src/tasks.ts';
 import { BackgroundBridge } from '../src/background.ts';
-import { createLedgerCodexApproval, pendingApprovals } from '../src/trusted-host.ts';
+import { createLedgerCodexApproval, createLedgerInitializationApproval, pendingApprovals } from '../src/trusted-host.ts';
 import { policyBindings, executorGaps } from '../src/windows-host.ts';
 import type { BackgroundExecutor } from '../src/background-runner.ts';
 import { hostCapabilities } from './fixtures/host-capabilities.ts';
@@ -126,4 +126,36 @@ test('trusted host: Codex approvals bind the live run/turn, wait for an independ
   assert.equal(new TaskStore(db, authority).verify(done.taskId, controller, true, undefined, done.version).ok, false);
   assert.equal(new TaskStore(db, authority).verify(done.taskId, executor, true, undefined, done.version).ok, false);
   assert.equal(new TaskStore(db, authority).verify(done.taskId, reviewer, true, undefined, done.version).ok, true);
+});
+
+test('trusted host: GUI initialization is a reviewer-decided ledger approval, scoped to one name/path and time window', async t => {
+  const scope = isolatedDemo(); t.after(() => scope.close());
+  const db = scope.db, authority = new CallerAuthority(), controller = authority.issue(controllerEntry), reviewer = authority.issue(reviewerEntry), store = new TaskStore(db, authority);
+  const approve = createLedgerInitializationApproval({ db, authority, controller, timeoutMs: 300, pollMs: 10 }), signal = new AbortController().signal;
+  const decide = async (decision: 'approved' | 'rejected') => {
+    for (let i = 0; i < 100; i++) {
+      const [pending] = pendingApprovals(db, authority, reviewer);
+      if (pending) {
+        assert.match(String(pending.action), /"kind":"gui-initialization".*"name":"fixture-project"/);
+        assert.throws(() => store.decideApproval(String(pending.approvalId), 'approved', controller), { code: 'AUTH' });
+        store.decideApproval(String(pending.approvalId), decision, reviewer); return;
+      }
+      await new Promise(done => setTimeout(done, 5));
+    }
+  };
+  const [granted] = await Promise.all([approve('fixture-project', 'D:\\fixture-project', signal), decide('approved')]);
+  assert.equal(granted, true);
+  assert.equal(await approve('fixture-project', 'd:\\FIXTURE-PROJECT', signal), true);
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM approvals').get()!.n, 1);
+  const [refused] = await Promise.all([approve('fixture-project', 'D:\\other', signal), decide('rejected')]);
+  assert.equal(refused, false);
+  assert.equal(await approve('silent', 'D:\\silent', signal), false);
+  assert.deepEqual(db.prepare('SELECT decision,decided_by FROM approvals ORDER BY rowid').all().map(row => [row.decision, row.decided_by]), [['approved', REVIEWER_SID], ['rejected', REVIEWER_SID], ['rejected', 'acb:expired']]);
+  assert.deepEqual(db.prepare("SELECT DISTINCT status FROM tasks WHERE kind='gui-initialization'").all().map(row => row.status), ['CANCELLED']);
+  const config = defaults(scope.root), native = { listProjects: async () => ({ projects: [] }), listThreads: async () => ({ threads: [], pinnedThreads: [] }), readThread: async () => assert.fail('No read expected') };
+  const path = policy(t, [controllerEntry, executorEntry, reviewerEntry]);
+  assert.equal((await policyBindings({ config, authority, context: controller, db }, native, path).projects!.inspect(signal)).createWorkspace, false);
+  config.desktop.enabled = true;
+  assert.equal((await policyBindings({ config, authority, context: controller, db }, native, path).projects!.inspect(signal)).createWorkspace, true);
+  assert.equal((await policyBindings({ config, authority, context: reviewer, db }, native, path).projects!.inspect(signal)).createWorkspace, false);
 });

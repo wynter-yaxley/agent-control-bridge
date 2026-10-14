@@ -32,6 +32,8 @@ export interface ProjectHost {
   createOrdinaryChat(appProjectId: string, exactName: string, signal: AbortSignal, operationKey?: string): Promise<{ conversationId: string }>;
   /** index > 0 names an additional conversation of the same workspace. */
   createCodexConversation(appProjectId: string, workspacePath: string, signal: AbortSignal, operationKey?: string, index?: number): Promise<{ conversationId: string }>;
+  /** Read-only: a Codex conversation is a member of this native workspace and directory. */
+  verifyCodexMember?(input: { appProjectId: string; workspacePath: string; conversationId: string }, signal: AbortSignal): Promise<void>;
   /** Read-only: native workspaces registered for this directory, whatever their name. */
   nativeWorkspaces?(workspacePath: string, signal: AbortSignal): Promise<{ projectId: string; label: string }[]>;
   observePartial?(resources: Partial<ProjectResources>, phase: string, signal: AbortSignal): Promise<Partial<ProjectResources>>;
@@ -81,7 +83,7 @@ export class ProjectProvisioner {
       return this.get(id, context);
     }
     if(row.phase==='codex.extra')throw new BridgeError('UNSUPPORTED','An additional Codex creation has no durable receipt; do not infer an ID or resend');
-    if(row.phase && !['workspace.done','gpt.done','codex.done','codex.extra.done','verify'].includes(String(row.phase))) {
+    if(row.phase && !['workspace.done','gpt.done','codex.done','codex.extra.done','codex.attach','verify'].includes(String(row.phase))) {
       if(!this.host.observePartial)throw new BridgeError('PROVENANCE','Incomplete resources cannot be recreated during reconciliation');
       resources=await withDeadline(signal=>this.host!.observePartial!(resources,String(row.phase),signal),this.timeoutMs);
       const acknowledged=String(row.phase)==='workspace'?resources.appProjectId:String(row.phase)==='gpt'?resources.chatgptConversationId:resources.codexConversationId;
@@ -155,6 +157,34 @@ export class ProjectProvisioner {
     catch (error) { this.recordFailure(id, caller.principal, error, 'UNCERTAIN', 'Reconcile recorded resources before retry'); }
     return this.get(id, context);
   }
+  /** Attaches an operator-created Codex conversation to an operation that is
+   * waiting for one. The thread must be read back from the native host as a
+   * member of this operation's own newly created workspace and directory. */
+  async attachCodex(id: string, conversationId: string, context: CallerContext): Promise<ProjectOperation> {
+    const caller = this.authority.resolve(context);
+    if (!caller?.controller) throw new BridgeError('AUTH', 'Trusted Hermes controller required');
+    if (typeof conversationId !== 'string' || !/^[A-Za-z0-9_-]{1,200}$/.test(conversationId)) throw new BridgeError('INPUT', 'Invalid Codex conversation ID');
+    const operation = this.get(id, context), resources = { ...operation.resources } as Partial<ProjectResources>;
+    if (operation.state !== 'BLOCKED' || operation.phase !== 'codex.attach' || !resources.appProjectId || !resources.workspacePath || !resources.chatgptConversationId) throw new BridgeError('STATE', 'This operation is not waiting for a Codex conversation');
+    const attached = [resources.codexConversationId, ...(resources.extraCodexConversationIds ?? [])].filter((value): value is string => !!value);
+    if (attached.includes(conversationId)) return operation;
+    if (conversationId === resources.chatgptConversationId || this.db.prepare('SELECT 1 FROM codex_conversations WHERE conversation_id=?').get(conversationId)) throw new BridgeError('CONFLICT', 'Conversation is the GPT conversation or already registered');
+    if (!this.host?.verifyCodexMember) throw new BridgeError('UNSUPPORTED', 'A native host that verifies Codex membership is required');
+    await withDeadline(signal => this.host!.verifyCodexMember!({ appProjectId: resources.appProjectId!, workspacePath: resources.workspacePath!, conversationId }, signal), this.timeoutMs);
+    if (resources.codexConversationId) resources.extraCodexConversationIds = [...(resources.extraCodexConversationIds ?? []), conversationId]; else resources.codexConversationId = conversationId;
+    const complete = attached.length + 1 >= (resources.codexConversations ?? 1);
+    transaction(this.db, () => {
+      if (complete) this.assertGuiFree(id);
+      if (this.db.prepare(`UPDATE project_operations SET resources=?,state=?,owner_token=?,error_code=?,updated_at=? WHERE id=? AND state='BLOCKED' AND phase='codex.attach' AND resources=?`)
+        .run(JSON.stringify(resources), complete ? 'PROVISIONING' : 'BLOCKED', processOwner(), complete ? null : 'CODEX_ATTACH_REQUIRED', now(), id, JSON.stringify(operation.resources)).changes !== 1) throw new BridgeError('CONFLICT', 'Project operation changed');
+      this.db.prepare('INSERT INTO audit_log(at,actor,action,detail) VALUES(?,?,?,?)').run(now(), caller.principal, 'project_codex_attach', `operation=${id} conversation=${conversationId}`);
+    });
+    if (complete) {
+      try { await this.complete(id, resources, context); }
+      catch (error) { this.recordFailure(id, caller.principal, error, 'UNCERTAIN', 'Reconcile recorded resources before retry'); }
+    }
+    return this.get(id, context);
+  }
   async prepare(name: string, eventKey: string, context: CallerContext, options: { codexConversations?: number } = {}): Promise<ProjectOperation> {
     const caller = this.authority.resolve(context);
     if (!caller?.controller) throw new BridgeError('AUTH', 'Trusted Hermes controller required');
@@ -186,8 +216,6 @@ export class ProjectProvisioner {
       const capabilities = await withDeadline(signal => this.host!.inspect(signal), this.timeoutMs);
       assertOrdinaryChatCapabilities(capabilities, true);
       if (capabilities.workspaceSurface !== 'native-desktop') throw new BridgeError('UNSUPPORTED', 'Native desktop workspace registration is required');
-      // Refuse before any directory/UI effect when Codex conversations cannot be created.
-      if (capabilities.createCodexConversation === false) throw new BridgeError('UNSUPPORTED', 'A formal native Codex creation callback is required before creating the bundle');
       for (let current = this.root; ; current = dirname(current)) {
         if (existsSync(current) && lstatSync(current).isSymbolicLink()) throw new BridgeError('CONFIG', 'Workspace parent cannot be a symbolic link');
         if (dirname(current) === current) break;
@@ -241,8 +269,19 @@ export class ProjectProvisioner {
       const chat=await withDeadline(signal=>this.host!.createOrdinaryChat(resources.appProjectId!,resources.name!,signal,resources.initializationKey),this.timeoutMs);
       resources.chatgptConversationId=chat.conversationId;this.saveResources(id,resources,'gpt.done');
     }
+    const attached=(resources.codexConversationId ? 1 : 0)+(resources.extraCodexConversationIds?.length ?? 0);
+    if(attached<(resources.codexConversations ?? 1) && (await withDeadline(signal=>this.host!.inspect(signal),this.timeoutMs)).createCodexConversation===false) {
+      // No formal creator: wait for the operator to create conversations in this
+      // workspace and attach them; nothing is inferred from titles.
+      this.saveResources(id,resources,'codex.attach');
+      transaction(this.db,()=>{
+        this.db.prepare("UPDATE project_operations SET state='BLOCKED',error_code='CODEX_ATTACH_REQUIRED',updated_at=? WHERE id=? AND state='PROVISIONING'").run(now(),id);
+        enqueueNotification(this.db,this.authority.resolve(context)!.principal,`project:${id}:codex-attach:${attached}`,{operationId:id,state:'BLOCKED',errorCode:'CODEX_ATTACH_REQUIRED',missing:(resources.codexConversations ?? 1)-attached,
+          action:`Create the missing Codex conversation(s) in native workspace "${resources.name}" and attach each with acb_project_attach_codex`});
+      });
+      return;
+    }
     if(!resources.codexConversationId) {
-      if((await withDeadline(signal=>this.host!.inspect(signal),this.timeoutMs)).createCodexConversation===false)throw new BridgeError('UNSUPPORTED','Native Codex creation host is missing; the recorded GPT is preserved');
       this.db.prepare("UPDATE project_operations SET phase='codex' WHERE id=?").run(id);
       const codex=await withDeadline(signal=>this.host!.createCodexConversation(resources.appProjectId!,resources.workspacePath!,signal,resources.initializationKey),this.timeoutMs);
       resources.codexConversationId=codex.conversationId;this.saveResources(id,resources,'codex.done');
