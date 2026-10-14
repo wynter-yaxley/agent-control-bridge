@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { createDb, transaction } from '../src/db.ts';
+import { WINDOWS_POWERSHELL } from '../src/permissions.ts';
 import { fixture } from './helpers.ts';
 
 function temporary(t: {after:(fn:()=>void)=>void}) { const root=mkdtempSync(join(tmpdir(),'bridge-db-')); t.after(()=>rmSync(root,{recursive:true,force:true})); return root; }
@@ -74,7 +75,7 @@ test('database and WAL/SHM ACL contain only authorized principals', {skip:proces
   const paths=[root,path,`${path}-wal`,`${path}-shm`].filter(existsSync);
   const payload=Buffer.from(JSON.stringify(paths)).toString('base64');
   const command=`$paths=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${payload}')) | ConvertFrom-Json; $result=@(); foreach($p in $paths){$i=Get-Item -LiteralPath $p; $a=$i.GetAccessControl(); foreach($r in $a.Access){$result += [pscustomobject]@{sid=$r.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value;rights=[int]$r.FileSystemRights;kind=$r.AccessControlType.ToString()}}}; ConvertTo-Json -InputObject $result -Compress`;
-  const rules=JSON.parse(execFileSync('powershell.exe',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(command,'utf16le').toString('base64')],{encoding:'utf8',stdio:['ignore','pipe','pipe']})) as {sid:string;rights:number;kind:string}[];
+  const rules=JSON.parse(execFileSync(WINDOWS_POWERSHELL,['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(command,'utf16le').toString('base64')],{encoding:'utf8',windowsHide:true,stdio:['ignore','pipe','pipe']})) as {sid:string;rights:number;kind:string}[];
   assert.ok(rules.length>=paths.length*3);
   for(const rule of rules){assert.equal(rule.kind,'Allow');assert.ok(!['S-1-1-0','S-1-5-11','S-1-5-32-545'].includes(rule.sid));}
   assert.equal(db.prepare('PRAGMA busy_timeout').get()!.timeout,5000);

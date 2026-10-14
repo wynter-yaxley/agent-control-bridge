@@ -8,7 +8,7 @@ import {ProjectProvisioner} from '../src/project-provisioner.ts';
 import {assertOrdinaryChatCapabilities} from '../src/ordinary-chat.ts';
 import {createWindowsNativeProjectHost,createWindowsNativeConversationHost,WindowsNativeUi,type WindowsNativeTools} from '../src/windows-native-host.ts';
 
-test('windows native host: authorized UI identity setup registers READY without generation authority',async t=>{
+test('windows native host: authorized UI identity setup registers pinned Codex READY without generation authority',async t=>{
   const scope=isolatedDemo();t.after(()=>scope.close());const config=defaults(scope.root);
   let path='',prompt='',chatCreated=false,grants=0;const calls:string[]=[];
   const ui=new class extends WindowsNativeUi {
@@ -21,7 +21,7 @@ test('windows native host: authorized UI identity setup registers READY without 
   }(config);
   const native:WindowsNativeTools={
     listProjects:async()=>({projects:[{projectId:'fixture-native',projectKind:'local',hostId:'local',label:'fixture-project',path}]}),
-    listThreads:async()=>({pinnedThreads:[],threads:[{id:'fixture-codex',kind:'codex',title:'fixture-project Codex',projectId:'fixture-native',cwd:path},...(chatCreated?[{id:'fixture-gpt',kind:'chatgpt',title:'fixture-project'}]:[])]}),
+    listThreads:async()=>({pinnedThreads:[{id:'fixture-codex',kind:'codex',title:'fixture-project Codex',projectId:'fixture-native',cwd:path}],threads:[...(chatCreated?[{id:'fixture-gpt',kind:'chatgpt',title:'fixture-project'}]:[])]}),
     readThread:async()=>({thread:{id:'fixture-gpt',kind:'chatgpt',title:'fixture-project',status:{type:'idle'}},turns:[{id:'fixture-turn',status:'completed',error:null,items:[{type:'userMessage',id:'fixture-user',content:[{type:'text',text:prompt}]}]}]}),
     createCodexThread:async(projectId)=>{assert.equal(projectId,'fixture-native');return {threadId:'fixture-codex'};},
   };
@@ -38,7 +38,8 @@ test('windows native host: authorized UI identity setup registers READY without 
 });
 
 test('windows native host: a fresh Bridge process restores a crashed project to READY without recreating or resending',async t=>{
-  const scope=isolatedDemo();t.after(()=>scope.close());
+  const scope=isolatedDemo();let recovered:typeof scope.db|undefined;
+  t.after(()=>{recovered?.close();scope.close();});
   const dbPath=join(scope.root,'demo.sqlite'),state=join(scope.root,'desktop.json');
   const {spawnSync}=await import('node:child_process'),{createDb}=await import('../src/db.ts'),{BackgroundBridge}=await import('../src/background.ts'),{fileDesktop}=await import('./fixtures/native-desktop.ts');
   const url=(path:string)=>JSON.stringify(new URL(path,import.meta.url).href);
@@ -52,7 +53,7 @@ test('windows native host: a fresh Bridge process restores a crashed project to 
     host.verifyBundle=async()=>process.exit(75);
     await new ProjectProvisioner(db,authority,{root:config.background.workspaceRoot,timeoutMs:5000,host}).prepare('fixture-project','fixture-init',context);`],{encoding:'utf8',windowsHide:true});
   assert.equal(child.status,75,child.stderr);
-  const db=createDb({dbPath}),config=defaults(scope.root);t.after(()=>db.close());
+  const db=recovered=createDb({dbPath}),config=defaults(scope.root);
   const crashed=db.prepare('SELECT * FROM project_operations').get()!,original=JSON.parse(String(crashed.resources));
   assert.equal(crashed.state,'PROVISIONING');assert.equal(crashed.phase,'verify');
   assert.ok(original.appProjectId && original.chatgptConversationId && original.codexConversationId);

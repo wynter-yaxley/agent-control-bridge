@@ -17,3 +17,30 @@ export function scanText(path,text){
  if(/^(data|node_modules|dist|coverage|exports?|tmp|temp|profiles|browser-profile)\//.test(path)||/\.(db|sqlite3?)(-wal|-shm)?$|\.log$|(?:^|\/)\.env(?:$|\.(?!example$))|(?:^|\/)caller-policy\.json$|(?:^|\/)\.bridge\.config\.json$/.test(path))kinds.push('privatePath');
  return kinds;
 }
+
+// This pins the already published import, not a policy approval. Changes to
+// these rules still require independent review; a mutable JSON list cannot
+// enroll arbitrary findings or exempt later reuse of an original blob.
+const initialImport='75db1e443c1853f99d642ee0e0f56f6ce5fdce61';
+const historicalPaths=['src/hermes.ts','src/pi.ts'];
+const split=text=>text.split('\0').filter(Boolean);
+export function scanHistory(git,baseline){
+ const originals=new Map(historicalPaths.map(path=>[path,git('rev-parse',`${initialImport}:${path}`).trim()]));
+ if(!Array.isArray(baseline)||baseline.length!==historicalPaths.length||new Set(baseline.map(entry=>entry?.path)).size!==historicalPaths.length||
+    baseline.some(entry=>!entry||entry.kind!=='localUserPath'||!originals.has(entry.path)||entry.blob!==originals.get(entry.path)))throw Error('Historical baseline differs from the two pinned initial-import findings');
+ const headBlobs=new Set(split(git('ls-tree','-r','-z','HEAD')).map(row=>/^\d+ blob ([a-f0-9]+)\t/.exec(row)?.[1]));
+ const violations=[],acknowledgedHistory=[],seen=new Set(),blobs=new Map();
+ for(const commit of git('rev-list','HEAD').trim().split('\n').filter(Boolean)){
+  for(const row of split(git('ls-tree','-r','-z',commit))){
+   const match=/^\d+ blob ([a-f0-9]+)\t(.*)$/s.exec(row);if(!match)continue;
+   const [,blob,path]=match,key=JSON.stringify([blob,path,commit===initialImport]);
+   if(seen.has(key))continue;seen.add(key);
+   if(!blobs.has(blob))blobs.set(blob,git('show',blob));
+   for(const kind of scanText(path,blobs.get(blob))){
+    const known=commit===initialImport&&!headBlobs.has(blob)&&baseline.some(entry=>entry.blob===blob&&entry.path===path&&entry.kind===kind);
+    (known?acknowledgedHistory:violations).push({path,kind,scope:'history',blob,commit});
+   }
+  }
+ }
+ return {violations,acknowledgedHistory,historyBlobs:blobs.size};
+}

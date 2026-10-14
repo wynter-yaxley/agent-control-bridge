@@ -191,7 +191,7 @@ export function createWindowsNativeProjectHost(options: { config: BridgeConfig; 
     async verifyBundle(resources,signal) {
       if(!resources.initializationKey)throw new BridgeError('PROVENANCE','Original initialization identity was not recorded');
       const projects=await native.listProjects(signal), threads=await native.listThreads(signal), chat=await native.readThread(resources.chatgptConversationId,signal);
-      const project=projects.projects.find(item=>item.projectId===resources.appProjectId), codex=threads.threads.find(item=>item.id===resources.codexConversationId);
+      const project=projects.projects.find(item=>item.projectId===resources.appProjectId), codex=[...threads.threads,...threads.pinnedThreads].find(item=>item.id===resources.codexConversationId);
       if (!project || project.projectKind!=='local' || project.hostId!=='local' || project.label!==resources.name || pathKey(project.path)!==pathKey(resources.workspacePath) ||
           !codex || codex.kind!=='codex' || codex.projectId!==resources.appProjectId || !codex.cwd || pathKey(codex.cwd)!==pathKey(resources.workspacePath) || chat.thread.id!==resources.chatgptConversationId || chat.thread.kind!=='chatgpt' || chat.thread.title!==resources.name) throw new BridgeError('PROVENANCE','Native bundle identity, directory, name or Codex membership differs');
       if (!hasInitialization(chat,resources.initializationKey)) throw new BridgeError('PROVENANCE','GPT conversation lacks this operation\'s original initialization receipt');

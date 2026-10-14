@@ -49,6 +49,8 @@ SQLite online backup includes committed WAL data. Both commands reject existing 
 
 Node discovery includes e2e/workflow. Clean-install checks dependency/build/compiled-entry behavior without repeating the source matrix. Native reads reuse one serial Bridge-owned worker. Direct API users close it with closeNativeReadWorker() or NativeReadWorker.close(); runMcp handles shutdown. UIA now reuses one serial worker with fresh elements per request (one cold/hot read sample: 1320/53ms); direct users close it with ui.close() or closeWindowsNativeUiWorkers().
 
+Historical scan registration is limited to the two exact file paths/blobs in the published initial import. Baseline expansion, later blob reuse, private-path copies and current-tree findings fail. The checker reports PENDING_HERMES_POLICY_REVIEW; technical acknowledgement does not approve the policy exception. Changes to the checker itself require independent review.
+
 See the [main README](README.md) for capability matrices, configuration, host integration, workflow/recovery and measured limits. [Rules](docs/PROJECT_RULES.md), [acceptance template](docs/ACCEPTANCE_TEMPLATE.md), [license](LICENSE), [third-party notices](THIRD_PARTY_NOTICES.md).
 
 The installed Hermes MCP SDK connected to the Windows entry and real OS policy with an isolated ledger (8 read tools, HOST_MISSING). The local controller/reviewer overlap was removed; a real independent reviewer is still not configured. The existing production ledger remains v2 and was not migrated. Gateway/Feishu, actual durable App Server deployment and protected GUI approval binding remain unverified or externally blocked. No new research/stage/test-summary Markdown by default.

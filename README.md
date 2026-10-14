@@ -214,7 +214,7 @@ Prompt 已完整保存但尚未投递时，只有原进程确定退出、来源/
 
 37 个帮助命令子进程实测共 5780ms；同一命令集转入既有 CLI 单元测试（35 个直接调用、demo/watch 保留入口进程验证），静态 check 不再重复启动。完整祖先安全扫描保留，未测得收益的 CI/安装矩阵不改。
 
-check 的本机路径规则与运行账户无关：任何具体的 /home/<名称>/ 或 \\Users\\<名称>\\ 都会被拦截，占位符除外，同一提交在任何机器上结论相同。已发布且不改写的历史 blob 只能按 [scripts/check-history-baseline.json](scripts/check-history-baseline.json) 中逐个 blob 的 Hash 精确登记，并在输出的 acknowledgedHistory 中列出；当前树和任何新 blob 仍然失败。npm 配置为不支持审计接口的镜像时，可临时运行 npm audit --registry=https://registry.npmjs.org/，不修改原 Registry。
+check 的本机路径规则与运行账户无关：任何具体的 /home/<名称>/ 或 \\Users\\<名称>\\ 都会被拦截，占位符除外，同一提交在任何机器上结论相同。[scripts/check-history-baseline.json](scripts/check-history-baseline.json) 仅登记首个已发布提交中两个确定路径/Blob Hash 的 localUserPath；清单扩展、后续提交复用旧 Blob、相同内容出现在私有路径、当前树及新 Blob 均失败。acknowledgedHistory 只是技术登记，输出 PENDING_HERMES_POLICY_REVIEW，须独立 Reviewer 批准历史例外；改变检查器源码本身仍须独立审查。npm 配置为不支持审计接口的镜像时，可临时运行 npm audit --registry=https://registry.npmjs.org/，不修改原 Registry。
 
 npm test 已发现全部 Node 测试，包含 e2e/workflow；CI 不再重复同一 e2e 集合。test:e2e 仍可定向执行。干净安装只验证依赖/构建/编译入口/Mock 演练，不重跑源码矩阵。Mock 通过不等于桌面、Hermes/飞书验收。
 

@@ -28,7 +28,7 @@ export async function runWindowsHost(args:string[],trusted?: (services:Parameter
     // context issued by the real trusted delegation host, never a synthetic SID.
     if(!bindings.executor && native && bindings.executorContext && services.config.agents.codex.executable && services.config.agents.codex.model && services.config.agents.codex.reasoningEffort) {
       const inspect=async(target:DeliveryTarget,signal:AbortSignal)=>{
-        const item=(await native.listThreads(signal)).threads.find(t=>t.id===target.codexConversationId);
+        const inventory=await native.listThreads(signal),item=[...inventory.threads,...inventory.pinnedThreads].find(t=>t.id===target.codexConversationId);
         const project=(await native.listProjects(signal)).projects.find(p=>p.projectId===item?.projectId);
         if(!item || item.kind!=='codex' || !project || project.projectKind!=='local' || project.hostId!=='local' || !item.cwd || win32.normalize(item.cwd).toLowerCase()!==win32.normalize(target.workspacePath).toLowerCase() || win32.normalize(project.path).toLowerCase()!==win32.normalize(target.workspacePath).toLowerCase())throw new BridgeError('PROVENANCE','Native Codex thread/project/directory membership differs');
         return {source:'codex-app-state' as const,local:true,conversationId:item.id,appProjectId:project.projectId,workspacePath:project.path};

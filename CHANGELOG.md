@@ -4,7 +4,9 @@ Versions follow Semantic Versioning. Development delivery remains pending indepe
 
 ## Unreleased
 
-- Make the release check deterministic: local user paths are matched for any concrete /home or \\Users account (placeholders excepted) instead of only the account running the check. Two reviewed blobs of the published initial import are listed by hash in scripts/check-history-baseline.json and reported as acknowledgedHistory; current-tree or new findings still fail.
+- Restrict historical scan acknowledgements to the two exact paths/blobs in the initial import. Scan later reuse and every file path, reject baseline expansion, and report pending Hermes policy review; preserve published Git history.
+- Verify pinned Codex threads during native bundle recovery and Executor target inspection with the same project/directory checks as other threads. Windows regression uses the fixed system PowerShell ACL helper and closes every SQLite handle before temporary-directory cleanup.
+- Make the release check deterministic: local user paths are matched for any concrete /home or \\Users account (placeholders excepted) instead of only the account running the check. Two registered blobs of the published initial import are listed by hash in scripts/check-history-baseline.json and reported as acknowledgedHistory pending independent policy review; current-tree or new findings still fail.
 - Record the project holder atomically with PROVISIONING. Reconciling an operation that crashed before any resource receipt (no phase, no resources, no directory) returns it to BLOCKED so the same request can retry; an unexplained directory stays UNCERTAIN.
 - Windows ordinary GPT creation requires the recorded operation key; a random marker could never be verified after restart. The CDP reader maps the worker's zero-selector exit to PROVENANCE instead of an unstructured IO failure.
 - Add an isolated v2 ledger test with committed but un-checkpointed WAL pages: online backup keeps them (a raw main-file copy does not), the backup migrates to v6 with integrity/foreign keys/rows intact, grants no project access, and restores only into new files.
