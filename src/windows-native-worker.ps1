@@ -75,6 +75,8 @@ $actionClock=[Diagnostics.Stopwatch]::StartNew()
 function Respond($result) {$result.timings=@{initMs=$initMs;actionMs=$actionClock.ElapsedMilliseconds};[Console]::Out.WriteLine(($result | ConvertTo-Json -Depth 9 -Compress))}
 $script:stage='input'
 $script:target=''
+$script:effects=$null
+$script:entry=$null
 $mutex=$null
 $locked=$false
 try {
@@ -108,7 +110,50 @@ try {
    Start-Sleep -Milliseconds $request.pollMs
   } while ($true)
  }
- function Invoke($element) {if (-not [AcbFolderControls]::Interactive()) {throw 'OWNER'};([System.Windows.Automation.InvokePattern]$element.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)).Invoke()}
+ # Hidden, disabled or non-invokable controls are never invoked.
+ function Invoke($element) {
+  if (-not [AcbFolderControls]::Interactive()) {throw 'OWNER'}
+  $pattern=$null
+  if ($null -eq $element -or -not $element.Current.IsEnabled -or $element.Current.IsOffscreen -or -not $element.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern,[ref]$pattern)) {throw 'STATE'}
+  ([System.Windows.Automation.InvokePattern]$pattern).Invoke()
+ }
+ # Control types and automation IDs of the nearest ancestors; never names or text.
+ function Ancestors($element) {
+  $walker=[System.Windows.Automation.TreeWalker]::ControlViewWalker;$list=@();$current=$element
+  for ($i=0;$i -lt 4;$i++) {
+   try {$current=$walker.GetParent($current)} catch {break}
+   if ($null -eq $current) {break}
+   $list+=(($current.Current.ControlType.ProgrammaticName -replace '^ControlType\.','')+'#'+$current.Current.AutomationId)
+  }
+  return ,$list
+ }
+ # The native add-project entry counts only as the single enabled, on-screen, invokable button.
+ function EntryState {
+  $condition=[System.Windows.Automation.AndCondition]::new([System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Button),
+   [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::NameProperty,'添加新项目'))
+  $all=@($script:root.FindAll([System.Windows.Automation.TreeScope]::Descendants,$condition))
+  $entry=@{state='missing';count=$all.Count}
+  if ($all.Count -ne 1) {if ($all.Count -gt 1) {$entry.state='ambiguous'};return @{entry=$entry;element=$null}}
+  $element=$all[0];$pattern=$null;$scroll=$null
+  $entry.offscreen=$element.Current.IsOffscreen;$entry.enabled=$element.Current.IsEnabled;$entry.emptyBounds=$element.Current.BoundingRectangle.IsEmpty
+  $entry.invoke=$element.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern,[ref]$pattern)
+  $entry.scrollItem=$element.TryGetCurrentPattern([System.Windows.Automation.ScrollItemPattern]::Pattern,[ref]$scroll)
+  $entry.ancestors=Ancestors $element
+  $entry.state=if (-not $entry.enabled) {'disabled'} elseif (-not $entry.invoke) {'not-invokable'} elseif ($entry.offscreen) {'offscreen'} else {'ready'}
+  return @{entry=$entry;element=$element;scroll=$scroll}
+ }
+ # Brings an offscreen entry into view once through its own ScrollItemPattern
+ # (no focus, no physical input), then reads its state again.
+ function ArrangeEntry {
+  $probe=EntryState
+  if ($probe.entry.state -eq 'offscreen' -and $probe.entry.scrollItem) {
+   ([System.Windows.Automation.ScrollItemPattern]$probe.scroll).ScrollIntoView()
+   $until=[DateTime]::UtcNow.AddMilliseconds([Math]::Min(2000,[int]$request.timeoutMs))
+   do {Start-Sleep -Milliseconds $request.pollMs;$probe=EntryState} while ($probe.entry.state -eq 'offscreen' -and [DateTime]::UtcNow -lt $until)
+   $probe.entry.arranged=$true
+  }
+  return $probe
+ }
  function Expand($element) {([System.Windows.Automation.ExpandCollapsePattern]$element.GetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern)).Expand()}
  function Value($element) {return ([System.Windows.Automation.ValuePattern]$element.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)).Current.Value.Trim()}
  function SetValue($scope,[string]$name,[string]$id,[string]$text) {
@@ -174,6 +219,11 @@ try {
   if (-not $doc) {throw 'OWNER'}
   Respond @{ok=$true;snapshot=@{title=$doc.Current.Name;text='';conversationId=$null;ordinaryComposer=($null -ne (Find $doc 'Edit' '询问 ChatGPT'));pid=$window.Id}};return
  }
+ if ($request.operation -eq 'workspace-entry') {
+  Stage 'workspace-entry' 'Button:添加新项目'
+  $probe=if ($request.arrange -eq $true) {ArrangeEntry} else {EntryState}
+  Respond @{ok=$true;operation='workspace-entry';entry=$probe.entry};return
+ }
  if ($request.operation -in @('snapshot','gpt-read')) {
   $script:stage='current-gpt-view'
   $snapshot=Snapshot
@@ -231,8 +281,13 @@ try {
   Respond @{ok=$true};return
  }
  if ($request.operation -eq 'workspace-create') {
-  Stage 'workspace-add-button' 'Button:添加新项目'
-  Invoke (Wait {Find $script:root 'Button' '添加新项目'})
+  $script:effects=$false
+  Stage 'workspace-add-button' 'Button:添加新项目 (single, enabled, on-screen)'
+  $until=[DateTime]::UtcNow.AddMilliseconds([Math]::Min(3000,[int]$request.timeoutMs))
+  do {$probe=ArrangeEntry;if ($probe.entry.state -ne 'missing') {break};Start-Sleep -Milliseconds $request.pollMs} while ([DateTime]::UtcNow -lt $until)
+  if ($probe.entry.state -ne 'ready') {$script:entry=$probe.entry;throw 'STATE'}
+  $script:effects=$true
+  Invoke $probe.element
   Stage 'workspace-create-dialog' 'Window:创建项目'
   $dialog=Wait {Find $script:root 'Window' '创建项目'}
   Stage 'workspace-name' 'Edit#chatgpt-project-name'
@@ -272,6 +327,7 @@ try {
   [void](Wait {if (-not (Find $script:root 'Window' '信任此文件夹吗？')) {$true}})
  } else {
   if ($request.operation -eq 'gpt-create') {
+   $script:effects=$false
    Stage 'gpt-draft-check' 'Edit:visible drafts'
    $initialConversationId=ConversationId
    $edits=$script:root.FindAll([System.Windows.Automation.TreeScope]::Descendants,[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Edit))
@@ -280,6 +336,7 @@ try {
     $newChats=$script:root.FindAll([System.Windows.Automation.TreeScope]::Descendants,[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::NameProperty,'新聊天'))
     $new=@($newChats | Where-Object {$_.Current.ControlType -eq [System.Windows.Automation.ControlType]::Button -and -not $_.Current.IsOffscreen})
     if ($new.Count -ne 1) {throw 'PROVENANCE'}
+    $script:effects=$true
     Invoke $new[0]
     $mode='聊天';$composer='询问 ChatGPT'
    Stage 'gpt-chat-mode' 'Button:聊天 (toggle)'
@@ -334,10 +391,14 @@ try {
  Respond @{ok=$true;conversationId=(ConversationId);operation=$request.operation;ordinaryModeObserved=($request.operation -eq 'gpt-create');physicalInput=$false;appActivated=$false}
 } catch {
  $code=$_.Exception.Message
- if ($code -notin @('INPUT','OWNER','IO','TIMEOUT','CONFLICT','PROVENANCE')) {$code='EXECUTION'}
+ if ($code -notin @('INPUT','OWNER','IO','TIMEOUT','CONFLICT','PROVENANCE','STATE')) {$code='EXECUTION'}
  # Creation failures also emit a bounded structure survey (types/classes only) to stderr.
  if ($request.operation -in @('workspace-create','gpt-create')) {try {[Console]::Error.WriteLine('ACB_UI_DIAGNOSTIC='+((Diagnose) | ConvertTo-Json -Depth 9 -Compress))} catch {}}
- Respond @{ok=$false;code=$code;stage=$script:stage;target=$script:target;errorType=$_.Exception.GetType().Name;line=$_.InvocationInfo.ScriptLineNumber;privateDiagnosticsOmitted=$true}
+ $failure=@{ok=$false;code=$code;stage=$script:stage;target=$script:target;errorType=$_.Exception.GetType().Name;line=$_.InvocationInfo.ScriptLineNumber;privateDiagnosticsOmitted=$true}
+ # effectsStarted=false: the failure came before the first invoke of this creation.
+ if ($null -ne $script:effects) {$failure.effectsStarted=$script:effects}
+ if ($null -ne $script:entry) {$failure.entry=$script:entry}
+ Respond $failure
 } finally {
  if ($locked) {$mutex.ReleaseMutex()}
  if ($mutex) {$mutex.Dispose()}

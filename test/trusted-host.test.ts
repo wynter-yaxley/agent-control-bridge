@@ -128,34 +128,62 @@ test('trusted host: Codex approvals bind the live run/turn, wait for an independ
   assert.equal(new TaskStore(db, authority).verify(done.taskId, reviewer, true, undefined, done.version).ok, true);
 });
 
-test('trusted host: GUI initialization is a reviewer-decided ledger approval, scoped to one name/path and time window', async t => {
+test('trusted host: GUI initialization approval is bound to one operation attempt, its effects and its live row', async t => {
   const scope = isolatedDemo(); t.after(() => scope.close());
   const db = scope.db, authority = new CallerAuthority(), controller = authority.issue(controllerEntry), reviewer = authority.issue(reviewerEntry), store = new TaskStore(db, authority);
+  const { randomUUID } = await import('node:crypto');
+  const operation = (name: string, path: string, state = 'PROVISIONING', principal = CONTROLLER_SID) => {
+    const id = randomUUID();
+    db.prepare("INSERT INTO project_operations(id,principal,event_key,request_hash,project_id,name,root_path,state,owner_token,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,NULL,'2026-01-01','2026-01-01')").run(id, principal, id, 'hash', randomUUID(), name, path, state);
+    return id;
+  };
+  // root_path is unique per ledger, so another operation never shares this path.
+  const first = operation('fixture-project', 'd:\\fixture-project'), sameName = operation('fixture-project', 'd:\\elsewhere', 'BLOCKED'), foreign = operation('fixture-project', 'd:\\foreign', 'READY', SECOND_SID);
   const approve = createLedgerInitializationApproval({ db, authority, controller, timeoutMs: 300, pollMs: 10 }), signal = new AbortController().signal;
   const decide = async (decision: 'approved' | 'rejected') => {
     for (let i = 0; i < 100; i++) {
       const [pending] = pendingApprovals(db, authority, reviewer);
       if (pending) {
-        assert.match(String(pending.action), /"kind":"gui-initialization".*"name":"fixture-project"/);
+        assert.match(String(pending.action), /"kind":"gui-initialization","operationId":"[^"]+","attempt":"[^"]+","name":"fixture-project"/);
         assert.throws(() => store.decideApproval(String(pending.approvalId), 'approved', controller), { code: 'AUTH' });
         store.decideApproval(String(pending.approvalId), decision, reviewer); return;
       }
       await new Promise(done => setTimeout(done, 5));
     }
   };
-  const [granted] = await Promise.all([approve('fixture-project', 'D:\\fixture-project', signal), decide('approved')]);
+  const attempt = { operationId: first, attempt: randomUUID(), effects: ['native-workspace', 'ordinary-gpt'] };
+  // No scope, an unknown effect or an effect outside the scope never asks or grants.
+  assert.equal(await approve('fixture-project', 'D:\\fixture-project', signal), false);
+  assert.equal(await approve('fixture-project', 'D:\\fixture-project', signal, { ...attempt, effects: ['native-workspace', 'shell'] }), false);
+  assert.equal(await approve('fixture-project', 'D:\\fixture-project', signal, { ...attempt, effect: 'codex-thread' }), false);
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM approvals').get()!.n, 0);
+  const [granted] = await Promise.all([approve('fixture-project', 'D:\\fixture-project', signal, attempt), decide('approved')]);
   assert.equal(granted, true);
-  assert.equal(await approve('fixture-project', 'd:\\FIXTURE-PROJECT', signal), true);
+  // The same attempt reuses it for its listed effects only.
+  assert.equal(await approve('fixture-project', 'd:\\FIXTURE-PROJECT', signal, { ...attempt, effect: 'native-workspace' }), true);
+  assert.equal(await approve('fixture-project', 'D:\\fixture-project', signal, { ...attempt, effect: 'ordinary-gpt' }), true);
+  assert.equal(await approve('fixture-project', 'D:\\fixture-project', signal, { ...attempt, effects: ['native-workspace', 'ordinary-gpt', 'codex-thread'], effect: 'codex-thread' }), false);
   assert.equal(db.prepare('SELECT COUNT(*) n FROM approvals').get()!.n, 1);
-  const [refused] = await Promise.all([approve('fixture-project', 'D:\\other', signal), decide('rejected')]);
-  assert.equal(refused, false);
-  assert.equal(await approve('silent', 'D:\\silent', signal), false);
+  // Another operation for the same name/path, a foreign controller's operation or another name never reuse it.
+  assert.equal(await approve('fixture-project', 'D:\\fixture-project', signal, { ...attempt, operationId: sameName }), false);
+  assert.equal(await approve('fixture-project', 'D:\\elsewhere', signal, { ...attempt, operationId: sameName, effect: 'native-workspace' }), false);
+  assert.equal(await approve('fixture-project', 'D:\\foreign', signal, { ...attempt, operationId: foreign }), false);
+  assert.equal(await approve('other-project', 'D:\\other-project', signal, attempt), false);
+  assert.equal(await approve('fixture-project', 'D:\\fixture-project', signal, { ...attempt, operationId: randomUUID() }), false);
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM approvals').get()!.n, 1);
+  // A failed attempt is not reused, and a retry is a new attempt that asks again.
+  db.prepare("UPDATE project_operations SET state='UNCERTAIN' WHERE id=?").run(first);
+  assert.equal(await approve('fixture-project', 'D:\\fixture-project', signal, { ...attempt, effect: 'ordinary-gpt' }), false);
+  const [retried] = await Promise.all([approve('fixture-project', 'D:\\fixture-project', signal, { ...attempt, attempt: randomUUID() }), decide('rejected')]);
+  assert.equal(retried, false);
+  db.prepare("UPDATE project_operations SET state='READY' WHERE id=?").run(first);
+  assert.equal(await approve('fixture-project', 'D:\\fixture-project', signal, { operationId: first, attempt: randomUUID(), effects: ['codex-thread'] }), false);
   assert.deepEqual(db.prepare('SELECT decision,decided_by FROM approvals ORDER BY rowid').all().map(row => [row.decision, row.decided_by]), [['approved', REVIEWER_SID], ['rejected', REVIEWER_SID], ['rejected', 'acb:expired']]);
   assert.deepEqual(db.prepare("SELECT DISTINCT status FROM tasks WHERE kind='gui-initialization'").all().map(row => row.status), ['CANCELLED']);
-  const config = defaults(scope.root), native = { listProjects: async () => ({ projects: [] }), listThreads: async () => ({ threads: [], pinnedThreads: [] }), readThread: async () => assert.fail('No read expected') };
-  const path = policy(t, [controllerEntry, executorEntry, reviewerEntry]);
-  assert.equal((await policyBindings({ config, authority, context: controller, db }, native, path).projects!.inspect(signal)).createWorkspace, false);
+  const config = defaults(scope.root), native = { listProjects: async () => ({ projects: [] }), listThreads: async () => ({ threads: [], pinnedThreads: [] }), readThread: async () => assert.fail('No read expected'), createCodexThread: async () => assert.fail('No creation expected') };
+  const path = policy(t, [controllerEntry, executorEntry, reviewerEntry]), capabilities = async (context: typeof controller) => policyBindings({ config, authority, context, db }, native, path).projects!.inspect(signal);
+  assert.deepEqual(await capabilities(controller).then(value => [value.createWorkspace, value.createCodexConversation]), [false, false]);
   config.desktop.enabled = true;
-  assert.equal((await policyBindings({ config, authority, context: controller, db }, native, path).projects!.inspect(signal)).createWorkspace, true);
-  assert.equal((await policyBindings({ config, authority, context: reviewer, db }, native, path).projects!.inspect(signal)).createWorkspace, false);
+  assert.deepEqual(await capabilities(controller).then(value => [value.createWorkspace, value.createCodexConversation]), [true, true]);
+  assert.deepEqual(await capabilities(reviewer).then(value => [value.createWorkspace, value.createCodexConversation]), [false, false]);
 });

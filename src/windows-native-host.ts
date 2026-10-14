@@ -3,11 +3,11 @@ import { fileURLToPath } from 'node:url';
 import { win32 } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { BridgeConfig } from './config.ts';
-import { BridgeError, EXIT_CODES, type ErrorCode } from './errors.ts';
+import { BridgeError, classifyError, EXIT_CODES, type ErrorCode } from './errors.ts';
 import { controlledProcessEnv } from './silent-process.ts';
 import { requireNoSecrets, redact } from './security.ts';
 import type { NativeChatPage } from './native-messages.ts';
-import type { ProjectHost, ProjectHostCapabilities } from './project-provisioner.ts';
+import type { InitializationEffect, InitializationScope, ProjectHost, ProjectHostCapabilities } from './project-provisioner.ts';
 import { NativeDesktopReadClient } from './native-readonly.ts';
 import type { VisibleGptSnapshot,DesktopGptReader } from './desktop-gpt-reader.ts';
 import type { OrdinaryChatHost } from './ordinary-chat.ts';
@@ -17,19 +17,25 @@ export interface WindowsNativeTools {
   listProjects(signal: AbortSignal): Promise<{ projects: { projectId: string; projectKind: string; label: string; path: string; hostId: string }[] }>;
   listThreads(signal: AbortSignal): Promise<{ threads: { id: string; kind: string; title: string; projectId?: string | null; cwd?: string }[]; pinnedThreads: { id: string; kind: string; title: string; projectId?: string | null; cwd?: string }[] }>;
   readThread(id: string, signal: AbortSignal): Promise<NativeChatPage>;
-  // Formal creator returns a thread receipt; its API does not guarantee an
-  // operationKey or initialization message that can recover a lost receipt.
-  createCodexThread?(projectId: string, name: string, signal: AbortSignal): Promise<{ threadId: string; projectId?: string }>;
+  /** Formal native create_thread for one local project. The fixed initial prompt
+   * is the durable receipt; the returned thread ID may be absent if the reply is lost. */
+  createCodexThread?(input: { projectId: string; title: string; prompt: string }, signal: AbortSignal): Promise<{ threadId?: string }>;
 }
 export interface WindowsUiSnapshot { title: string; text: string; ordinaryComposer: boolean; pid: number; conversationId: string | null }
-interface UiResult { ok: boolean; code?: string; stage?: string; target?: string; errorType?: string; line?: number; ordinaryModeObserved?: boolean; snapshot?: WindowsUiSnapshot; body?: string; conversationId?: string; completionVerified?: boolean; timings?: { initMs: number; actionMs: number } }
+/** Read-only state of the native "add project" entry; constants only. */
+export interface WorkspaceEntry { state: 'ready' | 'missing' | 'ambiguous' | 'offscreen' | 'disabled' | 'not-invokable'; count: number; offscreen?: boolean; enabled?: boolean; invoke?: boolean; scrollItem?: boolean; emptyBounds?: boolean; arranged?: boolean; ancestors?: string[] }
+interface UiResult { ok: boolean; code?: string; stage?: string; target?: string; errorType?: string; line?: number; ordinaryModeObserved?: boolean; snapshot?: WindowsUiSnapshot; body?: string; conversationId?: string; completionVerified?: boolean; entry?: WorkspaceEntry; effectsStarted?: boolean; timings?: { initMs: number; actionMs: number } }
 const pathKey = (value: string) => win32.normalize(value).toLowerCase();
 const UI_REPORT_GRACE_MS = 5000;
 const initializationPrompt = (key: string) => `这是 Agent Control Bridge 的会话身份初始化，不执行工程任务。请只回复：ACB_INIT_${key}。`;
+/** Must stay identical to the pattern the native pipe worker accepts for create_thread. */
+export const codexInitializationPrompt = (key: string, index: number) => `这是 Agent Control Bridge 的 Codex 会话身份初始化，不执行工程任务，不读取或修改任何文件。请只回复：ACB_CODEX_INIT_${key}_${index}。`;
+const hasPrompt = (page: NativeChatPage, prompt: string) => page.turns.some(turn => turn.items.some(message => message.type === 'userMessage' &&
+  message.content.some(part => part.type === 'text' && !part.truncated && (part.text === prompt || (page.thread.kind === 'codex' && part.text === `${prompt}\n`)))));
 // The worker sends this exact prompt only after observing a blank ordinary chat,
 // so its native readback is a durable receipt that survives Bridge restarts.
-const hasInitialization = (page: NativeChatPage, key: string) => page.turns.some(turn => turn.items.some(message => message.type === 'userMessage' &&
-  message.content.some(part => part.type === 'text' && !part.truncated && part.text === initializationPrompt(key))));
+const hasInitialization = (page: NativeChatPage, key: string) => hasPrompt(page, initializationPrompt(key));
+const operationKeyPattern = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 
 export function createWindowsNativeReadTools(config: BridgeConfig, carrierThreadId: string, createCodexThread?: WindowsNativeTools['createCodexThread']): WindowsNativeTools {
   const client = (signal: AbortSignal) => new NativeDesktopReadClient({carrierThreadId,...config.nativeInterface,signal});
@@ -57,7 +63,7 @@ export class WindowsNativeUi {
   private lastStage = '';
   constructor(config: BridgeConfig) { this.config = config; }
   close(): void { this.child?.kill(); this.child=undefined; uiWorkers.delete(this); }
-  call(operation: 'workspace-create' | 'gpt-create' | 'gpt-rename' | 'snapshot' | 'identity' | 'gpt-read' | 'chat-open' | 'chat-send' | 'chat-read-reply' | 'uia-diagnose', fields: { name: string; conversationId?: string; path?: string; projectName?: string; prompt?: string; marker?: string; expectedTitle?: string; mode?: 'gpt' | 'codex' }, signal: AbortSignal): Promise<UiResult> {
+  call(operation: 'workspace-create' | 'workspace-entry' | 'gpt-create' | 'gpt-rename' | 'snapshot' | 'identity' | 'gpt-read' | 'chat-open' | 'chat-send' | 'chat-read-reply' | 'uia-diagnose', fields: { name: string; conversationId?: string; path?: string; projectName?: string; prompt?: string; marker?: string; expectedTitle?: string; mode?: 'gpt' | 'codex'; arrange?: boolean }, signal: AbortSignal): Promise<UiResult> {
     const pending=this.queue.then(()=>this.request(operation,fields,signal));
     // A failed operation is returned to its caller; subsequent requests are not replayed.
     this.queue=pending.then(()=>undefined,()=>undefined);
@@ -103,7 +109,7 @@ export class WindowsNativeUi {
         if(!output.includes('\n'))return;
         try {
           const result=JSON.parse(output) as UiResult;
-          if(!result.ok)throw new BridgeError(Object.hasOwn(EXIT_CODES,result.code ?? '')?result.code as ErrorCode:'EXECUTION',`Native UI operation failed at ${result.stage}${result.target?` waiting for ${result.target}`:''} (${result.errorType}, line ${result.line})`);
+          if(!result.ok)throw new BridgeError(Object.hasOwn(EXIT_CODES,result.code ?? '')?result.code as ErrorCode:'EXECUTION',`Native UI operation failed at ${result.stage}${result.target?` waiting for ${result.target}`:''} (${result.errorType}, line ${result.line})${result.entry?` entry=${JSON.stringify(result.entry).slice(0,240)}`:''}${result.effectsStarted===false?'; no native effect was started':''}`);
           if(result.snapshot)result.snapshot.text=redact(result.snapshot.text);
           if(result.body)result.body=redact(result.body);
           finish(undefined,result);
@@ -138,10 +144,26 @@ export function createWindowsNativeGptReader(config: BridgeConfig, callingThread
 
 /** The authorization callback belongs to trusted embedding code. Config and MCP
  * inputs cannot approve an initialization or install native tool callbacks. */
-export function createWindowsNativeProjectHost(options: { config: BridgeConfig; native: WindowsNativeTools; authorizeInitialization: (name: string, path: string, signal: AbortSignal) => Promise<boolean>; ui?: WindowsNativeUi }): ProjectHost {
+export type InitializationRequest = InitializationScope & { effect?: InitializationEffect };
+export function createWindowsNativeProjectHost(options: { config: BridgeConfig; native: WindowsNativeTools; authorizeInitialization: (name: string, path: string, signal: AbortSignal, request?: InitializationRequest) => Promise<boolean>; ui?: WindowsNativeUi }): ProjectHost {
   const { config, native } = options, ui = options.ui ?? new WindowsNativeUi(config);
+  // Every native effect is approved for its own operation attempt and effect kind.
+  const grant = async (name: string, path: string, signal: AbortSignal, scope: InitializationScope | undefined, effect: InitializationEffect) => {
+    if (!scope || !scope.effects.includes(effect) || !await options.authorizeInitialization(name, path, signal, { ...scope, effect })) throw new BridgeError('AUTH', `Approval for this operation attempt's ${effect} initialization is required`);
+  };
   const capabilities: ProjectHostCapabilities = { createCodexConversation:!!native.createCodexThread,source: 'application-host', workspaceSurface: 'native-desktop', ordinaryChat: true, background: false,
     exactConversation: true, completeMessages: false, actualGenerationParameters: false, createOrdinaryChat: true, createWorkspace: true, models: [], reasoningEfforts: [] };
+  /** The unique recent Codex member of this workspace whose own turn carries the exact prompt. */
+  const findCodexReceipt = async (appProjectId: string, workspacePath: string, prompt: string, signal: AbortSignal): Promise<string | undefined> => {
+    const inventory = await native.listThreads(signal), found: string[] = [];
+    for (const item of [...inventory.threads, ...inventory.pinnedThreads]) {
+      if (item.kind !== 'codex' || item.projectId !== appProjectId || !item.cwd || pathKey(item.cwd) !== pathKey(workspacePath) || found.includes(item.id)) continue;
+      const page = await native.readThread(item.id, signal);
+      if (page.thread.id === item.id && page.thread.kind === 'codex' && hasPrompt(page, prompt)) found.push(item.id);
+    }
+    if (found.length > 1) throw new BridgeError('PROVENANCE', 'Several Codex conversations carry the same initialization receipt; do not guess');
+    return found[0];
+  };
   const poll = async <T>(read: () => Promise<T | undefined>, signal: AbortSignal): Promise<T> => {
     const deadline = Date.now() + config.nativeInterface.timeoutMs;
     do { const value = await read(); if (value !== undefined) return value; if (Date.now() >= deadline) throw new BridgeError('TIMEOUT', 'Native creation readback is pending; do not create replacements'); await delay(config.desktop.uiPollMs, undefined, { signal }); } while (!signal.aborted);
@@ -149,9 +171,14 @@ export function createWindowsNativeProjectHost(options: { config: BridgeConfig; 
   };
   return {
     inspect: async () => capabilities,
-    async authorizeInitialization(name,path,signal){if(!await options.authorizeInitialization(name,path,signal))throw new BridgeError('AUTH','Project-scoped initialization approval is required');},
-    async createWorkspace(name, path, signal) {
-      if (!await options.authorizeInitialization(name,path,signal)) throw new BridgeError('AUTH', 'One-time human authorization for this native UI initialization is required');
+    async authorizeInitialization(name,path,signal,scope){if(!scope?.effects.length || !await options.authorizeInitialization(name,path,signal,scope))throw new BridgeError('AUTH','Project-scoped initialization approval is required');},
+    async probeWorkspaceEntry(signal) {
+      const entry = (await ui.call('workspace-entry', { name: '', arrange: true }, signal)).entry;
+      // A hidden entry is never invoked; the operator shows the sidebar project list first.
+      if (entry?.state !== 'ready') throw new BridgeError('STATE', `Native workspace entry is ${entry?.state ?? 'unreported'} (${JSON.stringify(entry ?? {}).slice(0, 240)}); show the sidebar project list in its normal view and retry. Nothing was started`);
+    },
+    async createWorkspace(name, path, signal, scope) {
+      await grant(name, path, signal, scope, 'native-workspace');
       // A path already registered natively is never registered again.
       if ((await native.listProjects(signal)).projects.some(item => pathKey(item.path) === pathKey(path))) throw new BridgeError('CONFLICT', 'This directory is already a native workspace; reconcile instead of creating');
       await ui.call('workspace-create', {name,path},signal);
@@ -165,18 +192,19 @@ export function createWindowsNativeProjectHost(options: { config: BridgeConfig; 
     },
     async verifyCodexMember(input, signal) {
       const project = (await native.listProjects(signal)).projects.find(item => item.projectId === input.appProjectId);
-      if (!project || project.projectKind !== 'local' || project.hostId !== 'local' || pathKey(project.path) !== pathKey(input.workspacePath)) throw new BridgeError('PROVENANCE', 'Recorded native workspace is missing or has moved');
+      if (!project || project.projectKind !== 'local' || project.hostId !== 'local' || pathKey(project.path) !== pathKey(input.workspacePath) || (input.name !== undefined && project.label !== input.name)) throw new BridgeError('PROVENANCE', 'Recorded native workspace is missing, renamed or has moved');
       const thread = await findNativeThread(native, input.conversationId, signal);
       if (!thread || thread.kind !== 'codex' || thread.projectId !== input.appProjectId || !thread.cwd || pathKey(thread.cwd) !== pathKey(input.workspacePath)) throw new BridgeError('PROVENANCE', 'Conversation is not a Codex member of this native workspace and directory');
     },
     async nativeWorkspaces(path, signal) {
       return (await native.listProjects(signal)).projects.filter(item => pathKey(item.path) === pathKey(path)).map(item => ({ projectId: item.projectId, label: item.label }));
     },
-    async createOrdinaryChat(_appProjectId, name, signal, operationKey) {
+    async createOrdinaryChat(_appProjectId, name, signal, operationKey, scope) {
       // Without a recorded operation key the receipt could never be verified after a restart.
       if(!operationKey)throw new BridgeError('PROVENANCE','A recorded initialization operation key is required');
       const project=(await native.listProjects(signal)).projects.find(item=>item.projectId===_appProjectId && item.label===name);
-      if(!project || !await options.authorizeInitialization(name,project.path,signal))throw new BridgeError('AUTH','This new GPT initialization requires target-bound host approval');
+      if(!project)throw new BridgeError('AUTH','This new GPT initialization requires target-bound host approval');
+      await grant(name,project.path,signal,scope,'ordinary-gpt');
       const key = operationKey, marker = `ACB_INIT_${key}`, prompt = initializationPrompt(key);
       const before = await native.listThreads(signal), baseline = new Set([...before.threads,...before.pinnedThreads].map(item => item.id));
       const observed = await ui.call('gpt-create',{name,prompt,marker},signal);
@@ -192,18 +220,40 @@ export function createWindowsNativeProjectHost(options: { config: BridgeConfig; 
       },signal);
       return {conversationId:id};
     },
-    async createCodexConversation(appProjectId,_path,signal,_operationKey,index=0) {
-      const project=(await native.listProjects(signal)).projects.find(item=>item.projectId===appProjectId)!;
-      const name=index?`${project.label} Codex ${index+1}`:`${project.label} Codex`;
-      if(native.createCodexThread) {
-        const inventory=await native.listThreads(signal),known=new Set([...inventory.threads,...inventory.pinnedThreads].map(item=>item.id));
-        const created=await native.createCodexThread(appProjectId,name,signal);
-        if(created.projectId!==undefined && created.projectId!==appProjectId)throw new BridgeError('PROVENANCE','Formal Codex receipt belongs to a different native project');
-        // A receipt naming a thread that existed before this call is not a new conversation.
-        if(!created.threadId || known.has(created.threadId))throw new BridgeError('PROVENANCE','Formal Codex receipt does not name a new thread');
-        return {conversationId:created.threadId};
+    async createCodexConversation(appProjectId,workspacePath,signal,operationKey,index=0,scope) {
+      if(!native.createCodexThread)throw new BridgeError('UNSUPPORTED','A formal native Codex creation callback is required; GPT URI cannot prove Work identity');
+      if(!operationKey || !operationKeyPattern.test(operationKey) || !Number.isInteger(index) || index<0 || index>99)throw new BridgeError('PROVENANCE','A recorded initialization operation key is required');
+      const project=(await native.listProjects(signal)).projects.find(item=>item.projectId===appProjectId);
+      if(!project || project.projectKind!=='local' || project.hostId!=='local' || pathKey(project.path)!==pathKey(workspacePath))throw new BridgeError('PROVENANCE','Recorded native workspace is missing or has moved');
+      await grant(project.label,project.path,signal,scope,'codex-thread');
+      const title=index?`${project.label} Codex ${index+1}`:`${project.label} Codex`,prompt=codexInitializationPrompt(operationKey,index);
+      const inventory=await native.listThreads(signal),known=new Set([...inventory.threads,...inventory.pinnedThreads].map(item=>item.id));
+      if(await findCodexReceipt(appProjectId,workspacePath,prompt,signal))throw new BridgeError('CONFLICT','This Codex creation already has a receipt; reconcile instead of creating');
+      let threadId:string | undefined,lost:unknown;
+      try {threadId=(await native.createCodexThread({projectId:appProjectId,title,prompt},signal)).threadId;}
+      catch(error) {
+        // Refusals before the call (schema, approval, peer) cannot have created a thread.
+        if(error instanceof BridgeError && ['UNSUPPORTED','IPC_CONFIG','OWNER','INPUT','AUTH'].includes(error.code))throw error;
+        lost=error;
       }
-      throw new BridgeError('UNSUPPORTED','A formal native Codex creation callback is required; GPT URI cannot prove Work identity');
+      // A receipt naming a thread that existed before this call is not a new conversation.
+      if(threadId!==undefined && known.has(threadId))throw new BridgeError('PROVENANCE','Formal Codex receipt does not name a new thread');
+      // The thread counts only once its own initialization prompt is read back natively.
+      const id=await poll(async()=>{
+        if(threadId===undefined)return findCodexReceipt(appProjectId,workspacePath,prompt,signal);
+        const page=await native.readThread(threadId,signal);
+        if(page.thread.id!==threadId || page.thread.kind!=='codex' || (page.thread.projectId!==undefined && page.thread.projectId!==appProjectId) || (page.thread.cwd!==undefined && pathKey(page.thread.cwd)!==pathKey(workspacePath)))throw new BridgeError('PROVENANCE','Formal Codex receipt names a thread of another kind, project or directory');
+        return hasPrompt(page,prompt)?threadId:undefined;
+      },signal).catch(error=>{
+        if(lost===undefined)throw error;
+        const failure=classifyError(lost);
+        throw new BridgeError(failure.code,`${failure.message}; no initialization receipt was read back, reconcile without resending`);
+      });
+      return {conversationId:id};
+    },
+    async observeCodexCreation(input,signal) {
+      if(!operationKeyPattern.test(input.operationKey))throw new BridgeError('PROVENANCE','Original initialization identity was not recorded');
+      return findCodexReceipt(input.appProjectId,input.workspacePath,codexInitializationPrompt(input.operationKey,input.index),signal);
     },
     async observePartial(resources,phase,signal) {
       if(phase==='workspace') {
@@ -211,12 +261,18 @@ export function createWindowsNativeProjectHost(options: { config: BridgeConfig; 
         if(matches.length!==1)throw new BridgeError('PROVENANCE','Original native workspace receipt is unavailable or ambiguous');
         return {...resources,appProjectId:matches[0].projectId};
       }
-      if(phase==='codex.extra')throw new BridgeError('UNSUPPORTED','Formal Codex creation has no durable operation-to-thread receipt; do not infer an ID from titles or resend');
-      if(phase==='codex') {
-        if(!resources.codexConversationId)throw new BridgeError('UNSUPPORTED','Formal Codex creation has no durable operation-to-thread receipt; do not infer an ID from titles or resend');
-        const thread=await findNativeThread(native,resources.codexConversationId,signal);
-        if(!thread || thread.kind!=='codex' || thread.projectId!==resources.appProjectId || !thread.cwd || pathKey(thread.cwd)!==pathKey(resources.workspacePath!))throw new BridgeError('PROVENANCE','Recorded Codex receipt has different native membership');
-        return resources;
+      if(phase==='codex' || phase==='codex.extra') {
+        if(phase==='codex' && resources.codexConversationId) {
+          const thread=await findNativeThread(native,resources.codexConversationId,signal);
+          if(!thread || thread.kind!=='codex' || thread.projectId!==resources.appProjectId || !thread.cwd || pathKey(thread.cwd)!==pathKey(resources.workspacePath!))throw new BridgeError('PROVENANCE','Recorded Codex receipt has different native membership');
+          return resources;
+        }
+        // Only this operation's own initialization prompt identifies the lost thread; never a title.
+        const extras=resources.extraCodexConversationIds ?? [],index=phase==='codex'?0:1+extras.length;
+        if(!resources.initializationKey || !operationKeyPattern.test(resources.initializationKey))throw new BridgeError('UNSUPPORTED','Formal Codex creation has no recorded initialization receipt; do not infer an ID from titles or resend');
+        const id=await findCodexReceipt(resources.appProjectId!,resources.workspacePath!,codexInitializationPrompt(resources.initializationKey,index),signal);
+        if(!id)throw new BridgeError('PROVENANCE','The original Codex creation has no readable initialization receipt; do not resend');
+        return phase==='codex'?{...resources,codexConversationId:id}:{...resources,extraCodexConversationIds:[...extras,id]};
       }
       if(!resources.initializationKey)throw new BridgeError('PROVENANCE','Original initialization identity was not recorded');
       const candidates=[];

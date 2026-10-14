@@ -148,15 +148,15 @@ export class NativeDesktopReadClient {
     this.worker = options.worker ?? (options.spawnFn ? new NativeReadWorker(options.spawnFn) : sharedWorker);
     this.deadline = Date.now() + options.timeoutMs;
   }
-  private async request(method: 'tools/list' | 'tools/call', tool?: 'list_threads' | 'read_thread' | 'list_projects', args?: JsonObject): Promise<JsonObject> {
+  protected async request(method: 'tools/list' | 'tools/call', tool?: 'list_threads' | 'read_thread' | 'list_projects' | 'create_thread', args?: JsonObject): Promise<JsonObject> {
     if (this.busy) throw new BridgeError('CONFLICT', 'Only one native diagnostic request may run at a time');
     if (++this.requests > 4) throw new BridgeError('STATE', 'Native diagnostic request budget exhausted');
     const remaining = this.deadline - Date.now();
     if (remaining < 1 || this.options.signal?.aborted) throw new BridgeError('TIMEOUT', 'Native diagnostic deadline exceeded');
-    const id = randomUUID();
+    const id = randomUUID(), prefix = tool === 'create_thread' ? 'acb-create-' : 'acb-readonly-';
     const request = { jsonrpc: '2.0', id, method, params: method === 'tools/list' ? { threadStartKind: 'all' } : {
-      arguments: args, callId: `acb-readonly-${randomUUID()}`, namespace: 'codex_app',
-      threadId: this.options.carrierThreadId, tool, turnId: `acb-readonly-${randomUUID()}`,
+      arguments: args, callId: `${prefix}${randomUUID()}`, namespace: 'codex_app',
+      threadId: this.options.carrierThreadId, tool, turnId: `${prefix}${randomUUID()}`,
       // Protocol origin for this existing Codex carrier, not business-role authorization.
       callerSource: 'codex',
     } };
@@ -244,6 +244,33 @@ export class NativeDesktopReadClient {
       turnFields: fields(turns, ['id', 'status', 'error', 'items', 'model', 'reasoningEffort']),
       itemFields: fields(items, ['id', 'type', 'phase', 'text', 'content', 'model', 'reasoningEffort']), turnCount: turns.length,
       ordinaryChatVerified: false, actualGenerationParametersVerified: false, projectMappingVerified: false };
+  }
+}
+
+/** True only if the advertised create_thread accepts exactly what the creator
+ * sends: a title, a prompt and a project target by projectId, nothing required beyond. */
+export function createThreadCompatible(schema: JsonObject | undefined): boolean {
+  const record = (value: unknown) => value && typeof value === 'object' && !Array.isArray(value) ? value as JsonObject : undefined;
+  const requires = (value: JsonObject, allowed: string[]) => value.required === undefined || (Array.isArray(value.required) && value.required.every(name => allowed.includes(String(name))));
+  const properties = record(schema?.properties), target = record(properties?.target);
+  if (!schema || schema.type !== 'object' || !record(properties?.title) || !record(properties?.prompt) || !target || !requires(schema, ['title', 'prompt', 'target'])) return false;
+  const variants = Array.isArray(target.anyOf) ? target.anyOf : Array.isArray(target.oneOf) ? target.oneOf : [target];
+  return variants.map(record).some(variant => {
+    const fields = record(variant?.properties), kind = record(fields?.type);
+    return variant?.type === 'object' && Array.isArray(kind?.enum) && kind.enum.includes('project') && !!record(fields?.projectId) && requires(variant, ['type', 'projectId']);
+  });
+}
+/** The only native write: create_thread in one local project with the fixed
+ * Codex identity prompt, after checking the advertised schema. Trusted host
+ * code installs it; the request shape is enforced again by the pipe worker. */
+export class NativeCodexThreadCreator extends NativeDesktopReadClient {
+  async createCodexThread(input: { projectId: string; title: string; prompt: string }): Promise<{ threadId?: string }> {
+    identifier(input.projectId);
+    if (typeof input.title !== 'string' || !input.title.trim() || input.title.length > 200 || /[\x00-\x1f]/.test(input.title)) throw new BridgeError('INPUT', 'Invalid Codex thread title');
+    if (!createThreadCompatible((await this.catalog()).find(tool => tool.name === 'create_thread')?.inputSchema)) throw new BridgeError('UNSUPPORTED', 'The native host does not advertise a compatible create_thread');
+    const result = await this.request('tools/call', 'create_thread', { title: input.title, prompt: input.prompt, target: { type: 'project', projectId: input.projectId } });
+    // Only a well-formed ID counts; anything else is recovered from the prompt receipt.
+    return { threadId: typeof result.threadId === 'string' && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(result.threadId) ? result.threadId : undefined };
   }
 }
 

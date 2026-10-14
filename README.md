@@ -14,7 +14,7 @@
 
 | 技术 | 操作 | 依赖 GUI | 页面/编辑焦点影响 | 静默能力 |
 |---|---|---|---|---|
-| Native IPC | 项目、会话、目录及轮次只读 | 不操作 GUI | 实测读取未改变前台 | 当前签名宿主兼容性接口，有条件；不是承诺稳定的公开外部 API |
+| Native IPC | 项目、会话、目录及轮次只读；唯一写入是固定形状的 create_thread（待实机验证） | 不操作 GUI | 实测读取未改变前台 | 当前签名宿主兼容性接口，有条件；不是承诺稳定的公开外部 API |
 | Windows UIA | 正常按钮、菜单、编辑框和正文 | 是，桌面须可交互 | 可能切换页面和编辑焦点 | 不保证；需要可信宿主本次批准 |
 | 当前实例 CDP | 普通 GPT 精确 ID、可见正文与状态读取 | 依赖现有页面和调试端点 | 只读不导航 | 校验监听进程、签名和唯一已有目标；不自动开启端口 |
 | Codex App Server | 正式 stdio 工程执行和事件 | 不依赖桌面 GUI | 通常无须焦点 | 协议支持；仍须可信原生归属和会话排他证明 |
@@ -82,9 +82,13 @@ stdout 只承载 MCP，安全错误写 stderr。默认入口只注册 8 个只�
 
     node dist/windows-host.js --preflight --config <配置> --db <库> [--carrier-thread <已登记 Codex ID>]
 
---preflight 只读：输出调用者策略角色、各角色数量、本 Controller 的执行者委托、库 Schema 与未归属旧项目数、Codex 配置、CDP 端口是否监听、受限 UIA 结构摘要（只含控件类型/类名/层级/Pattern，不含名称和正文）、原生项目/线程数量，以及 blockers。
+--preflight 只读：输出调用者策略角色、各角色数量、本 Controller 的执行者委托、库 Schema 与未归属旧项目数、Codex 配置、CDP 端口是否监听、受限 UIA 结构摘要（只含控件类型/类名/层级/Pattern，不含名称和正文）、“添加新项目”入口当前状态（不滚动、不调用）、原生工具目录及 create_thread 是否兼容、原生项目/线程数量，以及 blockers。
 
-没有嵌入程序时，组合入口只从受保护的 config/caller-policy.json 取得能力：执行者条目写 "host": "<Controller SID>" 才是本 Controller 的唯一委托执行者，SID 必须与 Controller、Reviewer 不同；这是部署者在信任根中的委托，不是 OS 级隔离。Codex 命令/文件审批写入台账 approvals，只能由独立 Reviewer 用 acb_approvals_pending / acb_approval_decide 决定；turnId 不是本次已记录的原 turn、cwd/grantRoot 越出工作区、含认证材料、超时（background.timeoutMs）或取消时一律拒绝，绝不自动接受。缺少任何前提时 --worker 拒绝启动，并列出 EXECUTOR_DELEGATION_MISSING、CARRIER_THREAD_MISSING、CODEX_EXECUTABLE_MISSING、CODEX_MODEL_OR_EFFORT_MISSING。原生项目宿主默认只读：创建被拒绝，reconcile/adopt/attach 只回读。只有 Controller 连接且配置 desktop.enabled=true 时才允许创建：新 Workspace 与普通 GPT 的 UI 初始化先写入台账审批（gui-initialization），由独立 Reviewer 用 acb_approval_decide 决定，同一名称/路径 10 分钟内有效，拒绝或超时即不创建。没有正式原生 Codex 创建回调时，操作在 Workspace 与 GPT 完成后停在 BLOCKED / CODEX_ATTACH_REQUIRED（phase=codex.attach）：操作者在该 Workspace 中手工新建 Codex 对话，再用 acb_project_attach_codex 逐个附加；每个 ID 都必须由 Native IPC 回读为该 Workspace、该目录下的 Codex 线程。现有 GPT 对话的发送/读取批准仍需 runWindowsHost(args, createBindings) 嵌入真实回调。
+没有嵌入程序时，组合入口只从受保护的 config/caller-policy.json 取得能力：执行者条目写 "host": "<Controller SID>" 才是本 Controller 的唯一委托执行者，SID 必须与 Controller、Reviewer 不同；这是部署者在信任根中的委托，不是 OS 级隔离。Codex 命令/文件审批写入台账 approvals，只能由独立 Reviewer 用 acb_approvals_pending / acb_approval_decide 决定；turnId 不是本次已记录的原 turn、cwd/grantRoot 越出工作区、含认证材料、超时（background.timeoutMs）或取消时一律拒绝，绝不自动接受。缺少任何前提时 --worker 拒绝启动，并列出 EXECUTOR_DELEGATION_MISSING、CARRIER_THREAD_MISSING、CODEX_EXECUTABLE_MISSING、CODEX_MODEL_OR_EFFORT_MISSING。原生项目宿主默认只读：创建被拒绝，reconcile/adopt/attach 只回读。只有 Controller 连接且配置 desktop.enabled=true 时才允许创建：每次尝试（prepare、restart、reconcile、追加一个 Codex）先写入一条台账审批（gui-initialization），内容含 operationId、attempt 和本次效果（native-workspace / ordinary-gpt / codex-thread），由独立 Reviewer 用 acb_approval_decide 决定。批准只在同一操作的同一次尝试内、对所列效果、且该操作仍属本 Controller 并与名称/路径一致时复用（10 分钟内）；重试是新尝试，需要重新批准；拒绝或超时即不创建。创建前先只读探测“添加新项目”入口：必须唯一、可用、在屏幕内且支持 Invoke；不在屏幕内时只通过它自身的 ScrollItemPattern 滚动一次再复查，仍不可见则在审批、建目录和重启次数之前以 STATE 停止，并报告入口状态（不含界面文字）。隐藏、禁用或不支持 Invoke 的控件一律不调用。
+
+正式 Codex 创建使用原生 create_thread：组合入口在 desktop.enabled 时安装，调用前读取目录并要求 schema 恰好接受 title、prompt 和 project 目标；请求形状由管道 worker 再次限定（仅 acb-create- 前缀、固定的 Codex 身份初始化 prompt、UUID projectId）。初始 prompt `ACB_CODEX_INIT_<operationId>_<序号>` 是持久回执：回复丢失或进程崩溃后，只按该 Workspace、该目录下带这条 prompt 的唯一 Codex 线程恢复，不按标题推断、不重发。该路径尚无 Windows 实机证据。没有正式创建回调时，操作在 Workspace 与 GPT 完成后停在 BLOCKED / CODEX_ATTACH_REQUIRED（phase=codex.attach）：操作者在该 Workspace 中手工新建 Codex 对话，再用 acb_project_attach_codex 逐个附加；每个 ID 都必须由 Native IPC 回读为该 Workspace、该目录下的 Codex 线程。
+
+READY 项目可以继续增加 Codex 对话（每个项目最多 4 个），原始请求指纹和请求数量不变：acb_project_attach_codex 附加操作者新建的对话；acb_project_create_codex 每次正式创建一个，并单独审批。两者都要求项目访问只属于本 Controller、映射与已核验资源一致、对话未被任何项目或操作占用，并经原生回读确认类型、projectId、cwd 和 Workspace 名称。正式创建先把待定序号写入台账再调用；回执不确定时操作仍为 READY、stages.codexPending 显示该序号，再次调用只读取原回执，绝不再次创建。重复附加同一对话直接返回。现有 GPT 对话的发送/读取批准仍需 runWindowsHost(args, createBindings) 嵌入真实回调。
 
 受保护启动代码复用既有实现，trusted 必须来自实际宿主，提供本次批准和真实执行者绑定，没有自动批准默认值：
 
@@ -120,7 +124,7 @@ stdout 只承载 MCP，安全错误写 stderr。默认入口只注册 8 个只�
 
 Controller、Executor、Reviewer 必须是不同的受保护主体/连接，Reviewer 不兼任 Controller 或 Codex。普通 Controller 不能提交最终验收或执行 Reviewer 专属恢复。策略与代码在受控启动时加载，不热更新授权；改源码不能提升运行中的权限。同 OS 用户恶意代码仍可破坏本机运行时，不能声称强隔离。实际本机策略已取消 Controller/Reviewer 重叠，独立 Reviewer 仍需部署者提供。
 
-[Hermes MCP 样例](config/hermes-mcp.example.yaml) 开放 8 个查询/诊断工具；可信写入口有 25 个工具，包括设置默认 Codex、旧项目 adopt、Workspace 步骤显式重启、Codex 附加与 Reviewer 审批。Reviewer 使用单独受保护连接。路径变量替换为实际非秘密路径。只读示例 timeout 为 300 秒：最长 GPT 诊断顺序为 CDP 120 秒、UIA 回退 120 秒、原生核验 30 秒，加 30 秒客户端余量；预算变化时按统一配置重新计算，普通台账查询通常立即返回。同步项目创建另按实际阶段设置预算；工程任务提交立即返回 ID，由独立 worker 执行，不能用延长 MCP 超时替代它，也不能因客户端断开重新发送。
+[Hermes MCP 样例](config/hermes-mcp.example.yaml) 开放 8 个查询/诊断工具；可信写入口有 26 个工具，包括设置默认 Codex、旧项目 adopt、Workspace 步骤显式重启、Codex 附加与正式追加、Reviewer 审批。Reviewer 使用单独受保护连接。路径变量替换为实际非秘密路径。只读示例 timeout 为 300 秒：最长 GPT 诊断顺序为 CDP 120 秒、UIA 回退 120 秒、原生核验 30 秒，加 30 秒客户端余量；预算变化时按统一配置重新计算，普通台账查询通常立即返回。同步项目创建另按实际阶段设置预算；工程任务提交立即返回 ID，由独立 worker 执行，不能用延长 MCP 超时替代它，也不能因客户端断开重新发送。
 
 WSL Hermes 使用可执行的 Windows Node 绝对路径（WSL 下为 /mnt/c/.../node.exe），入口/配置/库参数使用 Windows 绝对路径，Node >=24.19.0；不要把 Linux Node 当作 Windows UIA 宿主。tools/hermes/mcp_probe.py 只验证隔离协议，不是真实写宿主。HermesGatewayAdapter 复用已验证飞书事件和可信项目路由；NotificationDispatcher 持久保存回执，不另起事件消费者。
 

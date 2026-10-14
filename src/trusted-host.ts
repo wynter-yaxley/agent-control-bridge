@@ -50,20 +50,31 @@ export function pendingApprovals(db: DatabaseSync, authority: CallerAuthority, c
     WHERE a.decision='pending' AND (?=1 OR EXISTS(SELECT 1 FROM project_access p WHERE p.project_id=t.project_id AND p.principal=?)) ORDER BY a.requested_at LIMIT 100`).all(caller.reviewer ? 1 : 0, caller.principal).map(row => ({ ...row }));
 }
 
-/** Native workspace + ordinary GPT initialization becomes a ledger approval that
- * only an independent reviewer can decide. One approval covers this exact
- * name/path for a short window, so a single bundle is not asked three times.
- * Rejection, cancellation or no decision before the deadline refuse. The helper
- * task carrying the approval is cancelled once the decision is closed. */
-export function createLedgerInitializationApproval(options: { db: DatabaseSync; authority: CallerAuthority; controller: CallerContext; timeoutMs: number; pollMs?: number; reuseMs?: number }): (name: string, path: string, signal: AbortSignal) => Promise<boolean> {
-  const { db, authority, controller } = options, pollMs = options.pollMs ?? 1000, reuseMs = options.reuseMs ?? 600000, approved = new Map<string, number>();
-  return async (name, path, signal) => {
-    const scope = `${name}\0${key(path)}`;
-    if ((approved.get(scope) ?? 0) > Date.now()) return true;
+const EFFECTS = ['native-workspace', 'ordinary-gpt', 'codex-thread'];
+/** Native initialization becomes a ledger approval that only an independent
+ * reviewer can decide. One approval covers one attempt of one operation
+ * (prepare, restart, reconcile or one added Codex), only the effects it lists,
+ * and only while that operation still names this controller, name and path;
+ * a retry is a new attempt and asks again. Rejection, cancellation or no
+ * decision before the deadline refuse. The helper task is cancelled once the
+ * decision is closed. */
+export function createLedgerInitializationApproval(options: { db: DatabaseSync; authority: CallerAuthority; controller: CallerContext; timeoutMs: number; pollMs?: number; reuseMs?: number }): (name: string, path: string, signal: AbortSignal, request?: { operationId: string; attempt: string; effects: string[]; effect?: string }) => Promise<boolean> {
+  const { db, authority, controller } = options, pollMs = options.pollMs ?? 1000, reuseMs = options.reuseMs ?? 600000;
+  const approved = new Map<string, { until: number; name: string; path: string; effects: string }>();
+  return async (name, path, signal, request) => {
+    if (!request || typeof request.operationId !== 'string' || typeof request.attempt !== 'string' || !/^[a-f0-9-]{36}$/.test(request.attempt) || !Array.isArray(request.effects) || !request.effects.length ||
+        request.effects.some(effect => !EFFECTS.includes(effect)) || new Set(request.effects).size !== request.effects.length || (request.effect !== undefined && !request.effects.includes(request.effect))) return false;
+    const operation = db.prepare('SELECT principal,name,root_path,state FROM project_operations WHERE id=?').get(request.operationId), principal = authority.resolve(controller)?.principal;
+    if (!operation || !principal || operation.principal !== principal || operation.name !== name || key(String(operation.root_path)) !== key(path)) return false;
+    for (const [scope, grant] of approved) if (grant.until <= Date.now()) approved.delete(scope);
+    const scope = `${request.operationId}\0${request.attempt}`, effects = JSON.stringify(request.effects), grant = approved.get(scope);
+    // Reuse is limited to the same attempt, effect list, name and path while it still runs.
+    if (grant) return grant.name === name && grant.path === key(path) && grant.effects === effects && ['PROVISIONING', 'READY'].includes(String(operation.state));
+    if (!['PROVISIONING', 'UNCERTAIN', 'READY'].includes(String(operation.state))) return false;
     const store = new TaskStore(db, authority);
     let created: ReturnType<TaskStore['createTaskWithApproval']>;
-    try { created = store.createTaskWithApproval({ kind: 'gui-initialization', title: 'Approve native workspace and ordinary GPT initialization', executor: null },
-      JSON.stringify({ kind: 'gui-initialization', name, path, effects: ['native-workspace', 'ordinary-gpt'], reuseSeconds: reuseMs / 1000 }), controller); }
+    try { created = store.createTaskWithApproval({ kind: 'gui-initialization', title: 'Approve native initialization for one project operation attempt', executor: null },
+      JSON.stringify({ kind: 'gui-initialization', operationId: request.operationId, attempt: request.attempt, name, path, effects: request.effects, reuseSeconds: reuseMs / 1000 }), controller); }
     catch { return false; }
     try {
       const deadline = Date.now() + options.timeoutMs;
@@ -74,7 +85,7 @@ export function createLedgerInitializationApproval(options: { db: DatabaseSync; 
       }
       db.prepare("UPDATE approvals SET decision='rejected',decided_by='acb:expired',decided_at=?,reason='No reviewer decision before the deadline; refused' WHERE id=? AND decision='pending'").run(now(), created.approvalId);
       const accepted = db.prepare('SELECT decision FROM approvals WHERE id=?').get(created.approvalId)?.decision === 'approved' && !signal.aborted;
-      if (accepted) approved.set(scope, Date.now() + reuseMs);
+      if (accepted) approved.set(scope, { until: Date.now() + reuseMs, name, path: key(path), effects });
       return accepted;
     } finally {
       const task = store.getTask(created.task.id);

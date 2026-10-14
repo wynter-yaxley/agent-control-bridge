@@ -40,8 +40,16 @@ while ($null -ne ($inputText=[Console]::In.ReadLine())) {
  }elseif($request.method -eq 'tools/call'){
   Fields $params @('arguments','callId','namespace','threadId','tool','turnId','callerSource')
   foreach($key in @('namespace','callerSource','threadId','callId','turnId','tool')){if($params.($key) -isnot [string]){throw 'IO'}}
-  if($params.namespace -ne 'codex_app' -or $params.callerSource -ne 'codex' -or $params.threadId -notmatch '^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$' -or $params.callId -notmatch '^acb-readonly-[a-f0-9-]{36}$' -or $params.turnId -notmatch '^acb-readonly-[a-f0-9-]{36}$'){throw 'IO'}
-  if($params.tool -eq 'list_threads'){Fields $params.arguments @('limit');if($params.arguments.limit -isnot [int] -or $params.arguments.limit -notin @(1,30)){throw 'IO'}}
+  # create_thread is the only write and uses its own call prefix; every other tool is a fixed read.
+  $prefix=if($params.tool -ceq 'create_thread'){'acb-create-'}else{'acb-readonly-'}
+  if($params.namespace -ne 'codex_app' -or $params.callerSource -ne 'codex' -or $params.threadId -notmatch '^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$' -or $params.callId -cnotmatch ('^'+$prefix+'[a-f0-9-]{36}$') -or $params.turnId -cnotmatch ('^'+$prefix+'[a-f0-9-]{36}$')){throw 'IO'}
+  if($params.tool -ceq 'create_thread'){
+   Fields $params.arguments @('title','prompt','target');Fields $params.arguments.target @('type','projectId')
+   $create=$params.arguments
+   if($create.title -isnot [string] -or $create.title.Trim().Length -eq 0 -or $create.title.Length -gt 200 -or $create.title -match '[\x00-\x1f]' -or $create.target.type -isnot [string] -or $create.target.type -cne 'project' -or
+      $create.target.projectId -isnot [string] -or $create.target.projectId -notmatch '^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$' -or $create.prompt -isnot [string] -or
+      $create.prompt -cnotmatch '^这是 Agent Control Bridge 的 Codex 会话身份初始化，不执行工程任务，不读取或修改任何文件。请只回复：ACB_CODEX_INIT_[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}_[0-9]{1,2}。$'){throw 'IO'}
+  }elseif($params.tool -eq 'list_threads'){Fields $params.arguments @('limit');if($params.arguments.limit -isnot [int] -or $params.arguments.limit -notin @(1,30)){throw 'IO'}}
   elseif($params.tool -eq 'read_thread'){
    Fields $params.arguments @('threadId','turnLimit','includeOutputs','maxOutputCharsPerItem')
    if($params.arguments.threadId -isnot [string] -or $params.arguments.threadId -notmatch '^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$' -or $params.arguments.turnLimit -isnot [int] -or $params.arguments.turnLimit -ne 1 -or $params.arguments.includeOutputs -isnot [bool] -or $params.arguments.maxOutputCharsPerItem -isnot [int] -or -not (($params.arguments.includeOutputs -ceq $false -and $params.arguments.maxOutputCharsPerItem -eq 0) -or ($params.arguments.includeOutputs -ceq $true -and $params.arguments.maxOutputCharsPerItem -eq 20000))){throw 'IO'}

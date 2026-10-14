@@ -16,24 +16,27 @@ import {existsSync} from 'node:fs';
 import {connect} from 'node:net';
 import {SCHEMA_VERSION} from './migrations.ts';
 import type {BridgeConfig} from './config.ts';
-import {closeNativeReadWorker,NativeDesktopReadClient} from './native-readonly.ts';
+import {closeNativeReadWorker,createThreadCompatible,NativeCodexThreadCreator,NativeDesktopReadClient} from './native-readonly.ts';
 import {BridgeError,classifyError,EXIT_CODES} from './errors.ts';
 
 const POLICY=fileURLToPath(new URL('../config/caller-policy.json',import.meta.url));
 type HostServices={config:BridgeConfig;authority:CallerAuthority;context:CallerContext;db:DatabaseSync};
 
 /** Bindings available without an embedding, all from the protected policy:
- * a read-only native project host (creation is refused, reconcile/adopt read
- * back), and for a controller only the executor its policy entry delegates,
- * with ledger approvals decided by an independent reviewer. No GUI approval. */
+ * a native project host that only reads back (reconcile/adopt/attach) unless
+ * the caller is a controller and desktop.enabled, in which case each creation
+ * attempt needs an independent reviewer's ledger approval; and for a
+ * controller only the executor its policy entry delegates, with ledger
+ * approvals decided by an independent reviewer. */
 export function policyBindings(services:HostServices,native?:WindowsNativeTools,policyPath=POLICY):BackgroundHostBindings {
   const bindings:BackgroundHostBindings={},controller=services.authority.resolve(services.context)?.controller===true;
   if(native) {
     // Creation needs desktop.enabled and an independent reviewer's ledger approval;
     // otherwise the host only reads back (reconcile/adopt/attach) and refuses creation.
+    // The formal Codex creator (native create_thread) is kept only on the same terms.
     const creation=controller && services.config.desktop.enabled;
-    const host=createWindowsNativeProjectHost({config:services.config,native,authorizeInitialization:creation?createLedgerInitializationApproval({db:services.db,authority:services.authority,controller:services.context,timeoutMs:services.config.background.timeoutMs}):async()=>false});
-    bindings.projects=creation?host:{...host,inspect:async signal=>({...await host.inspect(signal),createWorkspace:false,createOrdinaryChat:false})};
+    const host=createWindowsNativeProjectHost({config:services.config,native:creation?native:{...native,createCodexThread:undefined},authorizeInitialization:creation?createLedgerInitializationApproval({db:services.db,authority:services.authority,controller:services.context,timeoutMs:services.config.background.timeoutMs}):async()=>false});
+    bindings.projects=creation?host:{...host,inspect:async signal=>({...await host.inspect(signal),createWorkspace:false,createOrdinaryChat:false,createCodexConversation:false})};
   }
   if(!controller)return bindings;
   const executorContext=delegatedExecutor(services.authority,policyPath,services.context);
@@ -64,10 +67,14 @@ async function preflight(parsed:{config?:string;db?:string;'carrier-thread'?:str
   report.codex={executable:!!config.agents.codex.executable,model:config.agents.codex.model ?? null,reasoningEffort:config.agents.codex.reasoningEffort ?? null};
   await step('cdp',async()=>{const open=await listening(config.desktop.cdpUrl);if(!open)blockers.push('CDP_UNAVAILABLE');return {listening:open};});
   await step('uia',async()=>{const ui=new WindowsNativeUi(config);try{return await ui.call('uia-diagnose',{name:''},new AbortController().signal);}finally{ui.close();}});
+  // Read-only: the add-project entry as it is now (never scrolled or invoked here).
+  await step('workspaceEntry',async()=>{const ui=new WindowsNativeUi(config);try{const entry=(await ui.call('workspace-entry',{name:''},new AbortController().signal)).entry;if(entry?.state!=='ready')blockers.push('WORKSPACE_ENTRY_NOT_READY');return entry;}finally{ui.close();}});
   if(parsed['carrier-thread'])await step('native',async()=>{const tools=createWindowsNativeReadTools(config,parsed['carrier-thread']!),signal=new AbortController().signal;
-    // Tool names only: shows whether the host advertises any formal creation tool.
-    try{const catalogTools=(await new NativeDesktopReadClient({carrierThreadId:parsed['carrier-thread']!,...config.nativeInterface,signal}).catalog()).map(tool=>tool.name);
-      const projects=await tools.listProjects(signal),threads=await tools.listThreads(signal);return {catalogTools,projects:projects.projects.length,threads:threads.threads.length+threads.pinnedThreads.length,recentThreadWindow:30};}finally{closeNativeReadWorker();}});
+    // Tool names, plus whether create_thread accepts exactly what the formal creator sends.
+    try{const catalog=await new NativeDesktopReadClient({carrierThreadId:parsed['carrier-thread']!,...config.nativeInterface,signal}).catalog(),create=catalog.find(tool=>tool.name==='create_thread');
+      const createThread={advertised:!!create,compatible:createThreadCompatible(create?.inputSchema),required:Array.isArray(create?.inputSchema.required)?create.inputSchema.required:[],enabledByConfig:config.desktop.enabled};
+      if(!createThread.compatible)blockers.push('CREATE_THREAD_INCOMPATIBLE');
+      const projects=await tools.listProjects(signal),threads=await tools.listThreads(signal);return {catalogTools:catalog.map(tool=>tool.name),createThread,projects:projects.projects.length,threads:threads.threads.length+threads.pinnedThreads.length,recentThreadWindow:30};}finally{closeNativeReadWorker();}});
   else blockers.push('CARRIER_THREAD_MISSING');
   process.stdout.write(JSON.stringify({...report,blockers})+'\n');
 }
@@ -76,12 +83,15 @@ async function preflight(parsed:{config?:string;db?:string;'carrier-thread'?:str
  * in CLI/config/MCP JSON can load code or manufacture these capabilities. */
 export async function runWindowsHost(args:string[],trusted?: (services:Parameters<NonNullable<Parameters<typeof runMcp>[1]>>[0] & {native?:WindowsNativeTools})=>Promise<BackgroundHostBindings> | BackgroundHostBindings):Promise<void> {
   const parsed=parseArgs({args,options:{config:{type:'string'},db:{type:'string'},'carrier-thread':{type:'string'},worker:{type:'boolean'},write:{type:'boolean'},preflight:{type:'boolean'},help:{type:'boolean'}},strict:true});
-  if(parsed.values.help){process.stdout.write('Windows Bridge: [--write | --worker | --preflight] --config <file> --db <file> [--carrier-thread <existing Codex ID>]\nDefault: read-only MCP. --write: ledger tools for the caller policy role, no automatic queue. --worker: one independent runtime. --preflight: read-only deployment report.\nWithout an embedding the executor comes only from a policy delegation and approvals from an independent reviewer; GUI approval requires a trusted embedding.\n');return;}
+  if(parsed.values.help){process.stdout.write('Windows Bridge: [--write | --worker | --preflight] --config <file> --db <file> [--carrier-thread <existing Codex ID>]\nDefault: read-only MCP. --write: ledger tools for the caller policy role, no automatic queue. --worker: one independent runtime. --preflight: read-only deployment report.\nWithout an embedding the executor comes only from a policy delegation and approvals from an independent reviewer; native creation (desktop.enabled, controller) asks an independent reviewer per operation attempt.\n');return;}
   if(process.platform!=='win32')throw new BridgeError('UNSUPPORTED','Windows host requires the logged-in Windows user session');
   const mcpArgs:string[]=[];
   for(const key of ['config','db'] as const)if(parsed.values[key])mcpArgs.push('--'+key,parsed.values[key]!);
   const build:NonNullable<Parameters<typeof runMcp>[1]>=async services=>{
-    const native=parsed.values['carrier-thread']?createWindowsNativeReadTools(services.config,parsed.values['carrier-thread']):undefined;
+    const carrier=parsed.values['carrier-thread'];
+    // create_thread is offered only with desktop.enabled; policyBindings further
+    // requires a controller and a reviewer-decided approval per operation attempt.
+    const native=carrier?createWindowsNativeReadTools(services.config,carrier,services.config.desktop.enabled?(input,signal)=>new NativeCodexThreadCreator({carrierThreadId:carrier,...services.config.nativeInterface,signal}).createCodexThread(input):undefined):undefined;
     const bindings=trusted?await trusted({...services,native}):policyBindings(services,native);
     // An executable path is not execution authority. Use only the executor
     // context issued by the real trusted delegation host, never a synthetic SID.

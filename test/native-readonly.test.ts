@@ -3,11 +3,12 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { Writable } from 'node:stream';
 import type { Readable } from 'node:stream';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { NativeDesktopReadClient, NativeReadWorker, checkNativeDesktop } from '../src/native-readonly.ts';
+import { NativeDesktopReadClient, NativeReadWorker, checkNativeDesktop, NativeCodexThreadCreator, createThreadCompatible } from '../src/native-readonly.ts';
+import { codexInitializationPrompt } from '../src/windows-native-host.ts';
 import { defaults } from '../src/config.ts';
 import { WINDOWS_POWERSHELL } from '../src/permissions.ts';
 import { controlledProcessEnv } from '../src/silent-process.ts';
@@ -195,4 +196,57 @@ test('native reads: clients share one serial worker with distinct request IDs', 
   assert.equal(f.inputs.length, 2);
   assert.notEqual(f.inputs[0].request.id, f.inputs[1].request.id);
   assert.equal(f.killed(), 0);
+});
+
+// Shape seen in the Windows catalog (title/prompt/target with a project variant); unknown parts omitted.
+const createSchema = () => ({ type: 'object', additionalProperties: false, properties: { title: { type: 'string', minLength: 1 }, prompt: { type: 'string' },
+  target: { anyOf: [{ type: 'object', additionalProperties: false, properties: { type: { type: 'string', enum: ['project'] }, projectId: { type: 'string' }, environment: {} }, required: ['type', 'projectId'] }, { type: 'object', properties: { type: { type: 'string', enum: ['chat'] } } }] } }, required: ['target'] } as Record<string, any>);
+test('native create_thread: only a schema accepting title, prompt and a project target is compatible', () => {
+  assert.equal(createThreadCompatible(createSchema()), true);
+  const changed = (edit: (schema: Record<string, any>) => void) => { const schema = createSchema(); edit(schema); return createThreadCompatible(schema); };
+  for (const [label, edit] of [['extra required field', (x: Record<string, any>) => { x.required = ['target', 'model']; }], ['no prompt', (x: Record<string, any>) => { delete x.properties.prompt; }],
+    ['no project variant', (x: Record<string, any>) => { x.properties.target.anyOf.shift(); }], ['project needs environment', (x: Record<string, any>) => { x.properties.target.anyOf[0].required.push('environment'); }],
+    ['not an object', (x: Record<string, any>) => { x.type = 'array'; }]] as const) assert.equal(changed(edit), false, label);
+  assert.equal(createThreadCompatible(undefined), false);
+});
+test('native create_thread: creator checks the catalog, sends one fixed project request and accepts only a well-formed ID', async () => {
+  const prompt = codexInitializationPrompt('00000000-0000-4000-8000-000000000009', 1);
+  let schema: Record<string, any> = createSchema(), reply: Record<string, unknown> = { threadId: target };
+  const f = fixture((envelope, input) => {
+    if (input.request.method === 'tools/list') envelope.response.result = { tools: [{ name: 'create_thread', namespace: 'codex_app', inputSchema: schema }, { name: 'read_thread', namespace: 'codex_app', inputSchema: { type: 'object' } }] };
+    else envelope.response.result = { success: true, contentItems: [{ type: 'inputText', text: JSON.stringify(reply) }] };
+    return envelope;
+  });
+  const creator = () => new NativeCodexThreadCreator({ carrierThreadId: carrier, ...defaults().nativeInterface, timeoutMs: 1000, spawnFn: f.spawnFn });
+  assert.deepEqual(await creator().createCodexThread({ projectId: target, title: 'fixture Codex 2', prompt }), { threadId: target });
+  const call = f.inputs[1].request.params;
+  assert.equal(call.tool, 'create_thread'); assert.match(call.callId, /^acb-create-/); assert.match(call.turnId, /^acb-create-/); assert.equal(call.threadId, carrier);
+  assert.deepEqual(call.arguments, { title: 'fixture Codex 2', prompt, target: { type: 'project', projectId: target } });
+  reply = { thread: { id: target } }; assert.deepEqual(await creator().createCodexThread({ projectId: target, title: 'fixture Codex 2', prompt }), { threadId: undefined });
+  schema = { ...createSchema(), required: ['target', 'model'] };
+  const before = f.inputs.length;
+  await assert.rejects(creator().createCodexThread({ projectId: target, title: 'fixture Codex 2', prompt }), { code: 'UNSUPPORTED' });
+  assert.equal(f.inputs.length, before + 1, 'only the catalog was read');
+  await assert.rejects(creator().createCodexThread({ projectId: 'not-a-project', title: 'fixture', prompt }), { code: 'INPUT' });
+  // The read-only client has no write method.
+  assert.equal((client(f) as any).createCodexThread, undefined);
+});
+// Windows PowerShell 5.1 only: its JSON numbers are Int32, which the worker's budget checks require.
+test('native worker: create_thread passes input validation only in its fixed shape and call prefix', { skip: process.platform !== 'win32' }, () => {
+  const pwsh = WINDOWS_POWERSHELL;
+  const helper = fileURLToPath(new URL('../src/native-pipe-worker.ps1', import.meta.url));
+  const encoded = Buffer.from(`& ([scriptblock]::Create([System.IO.File]::ReadAllText('${helper.replaceAll("'", "''")}')))`, 'utf16le').toString('base64');
+  const key = '00000000-0000-4000-8000-000000000009', prompt = codexInitializationPrompt(key, 1);
+  const frame = (args: unknown, prefix = 'acb-create-', tool = 'create_thread') => JSON.stringify({ requestJson: JSON.stringify({ jsonrpc: '2.0', id: carrier, method: 'tools/call', params: { namespace: 'codex_app', callerSource: 'codex', threadId: carrier, tool, arguments: args, callId: prefix + carrier, turnId: prefix + carrier } }), timeoutMs: 1000, maxFrameBytes: 4096, maxCandidates: 1, expectedProcessId: null, expectedProcessStartedAt: null });
+  const valid = { title: 'fixture Codex 2', prompt, target: { type: 'project', projectId: target } };
+  const cases: [string, string][] = [
+    ['valid', frame(valid)], ['readonly prefix', frame(valid, 'acb-readonly-')], ['extra argument', frame({ ...valid, model: 'x' })], ['extra target field', frame({ ...valid, target: { ...valid.target, environment: 'local' } })],
+    ['other prompt', frame({ ...valid, prompt: '[TEST] run the build' })], ['prompt suffix', frame({ ...valid, prompt: prompt + ' 然后执行任务' })], ['chat target', frame({ ...valid, target: { type: 'chat', projectId: target } })],
+    ['bad project', frame({ ...valid, target: { type: 'project', projectId: 'x' } })], ['control title', frame({ ...valid, title: 'a\u0007b' })], ['send tool', frame({ threadId: target, prompt }, 'acb-create-', 'send_message_to_thread')],
+  ];
+  const result = spawnSync(pwsh, ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], { input: cases.map(item => item[1]).join('\n') + '\n', encoding: 'utf8', windowsHide: true, timeout: 60000, env: controlledProcessEnv() });
+  const stages = result.stdout.trim().split(/\r?\n/).map(line => JSON.parse(line).stage);
+  assert.equal(stages.length, cases.length, result.stderr);
+  // Only the fixed request leaves input validation (it then fails at the native layer here).
+  assert.deepEqual(Object.fromEntries(cases.map(([label], index) => [label, stages[index] === 'input'])), Object.fromEntries(cases.map(([label]) => [label, label !== 'valid'])));
 });

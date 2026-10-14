@@ -228,7 +228,7 @@ test('project recovery: a lost workspace stays PROVENANCE until an explicit, ver
   f.host.createWorkspace=async(_name,workspacePath)=>{attempts++;if(attempts<2)throw new BridgeError('TIMEOUT','[TEST] workspace-create timed out at workspace-confirm');return {appProjectId:'native-after-restart',workspacePath};};
   const root=join(f.root,'workspaces'),p=new ProjectProvisioner(f.db,f.authority,{root,timeoutMs:100,host:f.host});
   const first=await p.prepare('restart-project','restart-event',f.context);
-  assert.equal(first.state,'UNCERTAIN');assert.equal(first.phase,'workspace');assert.deepEqual(first.stages,{directoryCreated:true,nativeWorkspace:false,gptConversation:false,codexConversations:0,codexRequested:1});
+  assert.equal(first.state,'UNCERTAIN');assert.equal(first.phase,'workspace');assert.deepEqual(first.stages,{directoryCreated:true,nativeWorkspace:false,gptConversation:false,codexConversations:0,codexRequested:1,codexPending:null});
   // Reconciliation has no receipt to follow and never creates: only PROVENANCE.
   await assert.rejects(p.reconcile(first.id,f.context),{code:'PROVENANCE'});assert.equal(attempts,1);
   await assert.rejects(p.restartWorkspace(first.id,f.context),{code:'UNSUPPORTED'});
@@ -269,7 +269,8 @@ test('project provisioning: two Codex conversations get distinct formal receipts
   assert.equal(repeated.state,'UNCERTAIN');assert.equal(repeated.errorCode,'PROVENANCE');assert.equal(f.db.prepare('SELECT COUNT(*) n FROM projects WHERE name=?').get('repeat-codex')!.n,0);
   let extra=0;f.host.createCodexConversation=async(_project,_path,_signal,_key,index=0)=>{if(index){extra++;throw new BridgeError('IO','[TEST] receipt lost');}return {conversationId:'lost-codex-0'};};
   const lost=await p.prepare('lost-codex','lost-event',f.context,{codexConversations:2});
-  assert.equal(lost.phase,'codex.extra');await assert.rejects(p.reconcile(lost.id,f.context),{code:'UNSUPPORTED'});assert.equal(extra,1);
+  // Without a host that reads the conversation's own initialization receipt, nothing is inferred.
+  assert.equal(lost.phase,'codex.extra');await assert.rejects(p.reconcile(lost.id,f.context),{code:'PROVENANCE'});assert.equal(extra,1);
 });
 
 test('project provisioning: without a formal Codex creator the bundle waits for verified operator-created conversations',async t=>{
@@ -279,7 +280,7 @@ test('project provisioning: without a formal Codex creator the bundle waits for 
   const p=new ProjectProvisioner(f.db,f.authority,{root:join(f.root,'workspaces'),timeoutMs:100,host:f.host});
   const waiting=await p.prepare('attach-project','attach-event',f.context,{codexConversations:2});
   assert.equal(waiting.state,'BLOCKED');assert.equal(waiting.errorCode,'CODEX_ATTACH_REQUIRED');assert.equal(waiting.phase,'codex.attach');
-  assert.deepEqual(waiting.stages,{directoryCreated:true,nativeWorkspace:true,gptConversation:true,codexConversations:0,codexRequested:2});
+  assert.deepEqual(waiting.stages,{directoryCreated:true,nativeWorkspace:true,gptConversation:true,codexConversations:0,codexRequested:2,codexPending:null});
   assert.match(String(f.db.prepare("SELECT payload FROM notification_outbox WHERE dedupe_key LIKE '%codex-attach%'").get()!.payload),/acb_project_attach_codex/);
   await assert.rejects(p.attachCodex(waiting.id,'operator-codex-1',f.context),{code:'UNSUPPORTED'});
   f.host.verifyCodexMember=async input=>{if(input.conversationId==='foreign-codex')throw new BridgeError('PROVENANCE','[TEST] other workspace');assert.equal(input.appProjectId,'native-project-fixture');verified.push(input.conversationId);};
@@ -296,5 +297,83 @@ test('project provisioning: without a formal Codex creator the bundle waits for 
   assert.equal(ready.state,'READY');assert.deepEqual(verified,['operator-codex-1','operator-codex-2']);assert.equal(created,0);
   assert.deepEqual(f.db.prepare('SELECT conversation_id FROM codex_conversations WHERE project_id=? ORDER BY conversation_id').all(ready.projectId).map(row=>row.conversation_id),['operator-codex-1','operator-codex-2']);
   assert.equal(f.db.prepare("SELECT COUNT(*) n FROM audit_log WHERE action='project_codex_attach'").get()!.n,2);
-  await assert.rejects(p.attachCodex(waiting.id,'operator-codex-3',f.context),{code:'STATE'});
+  // READY keeps accepting verified members of the same workspace.
+  assert.equal((await p.attachCodex(waiting.id,'operator-codex-3',f.context)).stages!.codexConversations,3);
+});
+
+test('READY project: verified Codex conversations are added by attach or one formal creation per approved attempt, never resent',async t=>{
+  const f=fixture(t),signal=new AbortController().signal,{randomUUID}=await import('node:crypto');
+  f.host.createWorkspace=async(name,workspacePath)=>({appProjectId:`native-${name}`,workspacePath});
+  f.host.createOrdinaryChat=async(appProjectId)=>({conversationId:`${appProjectId}-gpt`});f.host.createCodexConversation=async appProjectId=>({conversationId:`${appProjectId}-codex`});
+  const p=new ProjectProvisioner(f.db,f.authority,{root:join(f.root,'workspaces'),timeoutMs:100,host:f.host});
+  const declared=await f.host.inspect(signal);f.host.inspect=async()=>({...declared,createCodexConversation:true});
+  const ready=await p.prepare('one-codex','one-codex-event',f.context),other=await p.prepare('other-project','other-event',f.context);
+  assert.equal(ready.state,'READY');assert.equal(other.state,'READY');
+  const hash=f.db.prepare('SELECT request_hash FROM project_operations WHERE id=?').get(ready.id)!.request_hash,id=ready.id;
+  await assert.rejects(p.attachCodex(id,'operator-codex',f.context),{code:'UNSUPPORTED'});
+  const verified:string[]=[];
+  f.host.verifyCodexMember=async input=>{if(input.conversationId.startsWith('foreign'))throw new BridgeError('PROVENANCE','[TEST] other workspace');assert.equal(input.appProjectId,'native-one-codex');assert.equal(input.name,'one-codex');verified.push(input.conversationId);};
+  // Same-project repeats are idempotent; GPT, other projects and foreign workspaces are refused.
+  assert.equal((await p.attachCodex(id,'native-one-codex-codex',f.context)).stages!.codexConversations,1);
+  for(const [conversation,code] of [['native-one-codex-gpt','CONFLICT'],['native-other-project-codex','CONFLICT'],['native-other-project-gpt','CONFLICT'],['foreign-codex','PROVENANCE'],['bad id!','INPUT']] as const)
+    await assert.rejects(p.attachCodex(id,conversation,f.context),{code},conversation);
+  const foreign=f.authority.issue({principal:'fixture:foreign',instance:'two',executor:'hermes',controller:true,reviewer:false});
+  await assert.rejects(p.attachCodex(id,'operator-codex',foreign),{code:'NOT_FOUND'});
+  f.db.prepare('INSERT INTO project_access(project_id,principal) VALUES(?,?)').run(ready.projectId,'fixture:foreign');
+  await assert.rejects(p.attachCodex(id,'operator-codex',f.context),{code:'AUTH'});
+  f.db.prepare('DELETE FROM project_access WHERE principal=?').run('fixture:foreign');
+  assert.equal(verified.length,0);
+  const attached=await p.attachCodex(id,'operator-codex',f.context);
+  assert.equal(attached.state,'READY');assert.deepEqual(attached.resources!.extraCodexConversationIds,['operator-codex']);assert.equal(attached.stages!.codexConversations,2);
+  assert.equal((await p.attachCodex(id,'operator-codex',f.context)).stages!.codexConversations,2);assert.deepEqual(verified,['operator-codex']);
+  // Formal creation: one reviewer approval per attempt, codex-thread only, the pending index saved first.
+  const scopes:{operationId:string;attempt:string;effects:string[]}[]=[];let calls=0,lose=false;
+  f.host.authorizeInitialization=async(name,path,_signal,scope)=>{assert.equal(name,'one-codex');assert.equal(path,ready.workspacePath);scopes.push(scope);};
+  f.host.createCodexConversation=async(appProjectId,workspacePath,_signal,key,index,scope)=>{
+    calls++;assert.equal(appProjectId,'native-one-codex');assert.equal(workspacePath,ready.workspacePath);assert.equal(key,id);assert.equal(scope,scopes.at(-1));
+    assert.equal(p.get(id,f.context).stages!.codexPending,index);
+    if(lose)throw new BridgeError('IO','[TEST] create_thread reply lost');return {conversationId:`formal-codex-${index}`};
+  };
+  const created=await p.createCodex(id,f.context);
+  assert.deepEqual(created.resources!.extraCodexConversationIds,['operator-codex','formal-codex-2']);assert.equal(created.stages!.codexPending,null);
+  assert.deepEqual(scopes.map(scope=>[scope.operationId,scope.effects]),[[id,['codex-thread']]]);
+  f.host.authorizeInitialization=async()=>{throw new BridgeError('AUTH','[TEST] reviewer rejected');};
+  await assert.rejects(p.createCodex(id,f.context),{code:'AUTH'});assert.equal(p.get(id,f.context).stages!.codexPending,null);assert.equal(calls,1);
+  f.host.authorizeInitialization=async(_name,_path,_signal,scope)=>{scopes.push(scope);};
+  const capabilities=await f.host.inspect(signal),inspect=f.host.inspect;f.host.inspect=async()=>({...capabilities,createCodexConversation:false});
+  await assert.rejects(p.createCodex(id,f.context),{code:'UNSUPPORTED'});f.host.inspect=inspect;
+  // A lost receipt stays pending; the next call reads the original receipt and never creates again.
+  lose=true;await assert.rejects(p.createCodex(id,f.context),{code:'IO'});
+  assert.equal(p.get(id,f.context).stages!.codexPending,3);assert.equal(calls,2);assert.notEqual(scopes.at(-1)!.attempt,scopes[0].attempt);
+  assert.match(String(f.db.prepare("SELECT payload FROM notification_outbox WHERE dedupe_key LIKE ?").get(`project:${id}:codex-create:3:%`)!.payload),/never resent/);
+  await assert.rejects(p.createCodex(id,f.context),{code:'UNSUPPORTED'});
+  let observed:unknown;f.host.observeCodexCreation=async input=>{observed=input;return undefined;};
+  await assert.rejects(p.createCodex(id,f.context),{code:'PROVENANCE'});assert.deepEqual(observed,{appProjectId:'native-one-codex',workspacePath:ready.workspacePath,operationKey:id,index:3});
+  f.host.observeCodexCreation=async()=>'recovered-codex-3';
+  const recovered=await p.createCodex(id,f.context);
+  assert.equal(recovered.stages!.codexConversations,4);assert.equal(recovered.stages!.codexPending,null);assert.equal(calls,2);
+  assert.deepEqual(f.db.prepare('SELECT conversation_id FROM codex_conversations WHERE project_id=? ORDER BY conversation_id').all(ready.projectId).map(row=>row.conversation_id),['formal-codex-2','native-one-codex-codex','operator-codex','recovered-codex-3']);
+  await assert.rejects(p.createCodex(id,f.context),{code:'CONFLICT'});await assert.rejects(p.attachCodex(id,'operator-codex-5',f.context),{code:'CONFLICT'});
+  assert.deepEqual(f.db.prepare("SELECT action,detail FROM audit_log WHERE action IN ('project_codex_add','project_codex_create') ORDER BY rowid").all().map(row=>[row.action,String(row.detail).replace(id,'<id>')]),
+    [['project_codex_add','operation=<id> conversation=operator-codex source=attach'],['project_codex_create','operation=<id> index=2'],['project_codex_add','operation=<id> conversation=formal-codex-2 source=created'],
+     ['project_codex_create','operation=<id> index=3'],['project_codex_add','operation=<id> conversation=recovered-codex-3 source=recovered']]);
+  // The original request fingerprint and requested count are unchanged; READY creation needs READY.
+  assert.equal(f.db.prepare('SELECT request_hash FROM project_operations WHERE id=?').get(id)!.request_hash,hash);assert.equal(recovered.stages!.codexRequested,1);
+  assert.equal((await p.prepare('one-codex','one-codex-event',f.context)).id,id);
+  const blocked=await new ProjectProvisioner(f.db,f.authority,{root:join(f.root,'blocked'),timeoutMs:100}).prepare('blocked-project','blocked-event',f.context);
+  await assert.rejects(p.createCodex(blocked.id,f.context),{code:'STATE'});assert.ok(randomUUID());
+});
+test('project provisioning: a hidden or ambiguous native workspace entry stops before approval, directory or restart budget',async t=>{
+  const f=fixture(t);let entry='offscreen',approvals=0;
+  f.host.probeWorkspaceEntry=async()=>{if(entry!=='ready')throw new BridgeError('STATE',`[TEST] entry ${entry}`);};
+  f.host.authorizeInitialization=async()=>{approvals++;};
+  const p=new ProjectProvisioner(f.db,f.authority,{root:join(f.root,'workspaces'),timeoutMs:100,host:f.host});
+  const blocked=await p.prepare('entry-project','entry-event',f.context);
+  assert.equal(blocked.state,'BLOCKED');assert.equal(blocked.errorCode,'STATE');assert.equal(existsSync(blocked.workspacePath),false);assert.equal(approvals,0);assert.equal(f.creates(),0);
+  entry='ready';f.host.createWorkspace=async()=>{throw new BridgeError('TIMEOUT','[TEST] workspace-create timed out');};
+  const uncertain=await p.prepare('entry-project','entry-event',f.context);
+  assert.equal(uncertain.id,blocked.id);assert.equal(uncertain.state,'UNCERTAIN');assert.equal(approvals,1);
+  f.host.nativeWorkspaces=async()=>[];entry='ambiguous';
+  await assert.rejects(p.restartWorkspace(uncertain.id,f.context),{code:'STATE'});
+  assert.equal(approvals,1);assert.equal(f.db.prepare("SELECT COUNT(*) n FROM audit_log WHERE action='project_workspace_restart'").get()!.n,0);
 });
