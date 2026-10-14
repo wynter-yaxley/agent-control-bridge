@@ -255,3 +255,19 @@ test('windows native host: a hidden add-project entry blocks creation before app
   assert.match(String(scope.db.prepare("SELECT payload FROM notification_outbox WHERE dedupe_key LIKE '%BLOCKED:STATE%'").get()!.payload),/offscreen/);
   const {existsSync}=await import('node:fs');assert.equal(existsSync(blocked.workspacePath),false);
 });
+
+test('windows native host: create_thread refusals before the call are UNSUPPORTED; a reply lost after it is read back',async t=>{
+  const scope=isolatedDemo();t.after(()=>scope.close());const config=defaults(scope.root),signal=new AbortController().signal;
+  const {fileDesktop}=await import('./fixtures/native-desktop.ts'),{BridgeError}=await import('../src/errors.ts'),{randomUUID}=await import('node:crypto');
+  const desktop=fileDesktop(join(scope.root,'desktop.json'),config),path='D:\\refusals',key=randomUUID();
+  desktop.update(state=>{state.projects.push({projectId:'native-refusals',projectKind:'local',hostId:'local',label:'refusals',path});});
+  const attempt={operationId:key,attempt:randomUUID(),effects:['codex-thread' as const]};
+  for(const code of ['IPC_CONFIG','INPUT','UNSUPPORTED'] as const) {
+    const host=createWindowsNativeProjectHost({config,native:{...desktop.native,createCodexThread:async()=>{throw new BridgeError(code,'[TEST] refused');}},authorizeInitialization:async()=>true});
+    await assert.rejects(host.createCodexConversation('native-refusals',path,signal,key,0,attempt),{code:'UNSUPPORTED'},code);
+  }
+  // The peer check after the reply is not proof of no effect: the receipt is read back.
+  const host=createWindowsNativeProjectHost({config,native:{...desktop.native,createCodexThread:async input=>{await desktop.native.createCodexThread!(input,signal);throw new BridgeError('OWNER','[TEST] peer changed after reply');}},authorizeInitialization:async()=>true});
+  const created=await host.createCodexConversation('native-refusals',path,signal,key,0,attempt);
+  assert.equal(created.conversationId,desktop.load().threads.find(item=>item.kind==='codex')!.id);assert.equal(desktop.load().creates.codex,1);
+});

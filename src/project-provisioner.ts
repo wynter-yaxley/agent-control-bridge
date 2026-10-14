@@ -36,7 +36,8 @@ export interface ProjectHost {
   // appProjectId correlates this creation operation; ordinary GPT is not moved
   // into a Codex native project. verifyBundle must independently read its title.
   createOrdinaryChat(appProjectId: string, exactName: string, signal: AbortSignal, operationKey?: string, scope?: InitializationScope): Promise<{ conversationId: string }>;
-  /** index > 0 names an additional conversation of the same workspace. */
+  /** index > 0 names an additional conversation of the same workspace. AUTH and
+   * UNSUPPORTED are thrown only when no native effect was started. */
   createCodexConversation(appProjectId: string, workspacePath: string, signal: AbortSignal, operationKey?: string, index?: number, scope?: InitializationScope): Promise<{ conversationId: string }>;
   /** Read-only: the conversation created for operationKey/index, found by its initialization receipt. */
   observeCodexCreation?(input: { appProjectId: string; workspacePath: string; operationKey: string; index: number }, signal: AbortSignal): Promise<string | undefined>;
@@ -57,6 +58,7 @@ type OperationResources = Partial<ProjectResources> & { pendingCodex?: PendingCo
 export interface ProjectStages { directoryCreated: boolean; nativeWorkspace: boolean; gptConversation: boolean; codexConversations: number; codexRequested: number; codexPending: number | null }
 export interface ProjectOperation { id: string; projectId: string; name: string; workspacePath: string; state: string; errorCode: string | null; phase?: string | null; resources: Partial<ProjectResources> | null; stages?: ProjectStages }
 const MAX_CODEX_CONVERSATIONS = 4, MAX_WORKSPACE_RESTARTS = 2;
+const refusedBeforeEffect = (error: unknown) => error instanceof BridgeError && (error.code === 'AUTH' || error.code === 'UNSUPPORTED');
 
 export class ProjectProvisioner {
   private readonly db: DatabaseSync;
@@ -246,6 +248,12 @@ export class ProjectProvisioner {
       try {
         conversationId = (await withDeadline(signal => this.host!.createCodexConversation(resources.appProjectId!, resources.workspacePath!, signal, key, index, scope), this.timeoutMs)).conversationId;
       } catch (error) {
+        // A refusal before any effect releases the pending index; anything else keeps it for recovery.
+        if (refusedBeforeEffect(error)) {
+          const released: OperationResources = { ...marked }; delete released.pendingCodex;
+          this.db.prepare("UPDATE project_operations SET resources=?,updated_at=? WHERE id=? AND state='READY' AND resources=?").run(JSON.stringify(released), now(), id, JSON.stringify(marked));
+          throw error;
+        }
         const failure = classifyError(error);
         enqueueNotification(this.db, principal, `project:${id}:codex-create:${index}:${failure.code}:${promptHash(failure.message).slice(0, 12)}`, { operationId: id, state: 'READY', codexPending: index, errorCode: failure.code, detail: failure.message.slice(0, 300),
           action: 'Run acb_project_create_codex again to recover this creation from its receipt; it is never resent' });
@@ -384,32 +392,37 @@ export class ProjectProvisioner {
       resources.chatgptConversationId=chat.conversationId;this.saveResources(id,resources,'gpt.done');
     }
     const attached=(resources.codexConversationId ? 1 : 0)+(resources.extraCodexConversationIds?.length ?? 0);
-    if(attached<(resources.codexConversations ?? 1) && (await withDeadline(signal=>this.host!.inspect(signal),this.timeoutMs)).createCodexConversation===false) {
-      // No formal creator: wait for the operator to create conversations in this
-      // workspace and attach them; nothing is inferred from titles.
-      this.saveResources(id,resources,'codex.attach');
-      transaction(this.db,()=>{
-        this.db.prepare("UPDATE project_operations SET state='BLOCKED',error_code='CODEX_ATTACH_REQUIRED',updated_at=? WHERE id=? AND state='PROVISIONING'").run(now(),id);
-        enqueueNotification(this.db,this.authority.resolve(context)!.principal,`project:${id}:codex-attach:${attached}`,{operationId:id,state:'BLOCKED',errorCode:'CODEX_ATTACH_REQUIRED',missing:(resources.codexConversations ?? 1)-attached,
-          action:`Create the missing Codex conversation(s) in native workspace "${resources.name}" and attach each with acb_project_attach_codex`});
-      });
-      return;
-    }
+    if(attached<(resources.codexConversations ?? 1) && (await withDeadline(signal=>this.host!.inspect(signal),this.timeoutMs)).createCodexConversation===false)return this.awaitAttach(id,resources,context);
     if(!resources.codexConversationId) {
       this.db.prepare("UPDATE project_operations SET phase='codex' WHERE id=?").run(id);
-      const codex=await withDeadline(signal=>this.host!.createCodexConversation(resources.appProjectId!,resources.workspacePath!,signal,resources.initializationKey,0,scope),this.timeoutMs);
+      let codex;
+      try {codex=await withDeadline(signal=>this.host!.createCodexConversation(resources.appProjectId!,resources.workspacePath!,signal,resources.initializationKey,0,scope),this.timeoutMs);}
+      catch(error){if(refusedBeforeEffect(error))return this.awaitAttach(id,resources,context,error);throw error;}
       resources.codexConversationId=codex.conversationId;this.saveResources(id,resources,'codex.done');
     }
     // Additional conversations are created one at a time; each formal receipt is saved before the next.
     for(let index=1+(resources.extraCodexConversationIds?.length ?? 0);index<(resources.codexConversations ?? 1);index++) {
       this.db.prepare("UPDATE project_operations SET phase='codex.extra' WHERE id=?").run(id);
-      const codex=await withDeadline(signal=>this.host!.createCodexConversation(resources.appProjectId!,resources.workspacePath!,signal,resources.initializationKey,index,scope),this.timeoutMs);
+      let codex;
+      try {codex=await withDeadline(signal=>this.host!.createCodexConversation(resources.appProjectId!,resources.workspacePath!,signal,resources.initializationKey,index,scope),this.timeoutMs);}
+      catch(error){if(refusedBeforeEffect(error))return this.awaitAttach(id,resources,context,error);throw error;}
       if([resources.codexConversationId,resources.chatgptConversationId,...(resources.extraCodexConversationIds ?? [])].includes(codex.conversationId))throw new BridgeError('PROVENANCE','Codex receipt repeats an existing conversation');
       resources.extraCodexConversationIds=[...(resources.extraCodexConversationIds ?? []),codex.conversationId];this.saveResources(id,resources,'codex.extra.done');
     }
     this.db.prepare("UPDATE project_operations SET phase='verify' WHERE id=?").run(id);
     const observed=await withDeadline(signal=>this.host!.verifyBundle(resources as ProjectResources,signal),this.timeoutMs);
     this.assertBundle(resources as ProjectResources,observed);this.registerBundle(id,resources as ProjectResources,context);
+  }
+  /** No formal creator, or one that refused before any effect: wait for the operator
+   * to create conversations in this workspace and attach them; nothing is inferred. */
+  private awaitAttach(id: string, resources: Partial<ProjectResources>, context: CallerContext, refusal?: unknown): void {
+    const attached=(resources.codexConversationId ? 1 : 0)+(resources.extraCodexConversationIds?.length ?? 0);
+    this.saveResources(id,resources,'codex.attach');
+    transaction(this.db,()=>{
+      this.db.prepare("UPDATE project_operations SET state='BLOCKED',error_code='CODEX_ATTACH_REQUIRED',updated_at=? WHERE id=? AND state='PROVISIONING'").run(now(),id);
+      enqueueNotification(this.db,this.authority.resolve(context)!.principal,`project:${id}:codex-attach:${attached}`,{operationId:id,state:'BLOCKED',errorCode:'CODEX_ATTACH_REQUIRED',missing:(resources.codexConversations ?? 1)-attached,
+        ...(refusal?{detail:classifyError(refusal).message.slice(0,300)}:{}),action:`Create the missing Codex conversation(s) in native workspace "${resources.name}" and attach each with acb_project_attach_codex`});
+    });
   }
   private assertBundle(resources: ProjectResources, observed: Awaited<ReturnType<ProjectHost['verifyBundle']>>): void {
     if (!observed || observed.source !== 'application-host' || observed.kind !== 'ordinary-chat' || observed.workspaceSurface !== 'native-desktop' ||

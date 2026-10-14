@@ -377,3 +377,18 @@ test('project provisioning: a hidden or ambiguous native workspace entry stops b
   await assert.rejects(p.restartWorkspace(uncertain.id,f.context),{code:'STATE'});
   assert.equal(approvals,1);assert.equal(f.db.prepare("SELECT COUNT(*) n FROM audit_log WHERE action='project_workspace_restart'").get()!.n,0);
 });
+test('project provisioning: a Codex creation refused before any effect waits for attach instead of staying uncertain',async t=>{
+  const f=fixture(t),capabilities=await f.host.inspect(new AbortController().signal);let created=0;
+  f.host.inspect=async()=>({...capabilities,createCodexConversation:true});
+  f.host.createCodexConversation=async()=>{created++;throw new BridgeError('AUTH','[TEST] reviewer rejected codex-thread');};
+  f.host.verifyCodexMember=async()=>{};
+  const p=new ProjectProvisioner(f.db,f.authority,{root:join(f.root,'workspaces'),timeoutMs:100,host:f.host});
+  const waiting=await p.prepare('refused-codex','refused-event',f.context);
+  assert.equal(waiting.state,'BLOCKED');assert.equal(waiting.phase,'codex.attach');assert.equal(waiting.errorCode,'CODEX_ATTACH_REQUIRED');assert.equal(created,1);
+  assert.match(String(f.db.prepare("SELECT payload FROM notification_outbox WHERE dedupe_key LIKE '%codex-attach%'").get()!.payload),/reviewer rejected/);
+  assert.equal((await p.attachCodex(waiting.id,'operator-codex',f.context)).state,'READY');
+  // On a READY project the same refusal releases the pending index; nothing is left to recover.
+  f.host.createCodexConversation=async()=>{created++;throw new BridgeError('UNSUPPORTED','[TEST] create_thread schema incompatible');};
+  await assert.rejects(p.createCodex(waiting.id,f.context),{code:'UNSUPPORTED'});
+  const after=p.get(waiting.id,f.context);assert.equal(after.stages!.codexPending,null);assert.equal(after.stages!.codexConversations,1);assert.equal(created,2);
+});

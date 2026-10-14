@@ -232,8 +232,9 @@ export function createWindowsNativeProjectHost(options: { config: BridgeConfig; 
       let threadId:string | undefined,lost:unknown;
       try {threadId=(await native.createCodexThread({projectId:appProjectId,title,prompt},signal)).threadId;}
       catch(error) {
-        // Refusals before the call (schema, approval, peer) cannot have created a thread.
-        if(error instanceof BridgeError && ['UNSUPPORTED','IPC_CONFIG','OWNER','INPUT','AUTH'].includes(error.code))throw error;
+        // Refusals before the call (schema, input, rejected parameters) cannot have created a
+        // thread and are reported as UNSUPPORTED; anything else may have, so read the receipt.
+        if(error instanceof BridgeError && ['UNSUPPORTED','IPC_CONFIG','INPUT'].includes(error.code))throw new BridgeError('UNSUPPORTED',`Formal Codex creation was refused before any native effect (${error.code})`);
         lost=error;
       }
       // A receipt naming a thread that existed before this call is not a new conversation.
