@@ -34,10 +34,17 @@ $script:stage='input'
 $mutex=$null
 $locked=$false
 try {
+ # Distinct stages tell the operator why UIA is unavailable; no app is started or restarted.
+ $script:stage='interactive-desktop'
  if (-not [AcbFolderControls]::Interactive()) {throw 'OWNER'}
  $deadline=[DateTime]::UtcNow.AddMilliseconds($request.timeoutMs)
- $windows=@(Get-Process -Name ChatGPT | Where-Object {$_.MainWindowHandle -ne 0})
+ $script:stage='chatgpt-process'
+ $processes=@(Get-Process -Name ChatGPT -ErrorAction SilentlyContinue)
+ if ($processes.Count -eq 0) {throw 'OWNER'}
+ $script:stage='chatgpt-window'
+ $windows=@($processes | Where-Object {$_.MainWindowHandle -ne 0})
  if ($windows.Count -ne 1) {throw 'OWNER'}
+ $script:stage='input'
  $window=$windows[0]
  $script:root=[System.Windows.Automation.AutomationElement]::FromHandle($window.MainWindowHandle)
  function Find($scope,[string]$type,[string]$name,[string]$id='') {
@@ -114,6 +121,7 @@ try {
  }
  function GptBusy {return ($null -ne (Find (Document) 'Button' '停止') -or $null -ne (Find (Document) 'Text' 'ChatGPT 正在回应'))}
  if ($request.operation -eq 'identity') {
+  $script:stage='gpt-document'
   $doc=Document
   if (-not $doc) {throw 'OWNER'}
   Respond @{ok=$true;snapshot=@{title=$doc.Current.Name;text='';conversationId=$null;ordinaryComposer=($null -ne (Find $doc 'Edit' '询问 ChatGPT'));pid=$window.Id}};return

@@ -4,6 +4,8 @@ Versions follow Semantic Versioning. Development delivery remains pending indepe
 
 ## Unreleased
 
+- Fix cross-process project recovery: bundle verification no longer depends on an in-process GPT ID cache that a restarted Bridge lacks, nor on a UIA conversation ID the current ChatGPT build does not expose. A fresh host re-reads native project/thread membership and the operation's exact ACB_INIT receipt; no GUI, recreation or resend. Foreign same-title chats and Codex threads of other projects stay rejected.
+- UIA title fallback reports the failed worker stage (interactive desktop, ChatGPT process, unique window, document) and treats an empty Document name as unavailable instead of titleOnly. A missing ChatGPT process no longer surfaces as a generic EXECUTION error.
 - Synchronize original RUNNING_OBSERVED completion across task/run/request, check affected rows, and make completed reconciliation avoid duplicate feedback/notifications. Reject unrelated normal RUNNING recovery.
 - Resume complete, unchanged, verified PENDING prompts after proven owner exit only when no dispatch/run exists; reuse the original prompt. Fix Windows missing-PID lookup so normal absence is not misclassified as query failure.
 - Remove the fictitious Codex initialization-marker recovery contract. Preserve known formal thread IDs and native membership; lost IDs without a real original host receipt remain uncertain without probes or recreation.

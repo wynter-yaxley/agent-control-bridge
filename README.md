@@ -124,7 +124,7 @@ Hermes 虚拟环境 MCP SDK 已连接 Windows 编译入口与真实 OS 策略，
 
 ## 精确会话与完成边界
 
-CDP 优先复用当前实例已有端点，先校验端口所属签名进程与唯一已有 ChatGPT WebView，再比对 /c/UUID 和 Native 登记 ID。不能连接或无法证明唯一目标即回退 UIA Document.Current.Name，返回 titleOnly、conversationId:null 和空消息，不反复扫描 UUID；连名称也不可得则 unavailable。诊断保留 cdpError，不把回退当作 CDP 成功。identityVerified 与标题证据严格区分。
+CDP 优先复用当前实例已有端点，先校验端口所属签名进程与唯一已有 ChatGPT WebView，再比对 /c/UUID 和 Native 登记 ID。不能连接或无法证明唯一目标即回退 UIA Document.Current.Name，返回 titleOnly、conversationId:null 和空消息，不反复扫描 UUID；连名称也不可得（含名称为空）则 unavailable，reason 给出失败阶段：interactive-desktop（锁屏/非交互桌面）、chatgpt-process（进程不存在）、chatgpt-window（无唯一主窗口，如窗口隐藏到托盘或存在多个窗口）、gpt-document（无 Document）。诊断保留 cdpError，不把回退当作 CDP 成功。identityVerified 与标题证据严格区分。
 
 现有聊天写入仍需在同一桌面操作中、修改草稿前和提交前核对精确身份，并在提交后验证原生回执。当前 UIA URI 只有通用 index.html，跨 CDP/UIA 的原子目标保证也未打通，故拒绝工程写入。新聊天仅在本次可信创建批准下有例外：确认新建空白普通聊天，以唯一 ACB_INIT 标识发送不含工程任务的初始化消息，关联原生新增 ID/精确用户消息/类型/同名标题；不确定即保留原阶段，不重发。Codex 不使用 GPT 页面 URI，也没有 UIA Work 工程发送兜底。
 
@@ -177,7 +177,7 @@ CDP 优先复用当前实例已有端点，先校验端口所属签名进程与�
 | GPT generation UNCERTAIN | reconcile_generation 回读原请求；合成完成不足以证明流式结束 |
 | 工程 UNCERTAIN | 原 turnId 或精确 dispatchId 回读；仍运行则 RUNNING，完成进入 WAITING_APPROVAL，不 resume/start 重跑 |
 | 反馈 SENDING/UNCERTAIN | reconcile_feedback，不重发结果 |
-| project UNCERTAIN | 保存 phase/resources；只有唯一原阶段回执才能补记遗失 ID，安全缺失步骤才继续；未知则阻断，不补造 |
+| project UNCERTAIN | 保存 phase/resources；只有唯一原阶段回执才能补记遗失 ID，安全缺失步骤才继续；未知则阻断，不补造。重启后的新宿主按原生项目/线程归属和原 ACB_INIT 初始化消息核验已有资源，不要求重新打开 GPT 页面 |
 | DB / SCHEMA | 一致性备份、副本验证、显式迁移 |
 | TIMEOUT / 失联 | 保留未知结果并按阈值报告，不以失联推断成功或确定退出 |
 

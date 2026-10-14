@@ -37,6 +37,47 @@ test('windows native host: authorized UI identity setup registers READY without 
   assert.equal(scope.db.prepare('SELECT COUNT(*) n FROM prompts').get()!.n,0);
 });
 
+test('windows native host: a fresh Bridge process restores a crashed project to READY without recreating or resending',async t=>{
+  const scope=isolatedDemo();t.after(()=>scope.close());
+  const dbPath=join(scope.root,'demo.sqlite'),state=join(scope.root,'desktop.json');
+  const {spawnSync}=await import('node:child_process'),{createDb}=await import('../src/db.ts'),{BackgroundBridge}=await import('../src/background.ts'),{fileDesktop}=await import('./fixtures/native-desktop.ts');
+  const url=(path:string)=>JSON.stringify(new URL(path,import.meta.url).href);
+  // Process one creates every resource, then exits before verification/READY.
+  const child=spawnSync(process.execPath,['--input-type=module','-e',`
+    import {createDb} from ${url('../src/db.ts')};import {defaults} from ${url('../src/config.ts')};import {CallerAuthority} from ${url('../src/caller.ts')};
+    import {ProjectProvisioner} from ${url('../src/project-provisioner.ts')};import {createWindowsNativeProjectHost} from ${url('../src/windows-native-host.ts')};import {fileDesktop} from ${url('./fixtures/native-desktop.ts')};
+    const config=defaults(${JSON.stringify(scope.root)}),db=createDb({dbPath:${JSON.stringify(dbPath)}}),authority=new CallerAuthority();
+    const context=authority.issue({principal:'fixture:controller',instance:'first',executor:'hermes',controller:true,reviewer:false});
+    const host=createWindowsNativeProjectHost({config,...fileDesktop(${JSON.stringify(state)},config),authorizeInitialization:async()=>true});
+    host.verifyBundle=async()=>process.exit(75);
+    await new ProjectProvisioner(db,authority,{root:config.background.workspaceRoot,timeoutMs:5000,host}).prepare('fixture-project','fixture-init',context);`],{encoding:'utf8',windowsHide:true});
+  assert.equal(child.status,75,child.stderr);
+  const db=createDb({dbPath}),config=defaults(scope.root);t.after(()=>db.close());
+  const crashed=db.prepare('SELECT * FROM project_operations').get()!,original=JSON.parse(String(crashed.resources));
+  assert.equal(crashed.state,'PROVISIONING');assert.equal(crashed.phase,'verify');
+  assert.ok(original.appProjectId && original.chatgptConversationId && original.codexConversationId);
+  const authority=new CallerAuthority(),context=authority.issue({principal:'fixture:controller',instance:'second',executor:'hermes',controller:true,reviewer:false});
+  const bridge=new BackgroundBridge(db,authority,context,config,{});bridge.start();await bridge.shutdown();
+  assert.equal(db.prepare('SELECT state FROM project_operations').get()!.state,'UNCERTAIN');
+  const desktop=fileDesktop(state,config),host=createWindowsNativeProjectHost({config,native:desktop.native,ui:desktop.ui,authorizeInitialization:async()=>assert.fail('Recovery must not request initialization')});
+  const provisioner=new ProjectProvisioner(db,authority,{root:config.background.workspaceRoot,timeoutMs:5000,host});
+  const id=String(crashed.id),before=desktop.load();
+  // Foreign ownership stays rejected: a same-title GPT without this receipt, then a Codex thread in another project.
+  desktop.update(s=>{s.pages[original.chatgptConversationId].turns[0].items[0]={type:'userMessage',id:'foreign',content:[{type:'text',text:'[TEST] foreign same-title chat'}]};});
+  assert.equal((await provisioner.reconcile(id,context)).errorCode,'PROVENANCE');
+  desktop.update(s=>{s.pages=before.pages;s.threads.find(item=>item.id===original.codexConversationId)!.projectId='native-foreign';});
+  assert.equal((await provisioner.reconcile(id,context)).errorCode,'PROVENANCE');
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM conversation_workspaces').get()!.n,0);
+  desktop.update(s=>{s.threads=before.threads;});
+  const ready=await provisioner.reconcile(id,context);
+  assert.equal(ready.state,'READY');assert.deepEqual(ready.resources,original);
+  const after=desktop.load();
+  assert.deepEqual(after.creates,{workspace:1,gpt:1,codex:1});assert.deepEqual(after.uiCalls,['workspace-create','gpt-create']);
+  const mapping=db.prepare('SELECT * FROM conversation_workspaces').get()!;
+  assert.equal(mapping.app_project_id,original.appProjectId);assert.equal(mapping.chatgpt_conversation_id,original.chatgptConversationId);
+  assert.equal(db.prepare('SELECT conversation_id FROM codex_conversations').get()!.conversation_id,original.codexConversationId);
+});
+
 test('windows native host: enabled configuration cannot grant UI initialization',async()=>{
   const config=defaults();config.desktop.enabled=true;let writes=0;
   const ui=new class extends WindowsNativeUi {override async call(){writes++;return {ok:true};}}(config);
@@ -99,4 +140,11 @@ test('windows native host: title-only observer never grants conversation identit
   const read=createWindowsNativeGptReader(config,undefined,ui);
   const result=await read('requested-id','same title','carrier');
   assert.equal(result.identityStatus,'titleOnly');assert.equal(result.conversationId,null);assert.equal(result.messages.length,0);
+  // UIA failures report the failed stage instead of inventing a name.
+  const {BridgeError}=await import('../src/errors.ts');
+  const missing=new class extends WindowsNativeUi {override async call():Promise<never>{throw new BridgeError('OWNER','Native UI operation failed at chatgpt-window (RuntimeException, line 1)');}}(config);
+  const unavailable=await createWindowsNativeGptReader(config,undefined,missing)('requested-id','same title','carrier');
+  assert.equal(unavailable.identityStatus,'unavailable');assert.equal(unavailable.browserTitle,'');assert.match(unavailable.reason!,/^OWNER: .*chatgpt-window/);
+  const blank=new class extends WindowsNativeUi {override async call(){return {ok:true,snapshot:{title:' ',text:'',ordinaryComposer:true,pid:1,conversationId:null}};}}(config);
+  assert.equal((await createWindowsNativeGptReader(config,undefined,blank)('requested-id','same title','carrier')).identityStatus,'unavailable');
 });
