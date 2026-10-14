@@ -1,5 +1,5 @@
 [
-  { "principal": "<EXECUTOR_WINDOWS_SID>", "instance": "codex-production", "executor": "codex", "controller": false, "reviewer": false },
+  { "principal": "<EXECUTOR_WINDOWS_SID>", "instance": "codex-production", "executor": "codex", "controller": false, "reviewer": false, "host": "<HERMES_CONTROLLER_WINDOWS_SID>" },
   { "principal": "<HERMES_CONTROLLER_WINDOWS_SID>", "instance": "hermes-controller", "executor": "hermes", "controller": true, "reviewer": false },
   { "principal": "<INDEPENDENT_REVIEWER_WINDOWS_SID>", "instance": "independent-reviewer", "executor": null, "controller": false, "reviewer": true }
 ]

@@ -3,7 +3,8 @@ export { BackgroundBridge } from './background.ts';
 export type { BackgroundHostBindings } from './background.ts';
 export { createBridgeMcpServer } from './mcp-server.ts';
 export { runMcp } from './mcp.ts';
-export { CallerAuthority, localCaller } from './caller.ts';
+export { CallerAuthority, localCaller, delegatedExecutor } from './caller.ts';
+export { createLedgerCodexApproval, pendingApprovals } from './trusted-host.ts';
 export type { CallerContext } from './caller.ts';
 export { loadConfig } from './config.ts';
 export type { BridgeConfig } from './config.ts';
@@ -27,5 +28,5 @@ export type { CodexAppServerExecutorOptions, CodexThreadSummary } from './codex-
 export { NativeDesktopReadClient, NativeReadWorker, closeNativeReadWorker, checkNativeDesktop } from './native-readonly.ts';
 export type { NativeReadOptions, NativeConversationSummary, NativeProjectExpectation, NativeProjectSummary } from './native-readonly.ts';
 
-export {runWindowsHost} from './windows-host.ts';
+export {runWindowsHost,policyBindings,executorGaps} from './windows-host.ts';
 export {backupDatabase,restoreDatabase} from './db.ts';

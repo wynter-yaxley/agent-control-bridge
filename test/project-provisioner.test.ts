@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { isolatedDemo } from '../src/demo-scope.ts';
 import { CallerAuthority } from '../src/caller.ts';
@@ -172,4 +172,26 @@ test('project reconciliation: a crash before any resource receipt releases the r
   // A directory without a saved receipt has unknown ownership and is never released or reused.
   const other=join(root,'unknown-dir');(await import('node:fs')).mkdirSync(other,{recursive:true});insert('unknown-dir','other-event','unknown-dir',other);
   await assert.rejects(p.reconcile('unknown-dir',f.context),{code:'PROVENANCE'});assert.equal(p.get('unknown-dir',f.context).state,'UNCERTAIN');
+});
+
+test('legacy adoption: migrated mappings gain access only after native readback of recorded IDs',async t=>{
+  const f=fixture(t),{ConversationRegistry}=await import('../src/topology.ts'),registry=new ConversationRegistry(f.db,f.authority),path=join(f.root,'legacy');
+  registry.registerProject('legacy','legacy',path,f.context);
+  registry.register({projectId:'legacy',workspacePath:path,chatgptConversationId:'legacy-gpt',chatgptConversationName:'legacy',codexConversationId:'legacy-codex'},f.context);
+  // Reduce to the migrated state: mapping kept, no native workspace ID and no controller access.
+  f.db.prepare('DELETE FROM project_access').run();
+  const foreign=f.authority.issue({principal:'fixture:foreign',instance:'two',executor:'hermes',controller:true,reviewer:false});
+  await assert.rejects(async()=>registry.register({projectId:'legacy',workspacePath:path,chatgptConversationId:'legacy-gpt',chatgptConversationName:'legacy',codexConversationId:'legacy-codex'},foreign),{code:'AUTH'});
+  const p=new ProjectProvisioner(f.db,f.authority,{root:f.root,timeoutMs:100,host:f.host});
+  await assert.rejects(p.adopt('legacy',f.context),{code:'UNSUPPORTED'});
+  let seen:unknown;f.host.verifyExisting=async input=>{seen=input;throw new BridgeError('PROVENANCE','[TEST] foreign native membership');};
+  await assert.rejects(p.adopt('legacy',f.context),{code:'PROVENANCE'});
+  assert.deepEqual(seen,{name:'legacy',workspacePath:resolve(path),chatgptConversationId:'legacy-gpt',codexConversationIds:['legacy-codex']});
+  assert.equal(f.db.prepare('SELECT COUNT(*) n FROM project_access').get()!.n,0);
+  f.host.verifyExisting=async()=>({appProjectId:'native-legacy'});
+  assert.deepEqual(await p.adopt('legacy',f.context),{projectId:'legacy',appProjectId:'native-legacy',adopted:true});
+  assert.deepEqual(await p.adopt('legacy',f.context),{projectId:'legacy',appProjectId:'native-legacy',adopted:false});
+  await assert.rejects(p.adopt('legacy',foreign),{code:'AUTH'});
+  assert.equal(f.db.prepare('SELECT app_project_id FROM conversation_workspaces').get()!.app_project_id,'native-legacy');
+  assert.equal(f.db.prepare('SELECT principal FROM project_access').get()!.principal,'fixture:controller');
 });

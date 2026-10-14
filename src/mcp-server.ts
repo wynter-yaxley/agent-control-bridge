@@ -4,9 +4,10 @@ import type { DatabaseSync } from 'node:sqlite';
 import { BackgroundBridge } from './background.ts';
 import { CallerAuthority, type CallerContext } from './caller.ts';
 import { TaskStore } from './tasks.ts';
-import { BridgeError, classifyError } from './errors.ts';
+import { BridgeError, classifyError, EXIT_CODES, type ErrorCode } from './errors.ts';
 import { enqueueNotification } from './outbox.ts';
 import { transaction, now } from './db.ts';
+import { pendingApprovals } from './trusted-host.ts';
 
 const identifier = z.string().min(1).max(4096);
 const result = (value: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(value) }] });
@@ -42,6 +43,14 @@ export function createBridgeMcpServer(options: { bridge: BackgroundBridge; db: D
   if (!options.readOnly) {
   server.registerTool('acb_project_default_codex',{description:'Select an already registered default Codex conversation for this workspace.',inputSchema:z.object({projectId:identifier,conversationId:identifier}).strict()},args=>execute(()=>{bridge.setDefaultCodex(args.projectId,args.conversationId);return {updated:true};}));
   server.registerTool('acb_project_prepare', { description: 'Create native workspace, same-name GPT and Codex with host approval. UIA may change the page.', inputSchema: z.object({ name: z.string().min(1).max(100), eventKey: identifier }).strict(), annotations: { readOnlyHint: false, idempotentHint: true } }, args => execute(() => bridge.projects.prepare(args.name, args.eventKey, context)));
+  server.registerTool('acb_project_adopt', { description: 'Re-bind a migrated project after native readback of its recorded GPT/Codex IDs. Grants nothing on mismatch.', inputSchema: z.object({ projectId: identifier }).strict(), annotations: { readOnlyHint: false, idempotentHint: true } }, args => execute(() => bridge.projects.adopt(args.projectId, context)));
+  server.registerTool('acb_approvals_pending', { description: 'List pending Codex command/file approvals with their bound run, thread, turn and scope.', inputSchema: z.object({}).strict(), annotations: { readOnlyHint: true } }, () => execute(() => pendingApprovals(db, authority, context)));
+  server.registerTool('acb_approval_decide', { description: 'Independent reviewer decides one pending approval. Requesters and controllers are refused.', inputSchema: z.object({ approvalId: identifier, decision: z.enum(['approved', 'rejected']), reason: z.string().max(4096).optional() }).strict() }, args => execute(() => {
+    // TaskStore rejections carry ledger codes; keep them instead of a generic IO failure.
+    try { new TaskStore(db, authority).decideApproval(args.approvalId, args.decision, context, args.reason); }
+    catch (error) { const code = (error as { code?: unknown }).code; if (error instanceof Error && typeof code === 'string' && Object.hasOwn(EXIT_CODES, code)) throw new BridgeError(code as ErrorCode, error.message); throw error; }
+    return { approvalId: args.approvalId, decision: args.decision };
+  }));
   server.registerTool('acb_project_reconcile', { description: 'Verify the original uncertain project bundle without creating replacements.', inputSchema: z.object({ operationId: identifier }).strict(), annotations: { readOnlyHint: false, idempotentHint: true } }, args => execute(() => bridge.projects.reconcile(args.operationId, context)));
   server.registerTool('acb_request_submit', { description: 'Queue a requirement for GPT; the bridge verifies and executes its Prompt.', inputSchema: z.object({ eventKey: identifier, projectId: identifier, title: z.string().min(1).max(4096), requirement: z.string().min(1).max(65536), priority: z.number().int().safe().optional(), codexConversationId:identifier.optional() }).strict(), annotations: { readOnlyHint: false, idempotentHint: true } }, args => execute(() => bridge.submit(args)));
   server.registerTool('acb_execution_review', { description: 'Send the saved result to registered GPT once with host approval. GPT review is not acceptance.', inputSchema: z.object({ requestId: identifier }).strict(), annotations: { readOnlyHint: false, idempotentHint: true } }, args => execute(() => bridge.reviewExecution(args.requestId)));

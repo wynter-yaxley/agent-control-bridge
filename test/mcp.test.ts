@@ -41,6 +41,7 @@ test('MCP: actual client handshake, tools discovery, blocked creation and strict
   const tools = (await client.listTools()).tools.map(tool => tool.name);
   assert.ok(tools.includes('acb_request_submit')); assert.ok(tools.includes('acb_notifications_ack')); assert.ok(!tools.some(name => /prompt_import|source_register|browser/.test(name)));
   assert.ok(tools.includes('acb_codex_target_check'));
+  for (const name of ['acb_project_adopt','acb_approvals_pending','acb_approval_decide']) assert.ok(tools.includes(name), name);
   assert.ok(tools.includes('acb_native_target_check'));
   assert.ok(tools.includes('acb_gpt_read')); assert.ok(tools.includes('acb_execution_result')); assert.ok(tools.includes('acb_execution_review'));
   assert.ok(tools.includes('acb_project_reconcile'));
@@ -56,6 +57,10 @@ test('MCP: actual client handshake, tools discovery, blocked creation and strict
   assert.equal(suppliedIds.isError,true);
   const spoof = await client.callTool({ name: 'acb_request_submit', arguments: { eventKey: 'fake', projectId: 'fake', title: 'fake', requirement: 'fake', reviewer: true, promptSource: 'chatgpt' } });
   assert.equal(spoof.isError, true); assert.equal(scope.db.prepare('SELECT COUNT(*) n FROM tasks').get()!.n, 0);
+  const code = (value: Awaited<ReturnType<typeof client.callTool>>) => JSON.parse((value.content as { text: string }[])[0].text).code;
+  assert.deepEqual(JSON.parse(((await client.callTool({ name: 'acb_approvals_pending', arguments: {} })).content as { text: string }[])[0].text), []);
+  assert.equal(code(await client.callTool({ name: 'acb_approval_decide', arguments: { approvalId: 'fixture', decision: 'approved' } })), 'AUTH');
+  assert.equal(code(await client.callTool({ name: 'acb_project_adopt', arguments: { projectId: 'fixture-legacy' } })), 'NOT_FOUND');
 });
 
 test('MCP: official Codex inspection is limited to registered project/controller targets', async t => {

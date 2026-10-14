@@ -10,8 +10,8 @@ import { createOrdinaryChatAdapter, type OrdinaryChatHost } from '../src/ordinar
 function fixture(t: {after:(fn:()=>void)=>void}) {
  const db=createDb({dbPath:':memory:'});t.after(()=>db.close());const authority=new CallerAuthority();
  const controller=authority.issue({principal:'test:controller',instance:'one',executor:'hermes',reviewer:false,controller:true});
- for(const id of ['project-a','project-b']) db.prepare('INSERT INTO projects VALUES(?,?,?,?,?,?)').run(id,id,resolve(id),'test',now(),now());
  const registry=new ConversationRegistry(db,authority),store=new TaskStore(db,authority);
+ for(const id of ['project-a','project-b']) registry.registerProject(id,id,resolve(id),controller);
  const mapping={projectId:'project-a',workspacePath:resolve('project-a'),chatgptConversationId:'test-gpt-a',chatgptConversationName:'project-a',codexConversationId:'test-codex-a'};
  return {db,authority,controller,registry,store,mapping};
 }
@@ -123,10 +123,11 @@ test('topology: GPT prompt conversation must have the exact workspace project na
 
 test('topology: native workspace IDs cannot be reused by different projects', t => {
  const f=fixture(t);f.registry.register({...f.mapping,appProjectId:'native-a'},f.controller);
+ const access=()=>JSON.stringify(f.db.prepare("SELECT * FROM project_access WHERE project_id='project-b'").all()),before=access();
  assert.throws(()=>f.registry.register({projectId:'project-b',workspacePath:resolve('project-b'),appProjectId:'native-a',chatgptConversationId:'gpt-b',chatgptConversationName:'project-b',codexConversationId:'codex-b'},f.controller),{code:'CONFLICT'});
  assert.equal(f.db.prepare('SELECT COUNT(*) n FROM conversation_workspaces').get()!.n,1);
  assert.equal(f.db.prepare('SELECT COUNT(*) n FROM codex_conversations').get()!.n,1);
- assert.equal(f.db.prepare("SELECT COUNT(*) n FROM project_access WHERE project_id='project-b'").get()!.n,0);
+ assert.equal(access(),before);
 });
 
 test('topology: GPT IDs cannot be reused by a different project even with a different workspace', t => {

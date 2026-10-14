@@ -32,6 +32,8 @@ export interface ProjectHost {
   createOrdinaryChat(appProjectId: string, exactName: string, signal: AbortSignal, operationKey?: string): Promise<{ conversationId: string }>;
   createCodexConversation(appProjectId: string, workspacePath: string, signal: AbortSignal, operationKey?: string): Promise<{ conversationId: string }>;
   observePartial?(resources: Partial<ProjectResources>, phase: string, signal: AbortSignal): Promise<Partial<ProjectResources>>;
+  /** Read-only native ownership check for a legacy mapping with recorded IDs. */
+  verifyExisting?(input: { name: string; workspacePath: string; chatgptConversationId: string; codexConversationIds: string[] }, signal: AbortSignal): Promise<{ appProjectId: string }>;
   verifyBundle(resources: ProjectResources, signal: AbortSignal): Promise<ProjectBundleEvidence>;
 }
 export interface ProjectResources { initializationKey?: string; appProjectId: string; workspacePath: string; name: string; chatgptConversationId: string; codexConversationId: string }
@@ -83,6 +85,34 @@ export class ProjectProvisioner {
     try {await this.complete(id,resources,context);}
     catch(error){const code=classifyError(error).code;this.db.prepare("UPDATE project_operations SET state='UNCERTAIN',error_code=?,updated_at=? WHERE id=?").run(code,now(),id);enqueueNotification(this.db,caller.principal,`project:${id}:reconcile:${code}`,{operationId:id,state:'UNCERTAIN',errorCode:code});}
     return this.get(id, context);
+  }
+  /** Re-binds a migrated project whose mapping has no controller access. Access
+   * and the native workspace ID are granted only after native readback of the
+   * recorded GPT/Codex IDs; schema migration alone grants nothing. */
+  async adopt(projectId: string, context: CallerContext): Promise<{ projectId: string; appProjectId: string; adopted: boolean }> {
+    const caller = this.authority.resolve(context);
+    if (!caller?.controller) throw new BridgeError('AUTH', 'Trusted controller required');
+    const mapping = this.db.prepare('SELECT w.*,p.name FROM conversation_workspaces w JOIN projects p ON p.id=w.project_id WHERE w.project_id=?').get(projectId);
+    if (!mapping) throw new BridgeError('NOT_FOUND', 'Legacy project mapping not found');
+    const access = () => this.db.prepare('SELECT principal FROM project_access WHERE project_id=?').all(projectId).map(row => String(row.principal));
+    const before = access();
+    if (before.some(principal => principal !== caller.principal)) throw new BridgeError('AUTH', 'Project belongs to another controller');
+    if (before.length && mapping.app_project_id !== null) return { projectId, appProjectId: String(mapping.app_project_id), adopted: false };
+    if (mapping.chatgpt_conversation_name !== mapping.name) throw new BridgeError('PROVENANCE', 'GPT conversation name must exactly match the project name');
+    const codexConversationIds = this.db.prepare('SELECT conversation_id FROM codex_conversations WHERE project_id=? ORDER BY conversation_id').all(projectId).map(row => String(row.conversation_id));
+    if (!codexConversationIds.length) throw new BridgeError('PROVENANCE', 'A recorded Codex conversation is required');
+    if (!this.host?.verifyExisting) throw new BridgeError('UNSUPPORTED', 'A native project host is required to verify legacy ownership');
+    const observed = await withDeadline(signal => this.host!.verifyExisting!({ name: String(mapping.name), workspacePath: String(mapping.workspace_path), chatgptConversationId: String(mapping.chatgpt_conversation_id), codexConversationIds }, signal), this.timeoutMs);
+    if (!observed?.appProjectId || (mapping.app_project_id !== null && mapping.app_project_id !== observed.appProjectId)) throw new BridgeError('PROVENANCE', 'Native workspace differs from the recorded mapping');
+    transaction(this.db, () => {
+      if (JSON.stringify(access()) !== JSON.stringify(before)) throw new BridgeError('CONFLICT', 'Project access changed during verification');
+      if (this.db.prepare('SELECT 1 FROM conversation_workspaces WHERE project_id!=? AND app_project_id=?').get(projectId, observed.appProjectId)) throw new BridgeError('CONFLICT', 'Native workspace already belongs to another project');
+      this.db.prepare('UPDATE conversation_workspaces SET app_project_id=? WHERE project_id=?').run(observed.appProjectId, projectId);
+      this.db.prepare('INSERT OR IGNORE INTO project_access(project_id,principal) VALUES(?,?)').run(projectId, caller.principal);
+      this.db.prepare('INSERT INTO audit_log(at,actor,action,detail) VALUES(?,?,?,?)').run(now(), caller.principal, 'project_adopt', `project=${projectId} native=${observed.appProjectId}`);
+      enqueueNotification(this.db, caller.principal, `project:${projectId}:adopted`, { projectId, appProjectId: observed.appProjectId, state: 'ADOPTED' });
+    });
+    return { projectId, appProjectId: observed.appProjectId, adopted: true };
   }
   async prepare(name: string, eventKey: string, context: CallerContext): Promise<ProjectOperation> {
     const caller = this.authority.resolve(context);

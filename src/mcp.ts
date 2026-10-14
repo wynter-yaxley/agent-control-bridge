@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
+import type { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import { readFileSync } from 'node:fs';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
@@ -15,7 +16,7 @@ import { closeNativeReadWorker } from './native-readonly.ts';
 
 // A trusted Hermes embedding can supply persistent host objects. This factory
 // is executable host code, never a command-line/config/MCP argument.
-export async function runMcp(args: string[], createHost?: (services: {config: ReturnType<typeof loadConfig>; authority: CallerAuthority; context: ReturnType<typeof localCaller>['context']}) => Promise<BackgroundHostBindings> | BackgroundHostBindings): Promise<void> {
+export async function runMcp(args: string[], createHost?: (services: {config: ReturnType<typeof loadConfig>; authority: CallerAuthority; context: ReturnType<typeof localCaller>['context']; db: DatabaseSync}) => Promise<BackgroundHostBindings> | BackgroundHostBindings): Promise<void> {
   let parsed: ReturnType<typeof parseArgs>;
   try { parsed = parseArgs({ args, options: { config: { type: 'string' }, db: { type: 'string' }, help: { type: 'boolean' }, 'read-only': { type: 'boolean' } }, tokens: true, strict: true }); }
   catch { throw new BridgeError('INPUT', 'Invalid MCP startup arguments'); }
@@ -27,7 +28,7 @@ export async function runMcp(args: string[], createHost?: (services: {config: Re
   const caller = localCaller(authority, fileURLToPath(new URL('../config/caller-policy.json', import.meta.url)));
   const readOnly=parsed.values['read-only']===true || !createHost;
   const db = createDb({ dbPath: config.database.path, busyTimeoutMs: config.database.busyTimeoutMs, authorizedSids: caller.authorizedSids, readOnly });
-  const host = !readOnly && createHost ? await createHost({config,authority,context:caller.context}) : {};
+  const host = !readOnly && createHost ? await createHost({config,authority,context:caller.context,db}) : {};
   const bridge = new BackgroundBridge(db, authority, caller.context, config, {
     gptReader: config.desktop.enabled ? createDesktopGptReader(config, parsed.values.config as string ?? process.env.ACB_CONFIG ?? '.bridge.config.json') : undefined,
     gptUiReader: config.desktop.enabled && process.platform==='win32' ? createWindowsNativeGptReader(config,process.env.CODEX_THREAD_ID) : undefined,

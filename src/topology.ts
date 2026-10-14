@@ -35,9 +35,11 @@ export class ConversationRegistry {
     transaction(this.db, () => {
       const project = this.db.prepare('SELECT * FROM projects WHERE id=?').get(input.projectId);
       if (!project) throw new BridgeError('NOT_FOUND', 'Register the project before its conversations');
+      // Access comes from registerProject or native-verified adoption; an
+      // unowned (migrated) project is never claimed by writing a mapping.
       const access = this.db.prepare('SELECT principal FROM project_access WHERE project_id=?').all(input.projectId);
-      if (access.length && !access.some(row => row.principal === caller.principal)) throw new BridgeError('AUTH', 'Project belongs to another controller');
-      this.db.prepare('INSERT OR IGNORE INTO project_access(project_id,principal) VALUES(?,?)').run(input.projectId, caller.principal);
+      if (!access.length) throw new BridgeError('AUTH', 'Unowned legacy project requires native-verified adoption');
+      if (!access.some(row => row.principal === caller.principal)) throw new BridgeError('AUTH', 'Project belongs to another controller');
       if(input.chatgptConversationName!==project.name) throw new BridgeError('PROVENANCE','GPT conversation name must exactly match the workspace project name');
       const rootKey=resolve(String(project.root_path));
       if ((process.platform==='win32'?rootKey.toLowerCase():rootKey)!==key) throw new BridgeError('CONFLICT','Workspace must match the registered project root');

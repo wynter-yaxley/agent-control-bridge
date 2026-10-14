@@ -27,13 +27,55 @@ public static class AcbFolderControls {
 '@
 [Console]::Error.WriteLine('ACB_UI_STAGE=worker-loaded')
 $initMs=$initClock.ElapsedMilliseconds
+# Read-only UIA survey of ChatGPT's own top-level windows. It records control
+# types, classes, depth and pattern names only; never names, values or text.
+function Survey($walker,$root) {
+ $queue=[System.Collections.Generic.Queue[object]]::new()
+ $queue.Enqueue(@($root,0))
+ $types=@{};$documents=@();$visited=0;$maxDepth=0;$truncated=$false
+ while ($queue.Count -gt 0) {
+  if ($visited -ge 400) {$truncated=$true;break}
+  $item=$queue.Dequeue();$element=$item[0];$depth=[int]$item[1];$visited++
+  if ($depth -gt $maxDepth) {$maxDepth=$depth}
+  try {$type=$element.Current.ControlType.ProgrammaticName -replace '^ControlType\.',''} catch {$type='Unavailable'}
+  $types[$type]=1+[int]$types[$type]
+  if ($type -eq 'Document' -and $documents.Count -lt 5) {
+   $patterns=@(try {$element.GetSupportedPatterns() | ForEach-Object {$_.ProgrammaticName}} catch {})
+   $documents+=@{depth=$depth;className=$element.Current.ClassName;frameworkId=$element.Current.FrameworkId;offscreen=$element.Current.IsOffscreen;patterns=$patterns}
+  }
+  if ($depth -ge 12) {continue}
+  try {$child=$walker.GetFirstChild($element)} catch {$child=$null}
+  while ($null -ne $child) {
+   $queue.Enqueue(@($child,($depth+1)))
+   try {$child=$walker.GetNextSibling($child)} catch {$child=$null}
+  }
+ }
+ return @{visited=$visited;maxDepth=$maxDepth;truncated=$truncated;controlTypes=$types;documents=$documents}
+}
+function Diagnose {
+ $processes=@(Get-Process -Name ChatGPT -ErrorAction SilentlyContinue)
+ $ids=@($processes | ForEach-Object {$_.Id})
+ $handles=@($processes | Where-Object {$_.MainWindowHandle -ne 0} | ForEach-Object {[int64]$_.MainWindowHandle})
+ $result=@{ok=$true;operation='uia-diagnose';interactiveDesktop=[AcbFolderControls]::Interactive();processCount=$processes.Count;mainWindowCount=$handles.Count;windows=@();privateTextOmitted=$true}
+ $top=[System.Windows.Automation.AutomationElement]::RootElement.FindAll([System.Windows.Automation.TreeScope]::Children,[System.Windows.Automation.Condition]::TrueCondition)
+ foreach ($window in $top) {
+  if ($result.windows.Count -ge 8) {break}
+  try {$processId=$window.Current.ProcessId} catch {continue}
+  if ($ids -notcontains $processId) {continue}
+  $result.windows+=@{className=$window.Current.ClassName;frameworkId=$window.Current.FrameworkId;offscreen=$window.Current.IsOffscreen;
+   mainWindow=($handles -contains [int64]$window.Current.NativeWindowHandle);nameLength=$window.Current.Name.Length;
+   raw=(Survey ([System.Windows.Automation.TreeWalker]::RawViewWalker) $window);control=(Survey ([System.Windows.Automation.TreeWalker]::ControlViewWalker) $window)}
+ }
+ return $result
+}
 function RunRequest($request) {
 $actionClock=[Diagnostics.Stopwatch]::StartNew()
-function Respond($result) {$result.timings=@{initMs=$initMs;actionMs=$actionClock.ElapsedMilliseconds};[Console]::Out.WriteLine(($result | ConvertTo-Json -Depth 5 -Compress))}
+function Respond($result) {$result.timings=@{initMs=$initMs;actionMs=$actionClock.ElapsedMilliseconds};[Console]::Out.WriteLine(($result | ConvertTo-Json -Depth 9 -Compress))}
 $script:stage='input'
 $mutex=$null
 $locked=$false
 try {
+ if ($request.operation -eq 'uia-diagnose') {$script:stage='uia-diagnose';Respond (Diagnose);return}
  # Distinct stages tell the operator why UIA is unavailable; no app is started or restarted.
  $script:stage='interactive-desktop'
  if (-not [AcbFolderControls]::Interactive()) {throw 'OWNER'}
@@ -123,6 +165,9 @@ try {
  if ($request.operation -eq 'identity') {
   $script:stage='gpt-document'
   $doc=Document
+  # Chromium can build its accessibility tree only after a client asks; retry briefly, read-only.
+  $until=[DateTime]::UtcNow.AddMilliseconds([Math]::Min(3000,[int]$request.timeoutMs))
+  while (-not $doc -and [DateTime]::UtcNow -lt $until) {Start-Sleep -Milliseconds $request.pollMs;$doc=Document}
   if (-not $doc) {throw 'OWNER'}
   Respond @{ok=$true;snapshot=@{title=$doc.Current.Name;text='';conversationId=$null;ordinaryComposer=($null -ne (Find $doc 'Edit' '询问 ChatGPT'));pid=$window.Id}};return
  }

@@ -78,7 +78,13 @@ stdout 只承载 MCP，安全错误写 stderr。默认入口只注册 8 个只�
     node dist/windows-host.js --config <配置> --db <已有 v6 库>
     node dist/windows-host.js --write --config <配置> --db <已有 v6 库>
 
-默认只读；--write 允许受保护 Controller 操作台账，但不启动任务队列、不凭开关授予 GUI 或 Executor 权限。部署受信任启动程序调用 runWindowsHost(args, createBindings)，MCP 进程只提交/查询，**另起一个同台账 --worker 运行时**持续执行和对账，客户端断连不停止它。当前没有真实执行委托时 --worker 明确拒绝 CODEX_EXECUTOR_HOST_MISSING；不是已部署写宿主。不要从配置、环境变量或 MCP 加载任意插件代码。
+默认只读；--write 按调用者策略角色开放台账工具，不启动任务队列，也不凭开关授予 GUI 权限。MCP 进程只提交/查询，**另起一个同台账 --worker 运行时**持续执行和对账，客户端断连不停止它。不要从配置、环境变量或 MCP 加载任意插件代码。
+
+    node dist/windows-host.js --preflight --config <配置> --db <库> [--carrier-thread <已登记 Codex ID>]
+
+--preflight 只读：输出调用者策略角色、各角色数量、本 Controller 的执行者委托、库 Schema 与未归属旧项目数、Codex 配置、CDP 端口是否监听、受限 UIA 结构摘要（只含控件类型/类名/层级/Pattern，不含名称和正文）、原生项目/线程数量，以及 blockers。
+
+没有嵌入程序时，组合入口只从受保护的 config/caller-policy.json 取得能力：执行者条目写 "host": "<Controller SID>" 才是本 Controller 的唯一委托执行者，SID 必须与 Controller、Reviewer 不同；这是部署者在信任根中的委托，不是 OS 级隔离。Codex 命令/文件审批写入台账 approvals，只能由独立 Reviewer 用 acb_approvals_pending / acb_approval_decide 决定；turnId 不是本次已记录的原 turn、cwd/grantRoot 越出工作区、含认证材料、超时（background.timeoutMs）或取消时一律拒绝，绝不自动接受。缺少任何前提时 --worker 拒绝启动，并列出 EXECUTOR_DELEGATION_MISSING、CARRIER_THREAD_MISSING、CODEX_EXECUTABLE_MISSING、CODEX_MODEL_OR_EFFORT_MISSING。原生项目宿主以只读方式安装：创建被拒绝，reconcile/adopt 只回读。GUI 初始化/发送批准仍需 runWindowsHost(args, createBindings) 嵌入真实回调。
 
 受保护启动代码复用既有实现，trusted 必须来自实际宿主，提供本次批准和真实执行者绑定，没有自动批准默认值：
 
@@ -114,7 +120,7 @@ stdout 只承载 MCP，安全错误写 stderr。默认入口只注册 8 个只�
 
 Controller、Executor、Reviewer 必须是不同的受保护主体/连接，Reviewer 不兼任 Controller 或 Codex。普通 Controller 不能提交最终验收或执行 Reviewer 专属恢复。策略与代码在受控启动时加载，不热更新授权；改源码不能提升运行中的权限。同 OS 用户恶意代码仍可破坏本机运行时，不能声称强隔离。实际本机策略已取消 Controller/Reviewer 重叠，独立 Reviewer 仍需部署者提供。
 
-[Hermes MCP 样例](config/hermes-mcp.example.yaml) 开放 8 个查询/诊断工具；可信写入口有 20 个工具，包括设置默认 Codex。Reviewer 使用单独受保护连接。路径变量替换为实际非秘密路径。只读示例 timeout 为 300 秒：最长 GPT 诊断顺序为 CDP 120 秒、UIA 回退 120 秒、原生核验 30 秒，加 30 秒客户端余量；预算变化时按统一配置重新计算，普通台账查询通常立即返回。同步项目创建另按实际阶段设置预算；工程任务提交立即返回 ID，由独立 worker 执行，不能用延长 MCP 超时替代它，也不能因客户端断开重新发送。
+[Hermes MCP 样例](config/hermes-mcp.example.yaml) 开放 8 个查询/诊断工具；可信写入口有 23 个工具，包括设置默认 Codex、旧项目 adopt 与 Reviewer 审批。Reviewer 使用单独受保护连接。路径变量替换为实际非秘密路径。只读示例 timeout 为 300 秒：最长 GPT 诊断顺序为 CDP 120 秒、UIA 回退 120 秒、原生核验 30 秒，加 30 秒客户端余量；预算变化时按统一配置重新计算，普通台账查询通常立即返回。同步项目创建另按实际阶段设置预算；工程任务提交立即返回 ID，由独立 worker 执行，不能用延长 MCP 超时替代它，也不能因客户端断开重新发送。
 
 WSL Hermes 使用可执行的 Windows Node 绝对路径（WSL 下为 /mnt/c/.../node.exe），入口/配置/库参数使用 Windows 绝对路径，Node >=24.19.0；不要把 Linux Node 当作 Windows UIA 宿主。tools/hermes/mcp_probe.py 只验证隔离协议，不是真实写宿主。HermesGatewayAdapter 复用已验证飞书事件和可信项目路由；NotificationDispatcher 持久保存回执，不另起事件消费者。
 
@@ -157,9 +163,9 @@ CDP 优先复用当前实例已有端点，先校验端口所属签名进程与�
 
 ## 一次真实工作流
 
-1. 构建、绑定可信宿主/角色与本次 UI 范围；查 acb_capabilities。HOST_MISSING 先安装，不在未变环境反复重试。fullWorkflowReady 固定 false，TARGET_ENVIRONMENT_ACCEPTANCE_REQUIRED 留给目标验收，不伪造通过。
+1. 构建后先跑 windows-host --preflight，按 blockers 补齐策略委托、Reviewer、库迁移/adopt、--carrier-thread 与 Codex 配置；再绑定本次 UI 范围并查 acb_capabilities。HOST_MISSING 先安装，不在未变环境反复重试。fullWorkflowReady 固定 false，TARGET_ENVIRONMENT_ACCEPTANCE_REQUIRED 留给目标验收，不伪造通过。
 2. acb_project_prepare {name,eventKey} 创建唯一隔离套件，保存 operationId/projectId/resources。GPT 精确同名，原生 ID/路径/ordinary 模式/Codex 成员关系必须回读。
-3. 启动独立可信 worker；acb_request_submit {eventKey,projectId,title,requirement,codexConversationId?} 返回持久 requestId。指定目标或显式默认，绝不按 ID 排序。需求不是工程 Prompt；worker 生成、核验、投递、续租、收集并回 GPT。
+3. 启动独立可信 worker；acb_request_submit {eventKey,projectId,title,requirement,codexConversationId?} 返回持久 requestId。指定目标或显式默认，绝不按 ID 排序。需求不是工程 Prompt；worker 生成、核验、投递、续租、收集并回 GPT。执行中 Codex 的命令/文件审批由独立 Reviewer 在 acb_approvals_pending 中查看并用 acb_approval_decide 决定，超时即拒绝。
 4. 优先消费通知；仅在状态变化、恢复、验收需要时查状态。WAITING_APPROVAL 且反馈 COMPLETE 后，acb_execution_result {requestId,includeContent:true} 一次读取证据；必要来源字段由受保护只读台账核对。
 5. Hermes 独立验证实际文件/测试，再由独立 reviewer 调 acb_review_submit {taskId,expectedVersion,pass,reason}。GPT 复核/Codex 自报 PASS 不替代验收。
 6. 领取通知后由 Hermes 原飞书通道发送，保存真实 receipt 再 ack。结束只清理归属明确的本次测试资源，不动用户库、其他 workspace/聊天。
@@ -178,7 +184,7 @@ CDP 优先复用当前实例已有端点，先校验端口所属签名进程与�
 | 工程 UNCERTAIN | 原 turnId 或精确 dispatchId 回读；仍运行则 RUNNING，完成进入 WAITING_APPROVAL，不 resume/start 重跑 |
 | 反馈 SENDING/UNCERTAIN | reconcile_feedback，不重发结果 |
 | project UNCERTAIN | 保存 phase/resources；只有唯一原阶段回执才能补记遗失 ID，安全缺失步骤才继续；未知则阻断，不补造。重启后的新宿主按原生项目/线程归属和原 ACB_INIT 初始化消息核验已有资源，不要求重新打开 GPT 页面 |
-| DB / SCHEMA | 一致性备份、副本验证、显式迁移 |
+| DB / SCHEMA | 一致性备份、副本验证、显式迁移；迁移后旧项目没有 project_access，须 acb_project_adopt 按已记录的 GPT/Codex ID 回读原生归属后才授予访问，mapping-register 不再认领无主项目 |
 | TIMEOUT / 失联 | 保留未知结果并按阈值报告，不以失联推断成功或确定退出 |
 
 恢复应用先报告、确认退出、取得事件批准、核对原映射；不可结束仍运行的应用。页面不稳定/账户挑战须如实报告，不能保证零风控。
@@ -222,7 +228,7 @@ npm test 已发现全部 Node 测试，包含 e2e/workflow；CI 不再重复同�
 
 结构保留职责层次：mcp-server/mcp 为协议；background/project-provisioner/prompts/tasks/topology/outbox 为业务；native-readonly/windows-native-host 为 IPC/UIA；codex-app-server/ordinary-chat/hermes-gateway/notification-delivery 为适配器。没有为美观搬迁整个项目。
 
-实际源码参考：[WPS 常驻 JSON 行宿主](https://github.com/sueccku/dsh-plugin-wps-office-next/blob/bc69b96fca0c30e63680a151ebf96a093404d2da/host/wps-com-host.ps1)、[mcp-windows 局部查询](https://github.com/sbroenne/mcp-windows/blob/655b9fc92d03ad52a270067c6844ea1231c90559/src/Sbroenne.WindowsMcp/Automation/Tools/UIFindTool.cs)、[FlaUI 批量动作](https://github.com/shanselman/FlaUI-MCP/blob/da1d2a24eae6ccdfbbd40a1375b6617536552351/src/FlaUI.Mcp/Tools/BatchTool.cs)、[winapp Pattern 操作](https://github.com/microsoft/winappCli/blob/96f487615872f7c0e4032e0361856e3109a477e3/src/winapp-CLI/WinApp.Cli/Commands/UiInvokeCommand.cs)、[mcp-compressor 门面转换](https://github.com/atlassian-labs/mcp-compressor/blob/86dc1dfd414d68914d2fbb7b2421420c3f74bbea/python/mcp-compressor/mcp_compressor/transforms.py)。只借鉴原则，不复制/执行源码或引入框架；默认 8 个、可信写入口 20 个工具不需要动态 Catalog。
+实际源码参考：[WPS 常驻 JSON 行宿主](https://github.com/sueccku/dsh-plugin-wps-office-next/blob/bc69b96fca0c30e63680a151ebf96a093404d2da/host/wps-com-host.ps1)、[mcp-windows 局部查询](https://github.com/sbroenne/mcp-windows/blob/655b9fc92d03ad52a270067c6844ea1231c90559/src/Sbroenne.WindowsMcp/Automation/Tools/UIFindTool.cs)、[FlaUI 批量动作](https://github.com/shanselman/FlaUI-MCP/blob/da1d2a24eae6ccdfbbd40a1375b6617536552351/src/FlaUI.Mcp/Tools/BatchTool.cs)、[winapp Pattern 操作](https://github.com/microsoft/winappCli/blob/96f487615872f7c0e4032e0361856e3109a477e3/src/winapp-CLI/WinApp.Cli/Commands/UiInvokeCommand.cs)、[mcp-compressor 门面转换](https://github.com/atlassian-labs/mcp-compressor/blob/86dc1dfd414d68914d2fbb7b2421420c3f74bbea/python/mcp-compressor/mcp_compressor/transforms.py)。只借鉴原则，不复制/执行源码或引入框架；默认 8 个、可信写入口 23 个工具不需要动态 Catalog。
 
 规则见 [PROJECT_RULES](docs/PROJECT_RULES.md)，独立报告用 [验收模板](docs/ACCEPTANCE_TEMPLATE.md)。保留 [MIT LICENSE](LICENSE) 和 [第三方声明](THIRD_PARTY_NOTICES.md)。报告存项目 docs，私有历史不发布，不再写个人文件夹。
 

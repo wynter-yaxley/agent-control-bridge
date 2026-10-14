@@ -45,7 +45,7 @@ export class WindowsNativeUi {
   private queue: Promise<unknown> = Promise.resolve();
   constructor(config: BridgeConfig) { this.config = config; }
   close(): void { this.child?.kill(); this.child=undefined; uiWorkers.delete(this); }
-  call(operation: 'workspace-create' | 'gpt-create' | 'gpt-rename' | 'snapshot' | 'identity' | 'gpt-read' | 'chat-open' | 'chat-send' | 'chat-read-reply', fields: { name: string; conversationId?: string; path?: string; projectName?: string; prompt?: string; marker?: string; expectedTitle?: string; mode?: 'gpt' | 'codex' }, signal: AbortSignal): Promise<UiResult> {
+  call(operation: 'workspace-create' | 'gpt-create' | 'gpt-rename' | 'snapshot' | 'identity' | 'gpt-read' | 'chat-open' | 'chat-send' | 'chat-read-reply' | 'uia-diagnose', fields: { name: string; conversationId?: string; path?: string; projectName?: string; prompt?: string; marker?: string; expectedTitle?: string; mode?: 'gpt' | 'codex' }, signal: AbortSignal): Promise<UiResult> {
     const pending=this.queue.then(()=>this.request(operation,fields,signal));
     // A failed operation is returned to its caller; subsequent requests are not replayed.
     this.queue=pending.then(()=>undefined,()=>undefined);
@@ -185,6 +185,20 @@ export function createWindowsNativeProjectHost(options: { config: BridgeConfig; 
       }
       if(candidates.length!==1)throw new BridgeError('PROVENANCE','Original initialization receipt is unavailable or ambiguous; do not repeat');
       return {...resources,chatgptConversationId:candidates[0]};
+    },
+    // Migrated projects have no ACB_INIT receipt. The native project comes from
+    // the recorded Codex threads' membership, then must match path and name; a
+    // name alone never selects a project.
+    async verifyExisting(input,signal) {
+      const projects=(await native.listProjects(signal)).projects,inventory=await native.listThreads(signal),threads=[...inventory.threads,...inventory.pinnedThreads];
+      const members=input.codexConversationIds.map(id=>threads.find(item=>item.id===id));
+      const appProjectId=members[0]?.projectId;
+      if(!appProjectId || members.some(item=>!item || item.kind!=='codex' || item.projectId!==appProjectId || !item.cwd || pathKey(item.cwd)!==pathKey(input.workspacePath)))throw new BridgeError('PROVENANCE','Recorded Codex conversations do not share this native workspace');
+      const project=projects.find(item=>item.projectId===appProjectId);
+      if(!project || project.projectKind!=='local' || project.hostId!=='local' || project.label!==input.name || pathKey(project.path)!==pathKey(input.workspacePath))throw new BridgeError('PROVENANCE','Native workspace name or directory differs from the legacy mapping');
+      const chat=await native.readThread(input.chatgptConversationId,signal);
+      if(chat.thread.id!==input.chatgptConversationId || chat.thread.kind!=='chatgpt' || chat.thread.title!==input.name)throw new BridgeError('PROVENANCE','Recorded GPT conversation is missing or not the same-name ordinary chat');
+      return {appProjectId};
     },
     // Resource identity is re-read from the native host and the recorded
     // initialization receipt; it does not require the GPT page to be open now.

@@ -150,3 +150,17 @@ test('windows native host: title-only observer never grants conversation identit
   const blank=new class extends WindowsNativeUi {override async call(){return {ok:true,snapshot:{title:' ',text:'',ordinaryComposer:true,pid:1,conversationId:null}};}}(config);
   assert.equal((await createWindowsNativeGptReader(config,undefined,blank)('requested-id','same title','carrier')).identityStatus,'unavailable');
 });
+
+test('windows native host: legacy ownership comes from recorded Codex membership, never a name match',async()=>{
+  const config=defaults(),signal=new AbortController().signal;
+  const state={projects:[{projectId:'native-legacy',projectKind:'local',hostId:'local',label:'legacy',path:'D:\\legacy'},{projectId:'native-other',projectKind:'local',hostId:'local',label:'legacy',path:'D:\\other'}],
+    threads:[{id:'legacy-codex',kind:'codex',title:'legacy Codex',projectId:'native-legacy',cwd:'D:\\legacy'},{id:'other-codex',kind:'codex',title:'legacy Codex',projectId:'native-other',cwd:'D:\\other'}],
+    gpt:{id:'legacy-gpt',kind:'chatgpt',title:'legacy',status:{type:'idle'}}};
+  const native:WindowsNativeTools={listProjects:async()=>({projects:state.projects}),listThreads:async()=>({threads:[],pinnedThreads:state.threads}),readThread:async()=>({thread:state.gpt,turns:[]})};
+  const host=createWindowsNativeProjectHost({config,native,authorizeInitialization:async()=>assert.fail('Adoption never initializes')});
+  const input={name:'legacy',workspacePath:'d:\\LEGACY',chatgptConversationId:'legacy-gpt',codexConversationIds:['legacy-codex']};
+  assert.deepEqual(await host.verifyExisting!(input,signal),{appProjectId:'native-legacy'});
+  for(const change of [{codexConversationIds:['other-codex']},{codexConversationIds:['legacy-codex','other-codex']},{codexConversationIds:['missing']},{workspacePath:'D:\\other'},{name:'renamed'}])
+    await assert.rejects(host.verifyExisting!({...input,...change},signal),{code:'PROVENANCE'},JSON.stringify(change));
+  state.gpt={...state.gpt,kind:'codex'};await assert.rejects(host.verifyExisting!(input,signal),{code:'PROVENANCE'});
+});
