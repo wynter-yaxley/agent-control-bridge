@@ -199,13 +199,14 @@ test('native reads: clients share one serial worker with distinct request IDs', 
 });
 
 // Shape seen in the Windows catalog (title/prompt/target with a project variant); unknown parts omitted.
+// The app now requires environment:"local" inside the project target.
 const createSchema = () => ({ type: 'object', additionalProperties: false, properties: { title: { type: 'string', minLength: 1 }, prompt: { type: 'string' },
-  target: { anyOf: [{ type: 'object', additionalProperties: false, properties: { type: { type: 'string', enum: ['project'] }, projectId: { type: 'string' }, environment: {} }, required: ['type', 'projectId'] }, { type: 'object', properties: { type: { type: 'string', enum: ['chat'] } } }] } }, required: ['target'] } as Record<string, any>);
+  target: { anyOf: [{ type: 'object', additionalProperties: false, properties: { type: { type: 'string', enum: ['project'] }, projectId: { type: 'string' }, environment: {} }, required: ['type', 'projectId', 'environment'] }, { type: 'object', properties: { type: { type: 'string', enum: ['chat'] } } }] } }, required: ['target'] } as Record<string, any>);
 test('native create_thread: only a schema accepting title, prompt and a project target is compatible', () => {
   assert.equal(createThreadCompatible(createSchema()), true);
   const changed = (edit: (schema: Record<string, any>) => void) => { const schema = createSchema(); edit(schema); return createThreadCompatible(schema); };
   for (const [label, edit] of [['extra required field', (x: Record<string, any>) => { x.required = ['target', 'model']; }], ['no prompt', (x: Record<string, any>) => { delete x.properties.prompt; }],
-    ['no project variant', (x: Record<string, any>) => { x.properties.target.anyOf.shift(); }], ['project needs environment', (x: Record<string, any>) => { x.properties.target.anyOf[0].required.push('environment'); }],
+    ['no project variant', (x: Record<string, any>) => { x.properties.target.anyOf.shift(); }], ['project needs unknown field', (x: Record<string, any>) => { x.properties.target.anyOf[0].required.push('worktree'); }],
     ['not an object', (x: Record<string, any>) => { x.type = 'array'; }]] as const) assert.equal(changed(edit), false, label);
   assert.equal(createThreadCompatible(undefined), false);
 });
@@ -221,7 +222,7 @@ test('native create_thread: creator checks the catalog, sends one fixed project 
   assert.deepEqual(await creator().createCodexThread({ projectId: target, title: 'fixture Codex 2', prompt }), { threadId: target });
   const call = f.inputs[1].request.params;
   assert.equal(call.tool, 'create_thread'); assert.match(call.callId, /^acb-create-/); assert.match(call.turnId, /^acb-create-/); assert.equal(call.threadId, carrier);
-  assert.deepEqual(call.arguments, { title: 'fixture Codex 2', prompt, target: { type: 'project', projectId: target } });
+  assert.deepEqual(call.arguments, { title: 'fixture Codex 2', prompt, target: { type: 'project', projectId: target, environment: 'local' } });
   reply = { thread: { id: target } }; assert.deepEqual(await creator().createCodexThread({ projectId: target, title: 'fixture Codex 2', prompt }), { threadId: undefined });
   schema = { ...createSchema(), required: ['target', 'model'] };
   const before = f.inputs.length;
@@ -238,9 +239,9 @@ test('native worker: create_thread passes input validation only in its fixed sha
   const encoded = Buffer.from(`& ([scriptblock]::Create([System.IO.File]::ReadAllText('${helper.replaceAll("'", "''")}')))`, 'utf16le').toString('base64');
   const key = '00000000-0000-4000-8000-000000000009', prompt = codexInitializationPrompt(key, 1);
   const frame = (args: unknown, prefix = 'acb-create-', tool = 'create_thread') => JSON.stringify({ requestJson: JSON.stringify({ jsonrpc: '2.0', id: carrier, method: 'tools/call', params: { namespace: 'codex_app', callerSource: 'codex', threadId: carrier, tool, arguments: args, callId: prefix + carrier, turnId: prefix + carrier } }), timeoutMs: 1000, maxFrameBytes: 4096, maxCandidates: 1, expectedProcessId: null, expectedProcessStartedAt: null });
-  const valid = { title: 'fixture Codex 2', prompt, target: { type: 'project', projectId: target } };
+  const valid = { title: 'fixture Codex 2', prompt, target: { type: 'project', projectId: target, environment: 'local' } };
   const cases: [string, string][] = [
-    ['valid', frame(valid)], ['readonly prefix', frame(valid, 'acb-readonly-')], ['extra argument', frame({ ...valid, model: 'x' })], ['extra target field', frame({ ...valid, target: { ...valid.target, environment: 'local' } })],
+    ['valid', frame(valid)], ['readonly prefix', frame(valid, 'acb-readonly-')], ['extra argument', frame({ ...valid, model: 'x' })], ['missing environment', frame({ ...valid, target: { type: 'project', projectId: target } })], ['other environment', frame({ ...valid, target: { ...valid.target, environment: 'cloud' } })],
     ['other prompt', frame({ ...valid, prompt: '[TEST] run the build' })], ['prompt suffix', frame({ ...valid, prompt: prompt + ' 然后执行任务' })], ['chat target', frame({ ...valid, target: { type: 'chat', projectId: target } })],
     ['bad project', frame({ ...valid, target: { type: 'project', projectId: 'x' } })], ['control title', frame({ ...valid, title: 'a\u0007b' })], ['send tool', frame({ threadId: target, prompt }, 'acb-create-', 'send_message_to_thread')],
   ];

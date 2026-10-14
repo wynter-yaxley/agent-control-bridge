@@ -257,7 +257,7 @@ export function createThreadCompatible(schema: JsonObject | undefined): boolean 
   const variants = Array.isArray(target.anyOf) ? target.anyOf : Array.isArray(target.oneOf) ? target.oneOf : [target];
   return variants.map(record).some(variant => {
     const fields = record(variant?.properties), kind = record(fields?.type);
-    return variant?.type === 'object' && Array.isArray(kind?.enum) && kind.enum.includes('project') && !!record(fields?.projectId) && requires(variant, ['type', 'projectId']);
+    return variant?.type === 'object' && Array.isArray(kind?.enum) && kind.enum.includes('project') && !!record(fields?.projectId) && requires(variant, ['type', 'projectId', 'environment']);
   });
 }
 /** The only native write: create_thread in one local project with the fixed
@@ -268,7 +268,7 @@ export class NativeCodexThreadCreator extends NativeDesktopReadClient {
     identifier(input.projectId);
     if (typeof input.title !== 'string' || !input.title.trim() || input.title.length > 200 || /[\x00-\x1f]/.test(input.title)) throw new BridgeError('INPUT', 'Invalid Codex thread title');
     if (!createThreadCompatible((await this.catalog()).find(tool => tool.name === 'create_thread')?.inputSchema)) throw new BridgeError('UNSUPPORTED', 'The native host does not advertise a compatible create_thread');
-    const result = await this.request('tools/call', 'create_thread', { title: input.title, prompt: input.prompt, target: { type: 'project', projectId: input.projectId } });
+    const result = await this.request('tools/call', 'create_thread', { title: input.title, prompt: input.prompt, target: { type: 'project', projectId: input.projectId, environment: 'local' } });
     // Only a well-formed ID counts; anything else is recovered from the prompt receipt.
     return { threadId: typeof result.threadId === 'string' && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(result.threadId) ? result.threadId : undefined };
   }
