@@ -348,7 +348,7 @@ test('READY project: verified Codex conversations are added by attach or one for
   assert.match(String(f.db.prepare("SELECT payload FROM notification_outbox WHERE dedupe_key LIKE ?").get(`project:${id}:codex-create:3:%`)!.payload),/never resent/);
   await assert.rejects(p.createCodex(id,f.context),{code:'UNSUPPORTED'});
   let observed:unknown;f.host.observeCodexCreation=async input=>{observed=input;return undefined;};
-  await assert.rejects(p.createCodex(id,f.context),{code:'PROVENANCE'});assert.deepEqual({appProjectId:observed.appProjectId,workspacePath:observed.workspacePath.toLowerCase(),operationKey:observed.operationKey,index:observed.index},{appProjectId:'native-one-codex',workspacePath:ready.workspacePath.toLowerCase(),operationKey:id,index:3});
+  await assert.rejects(p.createCodex(id,f.context),{code:'PROVENANCE'});const obs=observed as {appProjectId:string;workspacePath:string;operationKey:string;index:number};assert.deepEqual({appProjectId:obs.appProjectId,workspacePath:obs.workspacePath.toLowerCase(),operationKey:obs.operationKey,index:obs.index},{appProjectId:'native-one-codex',workspacePath:ready.workspacePath.toLowerCase(),operationKey:id,index:3});
   f.host.observeCodexCreation=async()=>'recovered-codex-3';
   const recovered=await p.createCodex(id,f.context);
   assert.equal(recovered.stages!.codexConversations,4);assert.equal(recovered.stages!.codexPending,null);assert.equal(calls,2);
