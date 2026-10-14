@@ -14,10 +14,14 @@ import { policyBindings, executorGaps } from '../src/windows-host.ts';
 import type { BackgroundExecutor } from '../src/background-runner.ts';
 import { hostCapabilities } from './fixtures/host-capabilities.ts';
 
-const controllerEntry = { principal: 'fixture:controller', instance: 'hermes-controller', executor: 'hermes', controller: true, reviewer: false } as const;
-const executorIdentity = { principal: 'fixture:executor', instance: 'codex-production', executor: 'codex', controller: false, reviewer: false } as const;
-const executorEntry = { ...executorIdentity, host: 'fixture:controller' };
-const reviewerEntry = { principal: 'fixture:reviewer', instance: 'independent-reviewer', executor: null, controller: false, reviewer: true } as const;
+// Well-formed, unique synthetic SIDs: the Windows policy parser validates them,
+// and no real account uses this made-up domain identifier.
+const CONTROLLER_SID = 'S-1-5-21-1000000000-2000000000-3000000000-1001', EXECUTOR_SID = 'S-1-5-21-1000000000-2000000000-3000000000-1002';
+const REVIEWER_SID = 'S-1-5-21-1000000000-2000000000-3000000000-1003', SECOND_SID = 'S-1-5-21-1000000000-2000000000-3000000000-1004';
+const controllerEntry = { principal: CONTROLLER_SID, instance: 'hermes-controller', executor: 'hermes', controller: true, reviewer: false } as const;
+const executorIdentity = { principal: EXECUTOR_SID, instance: 'codex-production', executor: 'codex', controller: false, reviewer: false } as const;
+const executorEntry = { ...executorIdentity, host: CONTROLLER_SID };
+const reviewerEntry = { principal: REVIEWER_SID, instance: 'independent-reviewer', executor: null, controller: false, reviewer: true } as const;
 function policy(t: { after: (fn: () => void) => void }, entries: unknown) {
   const root = mkdtempSync(join(tmpdir(), 'acb-trusted-policy-')); t.after(() => rmSync(root, { recursive: true, force: true }));
   const path = join(root, 'caller-policy.json'); writeFileSync(path, JSON.stringify(entries)); return path;
@@ -28,24 +32,36 @@ test('trusted host: only an explicit protected-policy delegation yields a distin
   assert.equal(delegatedExecutor(authority, policy(t, [controllerEntry, { ...executorEntry, host: undefined }, reviewerEntry]), controller), undefined);
   const path = policy(t, [controllerEntry, executorEntry, reviewerEntry]);
   const executor = authority.resolve(delegatedExecutor(authority, path, controller))!;
-  assert.deepEqual({ ...executor }, { principal: 'fixture:executor', instance: 'codex-production', executor: 'codex', controller: false, reviewer: false });
-  assert.deepEqual(policySummary(path, 'fixture:controller'), { entries: 3, controllers: 1, codexExecutors: 1, reviewers: 1, delegatedExecutorInstance: 'codex-production', delegationsToCaller: 1 });
+  assert.deepEqual({ ...executor }, { principal: EXECUTOR_SID, instance: 'codex-production', executor: 'codex', controller: false, reviewer: false });
+  assert.deepEqual(policySummary(path, CONTROLLER_SID), { entries: 3, controllers: 1, codexExecutors: 1, reviewers: 1, delegatedExecutorInstance: 'codex-production', delegationsToCaller: 1 });
   assert.throws(() => delegatedExecutor(authority, path, reviewer), { code: 'AUTH' });
   for (const entries of [
-    [controllerEntry, executorEntry, { ...executorEntry, principal: 'fixture:second', instance: 'second' }],
+    [controllerEntry, executorEntry, { ...executorEntry, principal: SECOND_SID, instance: 'second' }],
     [controllerEntry, { ...executorEntry, executor: 'pi' }],
     [controllerEntry, { ...executorEntry, reviewer: true }],
-    [controllerEntry, { ...executorEntry, host: 'fixture:reviewer' }, reviewerEntry],
-    [controllerEntry, { ...executorEntry, host: 'fixture:executor' }],
+    [controllerEntry, { ...executorEntry, host: REVIEWER_SID }, reviewerEntry],
+    [controllerEntry, { ...executorEntry, host: EXECUTOR_SID }],
     [controllerEntry, { ...executorEntry, instance: 'hermes-controller' }],
   ]) assert.throws(() => delegatedExecutor(authority, policy(t, entries), controller), { code: 'AUTH' }, JSON.stringify(entries));
+});
+
+test('trusted host: Windows policy parsing accepts the synthetic SIDs and refuses non-SID or broad principals', t => {
+  // Exercise the real win32 validation branch on every platform; restored before any other code runs.
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+  const asWindows = <T>(run: () => T): T => { Object.defineProperty(process, 'platform', { ...platform, value: 'win32' }); try { return run(); } finally { Object.defineProperty(process, 'platform', platform); } };
+  const authority = new CallerAuthority(), controller = authority.issue(controllerEntry);
+  assert.equal(asWindows(() => authority.resolve(delegatedExecutor(authority, policy(t, [controllerEntry, executorEntry, reviewerEntry]), controller))?.principal), EXECUTOR_SID);
+  for (const principal of ['fixture:executor', 'S-1-5-', 'S-1-5-21-x', 'S-1-1-0', 'S-1-5-11', 'S-1-5-32-545'])
+    assert.throws(() => asWindows(() => delegatedExecutor(authority, policy(t, [controllerEntry, { ...executorEntry, principal }, reviewerEntry]), controller)), { code: 'AUTH' }, principal);
+  assert.throws(() => asWindows(() => delegatedExecutor(authority, policy(t, [controllerEntry, { ...executorEntry, host: 'fixture:controller' }, reviewerEntry]), controller)), { code: 'AUTH' });
+  assert.equal(process.platform, platform.value);
 });
 
 test('trusted host: policy bindings give a controller its delegated executor and ledger approvals, never a reviewer', async t => {
   const scope = isolatedDemo(); t.after(() => scope.close());
   const authority = new CallerAuthority(), config = defaults(scope.root), path = policy(t, [controllerEntry, executorEntry, reviewerEntry]);
   const controller = policyBindings({ config, authority, context: authority.issue(controllerEntry), db: scope.db }, undefined, path);
-  assert.equal(authority.resolve(controller.executorContext)?.principal, 'fixture:executor'); assert.equal(typeof controller.approveCodex, 'function');
+  assert.equal(authority.resolve(controller.executorContext)?.principal, EXECUTOR_SID); assert.equal(typeof controller.approveCodex, 'function');
   assert.equal(controller.projects, undefined); assert.equal(controller.ordinaryChat, undefined);
   const native = { listProjects: async () => ({ projects: [] }), listThreads: async () => ({ threads: [], pinnedThreads: [] }), readThread: async () => assert.fail('No read expected') };
   const readOnly = policyBindings({ config, authority, context: authority.issue(controllerEntry), db: scope.db }, native, path).projects!;
@@ -103,7 +119,7 @@ test('trusted host: Codex approvals bind the live run/turn, wait for an independ
   // Before turn receipt, foreign turn, out-of-workspace cwd and secrets decline without a ledger request.
   assert.deepEqual(outcomes, ['decline', 'decline', 'decline', 'decline', 'accept', 'decline', 'decline']);
   const rows = db.prepare('SELECT decision,decided_by,requested_by,action FROM approvals ORDER BY requested_at,rowid').all();
-  assert.deepEqual(rows.map(row => [row.decision, row.decided_by, row.requested_by]), [['approved', 'fixture:reviewer', 'fixture:executor'], ['rejected', 'fixture:reviewer', 'fixture:executor'], ['rejected', 'acb:expired', 'fixture:executor']]);
+  assert.deepEqual(rows.map(row => [row.decision, row.decided_by, row.requested_by]), [['approved', REVIEWER_SID, EXECUTOR_SID], ['rejected', REVIEWER_SID, EXECUTOR_SID], ['rejected', 'acb:expired', EXECUTOR_SID]]);
   assert.match(String(rows[0].action), /"turnId":"fixture-turn".*"command":"npm test"/);
   assert.throws(() => new TaskStore(db, authority).decideApproval(String(db.prepare("SELECT id FROM approvals WHERE decided_by='acb:expired'").get()!.id), 'approved', reviewer), { code: 'CONFLICT' });
   const done = bridge.get(request.requestId); assert.equal(done.taskStatus, 'WAITING_APPROVAL');
