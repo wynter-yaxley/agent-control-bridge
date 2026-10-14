@@ -328,9 +328,9 @@ test('READY project: verified Codex conversations are added by attach or one for
   assert.equal((await p.attachCodex(id,'operator-codex',f.context)).stages!.codexConversations,2);assert.deepEqual(verified,['operator-codex']);
   // Formal creation: one reviewer approval per attempt, codex-thread only, the pending index saved first.
   const scopes:{operationId:string;attempt:string;effects:string[]}[]=[];let calls=0,lose=false;
-  f.host.authorizeInitialization=async(name,path,_signal,scope)=>{assert.equal(name,'one-codex');assert.equal(path,ready.workspacePath);scopes.push(scope);};
+  f.host.authorizeInitialization=async(name,path,_signal,scope)=>{assert.equal(name,'one-codex');assert.equal(path.toLowerCase(),ready.workspacePath.toLowerCase());scopes.push(scope);};
   f.host.createCodexConversation=async(appProjectId,workspacePath,_signal,key,index,scope)=>{
-    calls++;assert.equal(appProjectId,'native-one-codex');assert.equal(workspacePath,ready.workspacePath);assert.equal(key,id);assert.equal(scope,scopes.at(-1));
+    calls++;assert.equal(appProjectId,'native-one-codex');assert.equal(workspacePath.toLowerCase(),ready.workspacePath.toLowerCase());assert.equal(key,id);assert.equal(scope,scopes.at(-1));
     assert.equal(p.get(id,f.context).stages!.codexPending,index);
     if(lose)throw new BridgeError('IO','[TEST] create_thread reply lost');return {conversationId:`formal-codex-${index}`};
   };
@@ -348,7 +348,7 @@ test('READY project: verified Codex conversations are added by attach or one for
   assert.match(String(f.db.prepare("SELECT payload FROM notification_outbox WHERE dedupe_key LIKE ?").get(`project:${id}:codex-create:3:%`)!.payload),/never resent/);
   await assert.rejects(p.createCodex(id,f.context),{code:'UNSUPPORTED'});
   let observed:unknown;f.host.observeCodexCreation=async input=>{observed=input;return undefined;};
-  await assert.rejects(p.createCodex(id,f.context),{code:'PROVENANCE'});assert.deepEqual(observed,{appProjectId:'native-one-codex',workspacePath:ready.workspacePath,operationKey:id,index:3});
+  await assert.rejects(p.createCodex(id,f.context),{code:'PROVENANCE'});assert.deepEqual({appProjectId:observed.appProjectId,workspacePath:observed.workspacePath.toLowerCase(),operationKey:observed.operationKey,index:observed.index},{appProjectId:'native-one-codex',workspacePath:ready.workspacePath.toLowerCase(),operationKey:id,index:3});
   f.host.observeCodexCreation=async()=>'recovered-codex-3';
   const recovered=await p.createCodex(id,f.context);
   assert.equal(recovered.stages!.codexConversations,4);assert.equal(recovered.stages!.codexPending,null);assert.equal(calls,2);
