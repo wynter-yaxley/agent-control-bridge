@@ -22,8 +22,9 @@ export interface WindowsNativeTools {
   createCodexThread?(projectId: string, name: string, signal: AbortSignal): Promise<{ threadId: string; projectId?: string }>;
 }
 export interface WindowsUiSnapshot { title: string; text: string; ordinaryComposer: boolean; pid: number; conversationId: string | null }
-interface UiResult { ok: boolean; code?: string; stage?: string; errorType?: string; line?: number; ordinaryModeObserved?: boolean; snapshot?: WindowsUiSnapshot; body?: string; conversationId?: string; completionVerified?: boolean; timings?: { initMs: number; actionMs: number } }
+interface UiResult { ok: boolean; code?: string; stage?: string; target?: string; errorType?: string; line?: number; ordinaryModeObserved?: boolean; snapshot?: WindowsUiSnapshot; body?: string; conversationId?: string; completionVerified?: boolean; timings?: { initMs: number; actionMs: number } }
 const pathKey = (value: string) => win32.normalize(value).toLowerCase();
+const UI_REPORT_GRACE_MS = 5000;
 const initializationPrompt = (key: string) => `这是 Agent Control Bridge 的会话身份初始化，不执行工程任务。请只回复：ACB_INIT_${key}。`;
 // The worker sends this exact prompt only after observing a blank ordinary chat,
 // so its native readback is a durable receipt that survives Bridge restarts.
@@ -43,6 +44,7 @@ export class WindowsNativeUi {
   private readonly config: BridgeConfig;
   private child?: ReturnType<typeof spawn>;
   private queue: Promise<unknown> = Promise.resolve();
+  private lastStage = '';
   constructor(config: BridgeConfig) { this.config = config; }
   close(): void { this.child?.kill(); this.child=undefined; uiWorkers.delete(this); }
   call(operation: 'workspace-create' | 'gpt-create' | 'gpt-rename' | 'snapshot' | 'identity' | 'gpt-read' | 'chat-open' | 'chat-send' | 'chat-read-reply' | 'uia-diagnose', fields: { name: string; conversationId?: string; path?: string; projectName?: string; prompt?: string; marker?: string; expectedTitle?: string; mode?: 'gpt' | 'codex' }, signal: AbortSignal): Promise<UiResult> {
@@ -63,10 +65,17 @@ export class WindowsNativeUi {
       this.child.stdout!.setEncoding('utf8');
       const started=this.child;
       started.once('close',()=>{if(this.child===started){this.child=undefined;uiWorkers.delete(this);}});
-      started.stderr!.on('data',chunk=>{if(String(chunk).startsWith('ACB_UI_STAGE='))process.stderr.write(String(chunk));});
+      // Forward only the worker's own stage/diagnostic lines; remember the last stage.
+      started.stderr!.setEncoding('utf8');
+      let partial='';
+      started.stderr!.on('data',(chunk:string)=>{
+        const lines=(partial+chunk).split(/\r?\n/);partial=lines.pop()!.slice(-65536);
+        for(const line of lines){if(!line.startsWith('ACB_UI_'))continue;if(line.startsWith('ACB_UI_STAGE='))this.lastStage=line.slice(13,160);process.stderr.write(line+'\n');}
+      });
       uiWorkers.add(this);
     }
     const child=this.child;
+    this.lastStage='';
     return new Promise((resolve,reject)=>{
       let output='';
       const finish=(error?: BridgeError,result?: UiResult)=>{
@@ -74,7 +83,7 @@ export class WindowsNativeUi {
         child.stdout!.removeListener('data',read);child.removeListener('error',failed);child.removeListener('close',closed);child.stdin!.removeListener('error',inputFailed);
         if(error){this.close();reject(error);}else resolve(result!);
       };
-      const abort=()=>finish(new BridgeError('TIMEOUT','Native UI operation interrupted; reconcile without resending'));
+      const abort=()=>finish(new BridgeError('TIMEOUT',`Native UI operation interrupted${this.lastStage?` at ${this.lastStage}`:''}; reconcile without resending`));
       const failed=()=>finish(new BridgeError('DEPENDENCY','Windows UI worker could not start'));
       const closed=()=>finish(new BridgeError('IO','Windows UI worker exited; reconcile without resending'));
       const inputFailed=()=>finish(new BridgeError('IO','Windows UI worker input failed'));
@@ -84,16 +93,19 @@ export class WindowsNativeUi {
         if(!output.includes('\n'))return;
         try {
           const result=JSON.parse(output) as UiResult;
-          if(!result.ok)throw new BridgeError(Object.hasOwn(EXIT_CODES,result.code ?? '')?result.code as ErrorCode:'EXECUTION',`Native UI operation failed at ${result.stage} (${result.errorType}, line ${result.line})`);
+          if(!result.ok)throw new BridgeError(Object.hasOwn(EXIT_CODES,result.code ?? '')?result.code as ErrorCode:'EXECUTION',`Native UI operation failed at ${result.stage}${result.target?` waiting for ${result.target}`:''} (${result.errorType}, line ${result.line})`);
           if(result.snapshot)result.snapshot.text=redact(result.snapshot.text);
           if(result.body)result.body=redact(result.body);
           finish(undefined,result);
         }catch(error){finish(error instanceof BridgeError?error:new BridgeError('IO','Windows UI worker returned an unreadable result'));}
       };
+      // The worker reports its own stage within a smaller budget; this outer
+      // bound only covers a worker that stops answering.
       const timer=setTimeout(abort,this.config.background.timeoutMs);
       signal.addEventListener('abort',abort,{once:true});
       child.stdout!.on('data',read);child.once('error',failed);child.once('close',closed);child.stdin!.on('error',inputFailed);
-      child.stdin!.write(JSON.stringify({operation,...fields,timeoutMs:this.config.background.timeoutMs,pollMs:this.config.desktop.uiPollMs})+'\n');
+      // A smaller worker budget lets it report its own stage before outer deadlines fire.
+      child.stdin!.write(JSON.stringify({operation,...fields,timeoutMs:Math.max(1000,this.config.background.timeoutMs-UI_REPORT_GRACE_MS),pollMs:this.config.desktop.uiPollMs})+'\n');
     });
   }
 }
@@ -130,9 +142,19 @@ export function createWindowsNativeProjectHost(options: { config: BridgeConfig; 
     async authorizeInitialization(name,path,signal){if(!await options.authorizeInitialization(name,path,signal))throw new BridgeError('AUTH','Project-scoped initialization approval is required');},
     async createWorkspace(name, path, signal) {
       if (!await options.authorizeInitialization(name,path,signal)) throw new BridgeError('AUTH', 'One-time human authorization for this native UI initialization is required');
+      // A path already registered natively is never registered again.
+      if ((await native.listProjects(signal)).projects.some(item => pathKey(item.path) === pathKey(path))) throw new BridgeError('CONFLICT', 'This directory is already a native workspace; reconcile instead of creating');
       await ui.call('workspace-create', {name,path},signal);
-      const project = await poll(async () => (await native.listProjects(signal)).projects.find(item => item.projectKind === 'local' && item.hostId === 'local' && item.label === name && pathKey(item.path) === pathKey(path)),signal);
+      const project = await poll(async () => {
+        const matches = (await native.listProjects(signal)).projects.filter(item => pathKey(item.path) === pathKey(path));
+        if (matches.length > 1) throw new BridgeError('PROVENANCE', 'Several native workspaces share this directory; do not guess');
+        if (matches[0] && (matches[0].projectKind !== 'local' || matches[0].hostId !== 'local' || matches[0].label !== name)) throw new BridgeError('PROVENANCE', 'The native workspace for this directory has a different name or host');
+        return matches[0];
+      },signal);
       return { appProjectId: project.projectId, workspacePath: project.path };
+    },
+    async nativeWorkspaces(path, signal) {
+      return (await native.listProjects(signal)).projects.filter(item => pathKey(item.path) === pathKey(path)).map(item => ({ projectId: item.projectId, label: item.label }));
     },
     async createOrdinaryChat(_appProjectId, name, signal, operationKey) {
       // Without a recorded operation key the receipt could never be verified after a restart.
@@ -154,12 +176,15 @@ export function createWindowsNativeProjectHost(options: { config: BridgeConfig; 
       },signal);
       return {conversationId:id};
     },
-    async createCodexConversation(appProjectId,_path,signal) {
+    async createCodexConversation(appProjectId,_path,signal,_operationKey,index=0) {
       const project=(await native.listProjects(signal)).projects.find(item=>item.projectId===appProjectId)!;
-      const name=`${project.label} Codex`;
+      const name=index?`${project.label} Codex ${index+1}`:`${project.label} Codex`;
       if(native.createCodexThread) {
+        const inventory=await native.listThreads(signal),known=new Set([...inventory.threads,...inventory.pinnedThreads].map(item=>item.id));
         const created=await native.createCodexThread(appProjectId,name,signal);
         if(created.projectId!==undefined && created.projectId!==appProjectId)throw new BridgeError('PROVENANCE','Formal Codex receipt belongs to a different native project');
+        // A receipt naming a thread that existed before this call is not a new conversation.
+        if(!created.threadId || known.has(created.threadId))throw new BridgeError('PROVENANCE','Formal Codex receipt does not name a new thread');
         return {conversationId:created.threadId};
       }
       throw new BridgeError('UNSUPPORTED','A formal native Codex creation callback is required; GPT URI cannot prove Work identity');
@@ -170,6 +195,7 @@ export function createWindowsNativeProjectHost(options: { config: BridgeConfig; 
         if(matches.length!==1)throw new BridgeError('PROVENANCE','Original native workspace receipt is unavailable or ambiguous');
         return {...resources,appProjectId:matches[0].projectId};
       }
+      if(phase==='codex.extra')throw new BridgeError('UNSUPPORTED','Formal Codex creation has no durable operation-to-thread receipt; do not infer an ID from titles or resend');
       if(phase==='codex') {
         if(!resources.codexConversationId)throw new BridgeError('UNSUPPORTED','Formal Codex creation has no durable operation-to-thread receipt; do not infer an ID from titles or resend');
         const inventory=await native.listThreads(signal),thread=[...inventory.threads,...inventory.pinnedThreads].find(item=>item.id===resources.codexConversationId);
@@ -205,7 +231,11 @@ export function createWindowsNativeProjectHost(options: { config: BridgeConfig; 
     async verifyBundle(resources,signal) {
       if(!resources.initializationKey)throw new BridgeError('PROVENANCE','Original initialization identity was not recorded');
       const projects=await native.listProjects(signal), threads=await native.listThreads(signal), chat=await native.readThread(resources.chatgptConversationId,signal);
-      const project=projects.projects.find(item=>item.projectId===resources.appProjectId), codex=[...threads.threads,...threads.pinnedThreads].find(item=>item.id===resources.codexConversationId);
+      const all=[...threads.threads,...threads.pinnedThreads],project=projects.projects.find(item=>item.projectId===resources.appProjectId), codex=all.find(item=>item.id===resources.codexConversationId);
+      // Every additional Codex conversation must be a distinct member of the same workspace.
+      const extras=resources.extraCodexConversationIds ?? [];
+      if(new Set([resources.codexConversationId,...extras]).size!==extras.length+1 || extras.some(id=>{const item=all.find(thread=>thread.id===id);return !item || item.kind!=='codex' || item.projectId!==resources.appProjectId || !item.cwd || pathKey(item.cwd)!==pathKey(resources.workspacePath);}))
+        throw new BridgeError('PROVENANCE','Additional Codex conversations are missing, duplicated or belong elsewhere');
       if (!project || project.projectKind!=='local' || project.hostId!=='local' || project.label!==resources.name || pathKey(project.path)!==pathKey(resources.workspacePath) ||
           !codex || codex.kind!=='codex' || codex.projectId!==resources.appProjectId || !codex.cwd || pathKey(codex.cwd)!==pathKey(resources.workspacePath) || chat.thread.id!==resources.chatgptConversationId || chat.thread.kind!=='chatgpt' || chat.thread.title!==resources.name) throw new BridgeError('PROVENANCE','Native bundle identity, directory, name or Codex membership differs');
       if (!hasInitialization(chat,resources.initializationKey)) throw new BridgeError('PROVENANCE','GPT conversation lacks this operation\'s original initialization receipt');

@@ -120,7 +120,7 @@ stdout 只承载 MCP，安全错误写 stderr。默认入口只注册 8 个只�
 
 Controller、Executor、Reviewer 必须是不同的受保护主体/连接，Reviewer 不兼任 Controller 或 Codex。普通 Controller 不能提交最终验收或执行 Reviewer 专属恢复。策略与代码在受控启动时加载，不热更新授权；改源码不能提升运行中的权限。同 OS 用户恶意代码仍可破坏本机运行时，不能声称强隔离。实际本机策略已取消 Controller/Reviewer 重叠，独立 Reviewer 仍需部署者提供。
 
-[Hermes MCP 样例](config/hermes-mcp.example.yaml) 开放 8 个查询/诊断工具；可信写入口有 23 个工具，包括设置默认 Codex、旧项目 adopt 与 Reviewer 审批。Reviewer 使用单独受保护连接。路径变量替换为实际非秘密路径。只读示例 timeout 为 300 秒：最长 GPT 诊断顺序为 CDP 120 秒、UIA 回退 120 秒、原生核验 30 秒，加 30 秒客户端余量；预算变化时按统一配置重新计算，普通台账查询通常立即返回。同步项目创建另按实际阶段设置预算；工程任务提交立即返回 ID，由独立 worker 执行，不能用延长 MCP 超时替代它，也不能因客户端断开重新发送。
+[Hermes MCP 样例](config/hermes-mcp.example.yaml) 开放 8 个查询/诊断工具；可信写入口有 24 个工具，包括设置默认 Codex、旧项目 adopt、Workspace 步骤显式重启与 Reviewer 审批。Reviewer 使用单独受保护连接。路径变量替换为实际非秘密路径。只读示例 timeout 为 300 秒：最长 GPT 诊断顺序为 CDP 120 秒、UIA 回退 120 秒、原生核验 30 秒，加 30 秒客户端余量；预算变化时按统一配置重新计算，普通台账查询通常立即返回。同步项目创建另按实际阶段设置预算；工程任务提交立即返回 ID，由独立 worker 执行，不能用延长 MCP 超时替代它，也不能因客户端断开重新发送。
 
 WSL Hermes 使用可执行的 Windows Node 绝对路径（WSL 下为 /mnt/c/.../node.exe），入口/配置/库参数使用 Windows 绝对路径，Node >=24.19.0；不要把 Linux Node 当作 Windows UIA 宿主。tools/hermes/mcp_probe.py 只验证隔离协议，不是真实写宿主。HermesGatewayAdapter 复用已验证飞书事件和可信项目路由；NotificationDispatcher 持久保存回执，不另起事件消费者。
 
@@ -183,7 +183,7 @@ CDP 优先复用当前实例已有端点，先校验端口所属签名进程与�
 | GPT generation UNCERTAIN | reconcile_generation 回读原请求；合成完成不足以证明流式结束 |
 | 工程 UNCERTAIN | 原 turnId 或精确 dispatchId 回读；仍运行则 RUNNING，完成进入 WAITING_APPROVAL，不 resume/start 重跑 |
 | 反馈 SENDING/UNCERTAIN | reconcile_feedback，不重发结果 |
-| project UNCERTAIN | 保存 phase/resources；只有唯一原阶段回执才能补记遗失 ID，安全缺失步骤才继续；未知则阻断，不补造。重启后的新宿主按原生项目/线程归属和原 ACB_INIT 初始化消息核验已有资源，不要求重新打开 GPT 页面 |
+| project UNCERTAIN | 保存 phase/resources；只有唯一原阶段回执才能补记遗失 ID，安全缺失步骤才继续；未知则阻断，不补造。重启后的新宿主按原生项目/线程归属和原 ACB_INIT 初始化消息核验已有资源，不要求重新打开 GPT 页面。stages 分开报告目录已建、原生 Workspace、GPT 与 Codex 数量；phase=workspace 且原生端查不到时 reconcile 只返回 PROVENANCE，不会续跑。原持有者已退出、目录仍为空、原生端列不出该目录的任何 Workspace 时，Controller 可调用 acb_project_restart_workspace 显式重试这一步（需宿主本次批准、写审计、每个操作最多 2 次）；目录非空或已有原生 Workspace 时拒绝 |
 | DB / SCHEMA | 一致性备份、副本验证、显式迁移；迁移后旧项目没有 project_access，须 acb_project_adopt 按已记录的 GPT/Codex ID 回读原生归属后才授予访问，mapping-register 不再认领无主项目 |
 | TIMEOUT / 失联 | 保留未知结果并按阈值报告，不以失联推断成功或确定退出 |
 
@@ -228,7 +228,7 @@ npm test 已发现全部 Node 测试，包含 e2e/workflow；CI 不再重复同�
 
 结构保留职责层次：mcp-server/mcp 为协议；background/project-provisioner/prompts/tasks/topology/outbox 为业务；native-readonly/windows-native-host 为 IPC/UIA；codex-app-server/ordinary-chat/hermes-gateway/notification-delivery 为适配器。没有为美观搬迁整个项目。
 
-实际源码参考：[WPS 常驻 JSON 行宿主](https://github.com/sueccku/dsh-plugin-wps-office-next/blob/bc69b96fca0c30e63680a151ebf96a093404d2da/host/wps-com-host.ps1)、[mcp-windows 局部查询](https://github.com/sbroenne/mcp-windows/blob/655b9fc92d03ad52a270067c6844ea1231c90559/src/Sbroenne.WindowsMcp/Automation/Tools/UIFindTool.cs)、[FlaUI 批量动作](https://github.com/shanselman/FlaUI-MCP/blob/da1d2a24eae6ccdfbbd40a1375b6617536552351/src/FlaUI.Mcp/Tools/BatchTool.cs)、[winapp Pattern 操作](https://github.com/microsoft/winappCli/blob/96f487615872f7c0e4032e0361856e3109a477e3/src/winapp-CLI/WinApp.Cli/Commands/UiInvokeCommand.cs)、[mcp-compressor 门面转换](https://github.com/atlassian-labs/mcp-compressor/blob/86dc1dfd414d68914d2fbb7b2421420c3f74bbea/python/mcp-compressor/mcp_compressor/transforms.py)。只借鉴原则，不复制/执行源码或引入框架；默认 8 个、可信写入口 23 个工具不需要动态 Catalog。
+实际源码参考：[WPS 常驻 JSON 行宿主](https://github.com/sueccku/dsh-plugin-wps-office-next/blob/bc69b96fca0c30e63680a151ebf96a093404d2da/host/wps-com-host.ps1)、[mcp-windows 局部查询](https://github.com/sbroenne/mcp-windows/blob/655b9fc92d03ad52a270067c6844ea1231c90559/src/Sbroenne.WindowsMcp/Automation/Tools/UIFindTool.cs)、[FlaUI 批量动作](https://github.com/shanselman/FlaUI-MCP/blob/da1d2a24eae6ccdfbbd40a1375b6617536552351/src/FlaUI.Mcp/Tools/BatchTool.cs)、[winapp Pattern 操作](https://github.com/microsoft/winappCli/blob/96f487615872f7c0e4032e0361856e3109a477e3/src/winapp-CLI/WinApp.Cli/Commands/UiInvokeCommand.cs)、[mcp-compressor 门面转换](https://github.com/atlassian-labs/mcp-compressor/blob/86dc1dfd414d68914d2fbb7b2421420c3f74bbea/python/mcp-compressor/mcp_compressor/transforms.py)。只借鉴原则，不复制/执行源码或引入框架；默认 8 个、可信写入口 24 个工具不需要动态 Catalog。
 
 规则见 [PROJECT_RULES](docs/PROJECT_RULES.md)，独立报告用 [验收模板](docs/ACCEPTANCE_TEMPLATE.md)。保留 [MIT LICENSE](LICENSE) 和 [第三方声明](THIRD_PARTY_NOTICES.md)。报告存项目 docs，私有历史不发布，不再写个人文件夹。
 

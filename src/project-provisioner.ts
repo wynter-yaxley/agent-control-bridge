@@ -1,5 +1,5 @@
 import type { DatabaseSync } from 'node:sqlite';
-import { existsSync, lstatSync, mkdirSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { CallerAuthority, type CallerContext } from './caller.ts';
 import { now, transaction, uuid, processOwner, ownerAlive } from './db.ts';
@@ -30,14 +30,20 @@ export interface ProjectHost {
   // appProjectId correlates this creation operation; ordinary GPT is not moved
   // into a Codex native project. verifyBundle must independently read its title.
   createOrdinaryChat(appProjectId: string, exactName: string, signal: AbortSignal, operationKey?: string): Promise<{ conversationId: string }>;
-  createCodexConversation(appProjectId: string, workspacePath: string, signal: AbortSignal, operationKey?: string): Promise<{ conversationId: string }>;
+  /** index > 0 names an additional conversation of the same workspace. */
+  createCodexConversation(appProjectId: string, workspacePath: string, signal: AbortSignal, operationKey?: string, index?: number): Promise<{ conversationId: string }>;
+  /** Read-only: native workspaces registered for this directory, whatever their name. */
+  nativeWorkspaces?(workspacePath: string, signal: AbortSignal): Promise<{ projectId: string; label: string }[]>;
   observePartial?(resources: Partial<ProjectResources>, phase: string, signal: AbortSignal): Promise<Partial<ProjectResources>>;
   /** Read-only native ownership check for a legacy mapping with recorded IDs. */
   verifyExisting?(input: { name: string; workspacePath: string; chatgptConversationId: string; codexConversationIds: string[] }, signal: AbortSignal): Promise<{ appProjectId: string }>;
   verifyBundle(resources: ProjectResources, signal: AbortSignal): Promise<ProjectBundleEvidence>;
 }
-export interface ProjectResources { initializationKey?: string; appProjectId: string; workspacePath: string; name: string; chatgptConversationId: string; codexConversationId: string }
-export interface ProjectOperation { id: string; projectId: string; name: string; workspacePath: string; state: string; errorCode: string | null; phase?: string | null; resources: Partial<ProjectResources> | null }
+export interface ProjectResources { initializationKey?: string; appProjectId: string; workspacePath: string; name: string; chatgptConversationId: string; codexConversationId: string; codexConversations?: number; extraCodexConversationIds?: string[] }
+/** Directory creation and native registration are separate facts; only receipts count. */
+export interface ProjectStages { directoryCreated: boolean; nativeWorkspace: boolean; gptConversation: boolean; codexConversations: number; codexRequested: number }
+export interface ProjectOperation { id: string; projectId: string; name: string; workspacePath: string; state: string; errorCode: string | null; phase?: string | null; resources: Partial<ProjectResources> | null; stages?: ProjectStages }
+const MAX_CODEX_CONVERSATIONS = 4, MAX_WORKSPACE_RESTARTS = 2;
 
 export class ProjectProvisioner {
   private readonly db: DatabaseSync;
@@ -53,7 +59,10 @@ export class ProjectProvisioner {
     if (!caller?.controller) throw new BridgeError('AUTH', 'Trusted controller required');
     const row = this.db.prepare('SELECT * FROM project_operations WHERE id=? AND principal=?').get(id, caller.principal);
     if (!row) throw new BridgeError('NOT_FOUND', 'Project operation not found');
-    return { id: String(row.id), projectId: String(row.project_id), name: String(row.name), workspacePath: String(row.root_path), state: String(row.state), phase:row.phase as string | null,errorCode: row.error_code === null ? null : String(row.error_code), resources: row.resources === null ? null : JSON.parse(String(row.resources)) };
+    const resources: Partial<ProjectResources> | null = row.resources === null ? null : JSON.parse(String(row.resources));
+    const stages: ProjectStages = { directoryCreated: !!resources?.workspacePath, nativeWorkspace: !!resources?.appProjectId, gptConversation: !!resources?.chatgptConversationId,
+      codexConversations: (resources?.codexConversationId ? 1 : 0) + (resources?.extraCodexConversationIds?.length ?? 0), codexRequested: resources?.codexConversations ?? 1 };
+    return { id: String(row.id), projectId: String(row.project_id), name: String(row.name), workspacePath: String(row.root_path), state: String(row.state), phase:row.phase as string | null,errorCode: row.error_code === null ? null : String(row.error_code), resources, stages };
   }
   async reconcile(id: string, context: CallerContext): Promise<ProjectOperation> {
     const caller = this.authority.resolve(context);
@@ -71,7 +80,8 @@ export class ProjectProvisioner {
       if(this.db.prepare("UPDATE project_operations SET state='BLOCKED',updated_at=? WHERE id=? AND state='UNCERTAIN' AND resources IS NULL AND phase IS NULL").run(now(),id).changes!==1)throw new BridgeError('CONFLICT','Project operation changed');
       return this.get(id, context);
     }
-    if(row.phase && !['workspace.done','gpt.done','codex.done','verify'].includes(String(row.phase))) {
+    if(row.phase==='codex.extra')throw new BridgeError('UNSUPPORTED','An additional Codex creation has no durable receipt; do not infer an ID or resend');
+    if(row.phase && !['workspace.done','gpt.done','codex.done','codex.extra.done','verify'].includes(String(row.phase))) {
       if(!this.host.observePartial)throw new BridgeError('PROVENANCE','Incomplete resources cannot be recreated during reconciliation');
       resources=await withDeadline(signal=>this.host!.observePartial!(resources,String(row.phase),signal),this.timeoutMs);
       const acknowledged=String(row.phase)==='workspace'?resources.appProjectId:String(row.phase)==='gpt'?resources.chatgptConversationId:resources.codexConversationId;
@@ -83,7 +93,7 @@ export class ProjectProvisioner {
       this.db.prepare("UPDATE project_operations SET state='PROVISIONING',owner_token=?,resources=?,updated_at=? WHERE id=? AND state='UNCERTAIN'").run(processOwner(),JSON.stringify(resources),now(),id);
     });
     try {await this.complete(id,resources,context);}
-    catch(error){const code=classifyError(error).code;this.db.prepare("UPDATE project_operations SET state='UNCERTAIN',error_code=?,updated_at=? WHERE id=?").run(code,now(),id);enqueueNotification(this.db,caller.principal,`project:${id}:reconcile:${code}`,{operationId:id,state:'UNCERTAIN',errorCode:code});}
+    catch(error){const failure=classifyError(error);this.db.prepare("UPDATE project_operations SET state='UNCERTAIN',error_code=?,updated_at=? WHERE id=?").run(failure.code,now(),id);enqueueNotification(this.db,caller.principal,`project:${id}:reconcile:${failure.code}:${promptHash(failure.message).slice(0,12)}`,{operationId:id,state:'UNCERTAIN',errorCode:failure.code,detail:failure.message.slice(0,300)});}
     return this.get(id, context);
   }
   /** Re-binds a migrated project whose mapping has no controller access. Access
@@ -114,7 +124,38 @@ export class ProjectProvisioner {
     });
     return { projectId, appProjectId: observed.appProjectId, adopted: true };
   }
-  async prepare(name: string, eventKey: string, context: CallerContext): Promise<ProjectOperation> {
+  /** Explicit, audited restart of the native workspace step only. Allowed when the
+   * original holder is gone, only the directory exists (phase 'workspace', no
+   * native receipt or later resources), the directory is still empty and the
+   * native host lists no workspace for it. Never automatic; never reuses foreign
+   * directories; the earlier attempt stays recorded in the audit log. */
+  async restartWorkspace(id: string, context: CallerContext): Promise<ProjectOperation> {
+    const caller = this.authority.resolve(context);
+    if (!caller?.controller) throw new BridgeError('AUTH', 'Trusted Hermes controller required');
+    const operation = this.get(id, context), resources = operation.resources ?? {};
+    if (operation.state !== 'UNCERTAIN' || operation.phase !== 'workspace') throw new BridgeError('STATE', 'Only an uncertain native workspace step can be restarted');
+    if (!this.host?.nativeWorkspaces || !this.host.authorizeInitialization) throw new BridgeError('UNSUPPORTED', 'A native host that lists workspaces and approves initialization is required');
+    if (resources.appProjectId || resources.chatgptConversationId || resources.codexConversationId || resources.extraCodexConversationIds?.length) throw new BridgeError('STATE', 'Later resources exist; reconcile instead of restarting');
+    const path = resolve(String(resources.workspacePath ?? '')), key = (value: string) => process.platform === 'win32' ? value.toLowerCase() : value;
+    if (!resources.workspacePath || key(path) !== key(resolve(operation.workspacePath)) || resources.name !== operation.name) throw new BridgeError('PROVENANCE', 'Recorded directory does not belong to this operation');
+    const row = this.db.prepare('SELECT owner_token FROM project_operations WHERE id=?').get(id)!;
+    if (ownerAlive(row.owner_token as string | null) === true && row.owner_token !== processOwner()) throw new BridgeError('CONFLICT', 'The original project holder is still alive');
+    if (!existsSync(path) || lstatSync(path).isSymbolicLink() || !lstatSync(path).isDirectory() || readdirSync(path).length) throw new BridgeError('PROVENANCE', 'Recorded workspace directory is missing, not a plain directory or no longer empty');
+    const attempts = Number(this.db.prepare("SELECT COUNT(*) n FROM audit_log WHERE action='project_workspace_restart' AND detail=?").get(`operation=${id}`)!.n);
+    if (attempts >= MAX_WORKSPACE_RESTARTS) throw new BridgeError('CONFLICT', 'Workspace restart budget is exhausted; report and stop');
+    const listed = await withDeadline(signal => this.host!.nativeWorkspaces!(path, signal), this.timeoutMs);
+    if (listed.length) throw new BridgeError('PROVENANCE', 'A native workspace already exists for this directory; reconcile instead of creating');
+    await withDeadline(signal => this.host!.authorizeInitialization!(operation.name, path, signal), this.timeoutMs);
+    transaction(this.db, () => {
+      this.assertGuiFree(id);
+      if (this.db.prepare("UPDATE project_operations SET state='PROVISIONING',owner_token=?,error_code=NULL,updated_at=? WHERE id=? AND state='UNCERTAIN' AND phase='workspace'").run(processOwner(), now(), id).changes !== 1) throw new BridgeError('CONFLICT', 'Project operation changed');
+      this.db.prepare('INSERT INTO audit_log(at,actor,action,detail) VALUES(?,?,?,?)').run(now(), caller.principal, 'project_workspace_restart', `operation=${id}`);
+    });
+    try { await this.createWorkspaceAndComplete(id, operation.name, path, resources.codexConversations ?? 1, context); }
+    catch (error) { this.recordFailure(id, caller.principal, error, 'UNCERTAIN', 'Reconcile recorded resources before retry'); }
+    return this.get(id, context);
+  }
+  async prepare(name: string, eventKey: string, context: CallerContext, options: { codexConversations?: number } = {}): Promise<ProjectOperation> {
     const caller = this.authority.resolve(context);
     if (!caller?.controller) throw new BridgeError('AUTH', 'Trusted Hermes controller required');
     if (typeof name !== 'string' || !name.trim() || name.length > 100 || /[<>:"/\\|?*\x00-\x1f]/.test(name) || /[. ]$/.test(name) || /^(?:con|prn|aux|nul|com[0-9]|lpt[0-9])(?:\.|$)/i.test(name)) throw new BridgeError('INPUT', 'Project name is not a valid workspace name');
@@ -122,7 +163,10 @@ export class ProjectProvisioner {
     requireNoSecrets(name); requireNoSecrets(eventKey);
     const path = resolve(this.root, name);
     if (dirname(path) !== this.root) throw new BridgeError('INPUT', 'Workspace must stay inside the configured root');
-    const fingerprint = promptHash(JSON.stringify({ name, path }));
+    const codexConversations = options.codexConversations ?? 1;
+    if (!Number.isInteger(codexConversations) || codexConversations < 1 || codexConversations > MAX_CODEX_CONVERSATIONS) throw new BridgeError('INPUT', 'Invalid Codex conversation count');
+    // Single-conversation requests keep their original fingerprint.
+    const fingerprint = promptHash(JSON.stringify({ name, path, ...(codexConversations > 1 ? { codexConversations } : {}) }));
     const existing = this.db.prepare('SELECT * FROM project_operations WHERE principal=? AND event_key=?').get(caller.principal, eventKey);
     if (existing && existing.request_hash !== fingerprint) throw new BridgeError('CONFLICT', 'Project request key was reused');
     if (existing && !(existing.state === 'BLOCKED' && existing.resources === null && this.host)) return this.get(String(existing.id), context);
@@ -142,6 +186,8 @@ export class ProjectProvisioner {
       const capabilities = await withDeadline(signal => this.host!.inspect(signal), this.timeoutMs);
       assertOrdinaryChatCapabilities(capabilities, true);
       if (capabilities.workspaceSurface !== 'native-desktop') throw new BridgeError('UNSUPPORTED', 'Native desktop workspace registration is required');
+      // Refuse before any directory/UI effect when Codex conversations cannot be created.
+      if (capabilities.createCodexConversation === false) throw new BridgeError('UNSUPPORTED', 'A formal native Codex creation callback is required before creating the bundle');
       for (let current = this.root; ; current = dirname(current)) {
         if (existsSync(current) && lstatSync(current).isSymbolicLink()) throw new BridgeError('CONFIG', 'Workspace parent cannot be a symbolic link');
         if (dirname(current) === current) break;
@@ -150,23 +196,35 @@ export class ProjectProvisioner {
       if(!this.host.authorizeInitialization)throw new BridgeError('AUTH','Target-bound host approval is required before creating local resources');
       await withDeadline(signal=>this.host!.authorizeInitialization!(name,path,signal),this.timeoutMs);
       effectsStarted = true;
-      mkdirSync(this.root, { recursive: true }); mkdirSync(path);
-      this.saveResources(id, { workspacePath: path, name });
-      this.db.prepare("UPDATE project_operations SET phase='workspace' WHERE id=?").run(id);
-      const workspace = await withDeadline(signal => this.host!.createWorkspace(name, path, signal), this.timeoutMs);
-      requireNoSecrets(JSON.stringify(workspace));
-      if (!workspace.appProjectId || resolve(workspace.workspacePath) !== path) throw new BridgeError('PROVENANCE', 'Host created a different workspace');
-      const resources={...workspace,name,initializationKey:id};
-      this.saveResources(id,resources,'workspace.done');
-      await this.complete(id,resources,context);
+      // An existing root (including a drive root such as D:\) is used as is;
+      // mkdir on a Windows drive root fails with EPERM even with recursive.
+      if (!existsSync(this.root)) mkdirSync(this.root, { recursive: true });
+      else if (!lstatSync(this.root).isDirectory()) throw new BridgeError('CONFIG', 'Workspace root is not a directory');
+      mkdirSync(path);
+      this.saveResources(id, { workspacePath: path, name, codexConversations });
+      await this.createWorkspaceAndComplete(id, name, path, codexConversations, context);
     } catch (error) {
-      const code = classifyError(error).code, state = effectsStarted ? 'UNCERTAIN' : 'BLOCKED';
-      transaction(this.db, () => {
-        this.db.prepare('UPDATE project_operations SET state=?,error_code=?,updated_at=? WHERE id=?').run(state, code, now(), id);
-        enqueueNotification(this.db, caller.principal, `project:${id}:${state}:${code}`, { operationId: id, state, errorCode: code, action: effectsStarted ? 'Reconcile recorded resources before retry' : 'Install and verify authorized host capabilities' });
-      });
+      this.recordFailure(id, caller.principal, error, effectsStarted ? 'UNCERTAIN' : 'BLOCKED', effectsStarted ? 'Reconcile recorded resources before retry' : 'Install and verify authorized host capabilities');
     }
     return this.get(id, context);
+  }
+  private async createWorkspaceAndComplete(id: string, name: string, path: string, codexConversations: number, context: CallerContext): Promise<void> {
+    this.db.prepare("UPDATE project_operations SET phase='workspace' WHERE id=?").run(id);
+    const workspace = await withDeadline(signal => this.host!.createWorkspace(name, path, signal), this.timeoutMs);
+    requireNoSecrets(JSON.stringify(workspace));
+    if (!workspace.appProjectId || resolve(workspace.workspacePath) !== path) throw new BridgeError('PROVENANCE', 'Host created a different workspace');
+    const resources = { ...workspace, name, initializationKey: id, codexConversations };
+    this.saveResources(id, resources, 'workspace.done');
+    await this.complete(id, resources, context);
+  }
+  private recordFailure(id: string, principal: string, error: unknown, state: 'UNCERTAIN' | 'BLOCKED', action: string): void {
+    const failure = classifyError(error);
+    transaction(this.db, () => {
+      this.db.prepare('UPDATE project_operations SET state=?,error_code=?,updated_at=? WHERE id=?').run(state, failure.code, now(), id);
+      // Detail carries the failed stage/control constants for the operator, never UI text.
+      // Distinct failures stay distinct notifications; identical repeats deduplicate.
+      enqueueNotification(this.db, principal, `project:${id}:${state}:${failure.code}:${promptHash(failure.message).slice(0, 12)}`, { operationId: id, state, errorCode: failure.code, detail: failure.message.slice(0, 300), action });
+    });
   }
   private saveResources(id: string, resources: Partial<ProjectResources>, phase: string | null = null): void {
     this.db.prepare('UPDATE project_operations SET resources=?,phase=?,updated_at=? WHERE id=? AND state=\'PROVISIONING\'').run(JSON.stringify(resources),phase, now(), id);
@@ -189,13 +247,20 @@ export class ProjectProvisioner {
       const codex=await withDeadline(signal=>this.host!.createCodexConversation(resources.appProjectId!,resources.workspacePath!,signal,resources.initializationKey),this.timeoutMs);
       resources.codexConversationId=codex.conversationId;this.saveResources(id,resources,'codex.done');
     }
+    // Additional conversations are created one at a time; each formal receipt is saved before the next.
+    for(let index=1+(resources.extraCodexConversationIds?.length ?? 0);index<(resources.codexConversations ?? 1);index++) {
+      this.db.prepare("UPDATE project_operations SET phase='codex.extra' WHERE id=?").run(id);
+      const codex=await withDeadline(signal=>this.host!.createCodexConversation(resources.appProjectId!,resources.workspacePath!,signal,resources.initializationKey,index),this.timeoutMs);
+      if([resources.codexConversationId,resources.chatgptConversationId,...(resources.extraCodexConversationIds ?? [])].includes(codex.conversationId))throw new BridgeError('PROVENANCE','Codex receipt repeats an existing conversation');
+      resources.extraCodexConversationIds=[...(resources.extraCodexConversationIds ?? []),codex.conversationId];this.saveResources(id,resources,'codex.extra.done');
+    }
     this.db.prepare("UPDATE project_operations SET phase='verify' WHERE id=?").run(id);
     const observed=await withDeadline(signal=>this.host!.verifyBundle(resources as ProjectResources,signal),this.timeoutMs);
     this.assertBundle(resources as ProjectResources,observed);this.registerBundle(id,resources as ProjectResources,context);
   }
   private assertBundle(resources: ProjectResources, observed: Awaited<ReturnType<ProjectHost['verifyBundle']>>): void {
     if (!observed || observed.source !== 'application-host' || observed.kind !== 'ordinary-chat' || observed.workspaceSurface !== 'native-desktop' ||
-        observed.codexNativeProjectId !== resources.appProjectId || Object.entries(resources).some(([key, value]) => observed[key as keyof ProjectResources] !== value)) throw new BridgeError('PROVENANCE', 'Native project bundle and Codex membership could not be independently read back');
+        observed.codexNativeProjectId !== resources.appProjectId || Object.entries(resources).some(([key, value]) => JSON.stringify(observed[key as keyof ProjectResources]) !== JSON.stringify(value))) throw new BridgeError('PROVENANCE', 'Native project bundle and Codex membership could not be independently read back');
   }
   private registerBundle(id: string, resources: ProjectResources, context: CallerContext): void {
     const caller = this.authority.resolve(context)!;
@@ -203,7 +268,8 @@ export class ProjectProvisioner {
       const projectId = this.get(id, context).projectId, registry = new ConversationRegistry(this.db, this.authority);
       if (this.db.prepare('SELECT state FROM project_operations WHERE id=?').get(id)?.state !== 'PROVISIONING') throw new BridgeError('CONFLICT', 'Project operation changed');
       registry.registerProject(projectId, resources.name, resources.workspacePath, context);
-      registry.register({ projectId, workspacePath: resources.workspacePath, appProjectId: resources.appProjectId, chatgptConversationId: resources.chatgptConversationId, chatgptConversationName: resources.name, codexConversationId: resources.codexConversationId }, context);
+      for (const codexConversationId of [resources.codexConversationId, ...(resources.extraCodexConversationIds ?? [])])
+        registry.register({ projectId, workspacePath: resources.workspacePath, appProjectId: resources.appProjectId, chatgptConversationId: resources.chatgptConversationId, chatgptConversationName: resources.name, codexConversationId }, context);
       this.db.prepare("UPDATE project_operations SET state='READY',error_code=NULL,updated_at=? WHERE id=? AND state='PROVISIONING'").run(now(), id);
       enqueueNotification(this.db, caller.principal, `project:${id}:ready`, { operationId: id, projectId, state: 'READY' });
     });

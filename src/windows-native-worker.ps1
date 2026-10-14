@@ -68,10 +68,13 @@ function Diagnose {
  }
  return $result
 }
+# Names the current step and the control being awaited; constants only, no user text.
+function Stage([string]$name,[string]$target) {$script:stage=$name;$script:target=$target;[Console]::Error.WriteLine("ACB_UI_STAGE=$name waiting=$target")}
 function RunRequest($request) {
 $actionClock=[Diagnostics.Stopwatch]::StartNew()
 function Respond($result) {$result.timings=@{initMs=$initMs;actionMs=$actionClock.ElapsedMilliseconds};[Console]::Out.WriteLine(($result | ConvertTo-Json -Depth 9 -Compress))}
 $script:stage='input'
+$script:target=''
 $mutex=$null
 $locked=$false
 try {
@@ -228,33 +231,44 @@ try {
   Respond @{ok=$true};return
  }
  if ($request.operation -eq 'workspace-create') {
-  $script:stage='workspace-dialog'
+  Stage 'workspace-add-button' 'Button:添加新项目'
   Invoke (Wait {Find $script:root 'Button' '添加新项目'})
+  Stage 'workspace-create-dialog' 'Window:创建项目'
   $dialog=Wait {Find $script:root 'Window' '创建项目'}
+  Stage 'workspace-name' 'Edit#chatgpt-project-name'
   SetValue $dialog '' 'chatgpt-project-name' $request.name
-  Invoke (Find $dialog 'Button' '添加')
-  $script:stage='folder-picker'
+  Stage 'workspace-add' 'Button:添加'
+  Invoke (Wait {Find $dialog 'Button' '添加'})
+  Stage 'folder-picker' 'Window:Select Project Root'
   $picker=Wait {Find $script:root 'Window' 'Select Project Root'}
   $pickerHandle=[IntPtr]$picker.Current.NativeWindowHandle
+  Stage 'folder-edit' 'Edit#1152'
   $folderEdits=$picker.FindAll([System.Windows.Automation.TreeScope]::Descendants,[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::AutomationIdProperty,'1152'))
   $folderEdit=@($folderEdits | Where-Object {$_.Current.ClassName -eq 'Edit' -and $_.Current.NativeWindowHandle -ne 0})[0]
+  if (-not $folderEdit) {throw 'PROVENANCE'}
   $editHandle=[IntPtr]$folderEdit.Current.NativeWindowHandle
   $result=[UIntPtr]::Zero
   if ([AcbFolderControls]::SetText($editHandle,12,[UIntPtr]::Zero,$request.path,2,$request.timeoutMs,[ref]$result) -eq [IntPtr]::Zero -or $result -eq [UIntPtr]::Zero) {throw 'IO'}
   $buffer=[Text.StringBuilder]::new(4096)
   if ([AcbFolderControls]::GetText($editHandle,13,[UIntPtr]4096,$buffer,2,$request.timeoutMs,[ref]$result) -eq [IntPtr]::Zero -or $buffer.ToString() -ne $request.path) {throw 'PROVENANCE'}
+  Stage 'folder-select' 'Button#1:选择文件夹'
   $button=[AcbFolderControls]::GetDlgItem($pickerHandle,1)
   $class=[Text.StringBuilder]::new(256);$label=[Text.StringBuilder]::new(256)
   [void][AcbFolderControls]::GetClassName($button,$class,256);[void][AcbFolderControls]::GetWindowText($button,$label,256)
   if ($class.ToString() -ne 'Button' -or $label.ToString() -ne '选择文件夹') {throw 'PROVENANCE'}
   if ([AcbFolderControls]::Click($button,245,[UIntPtr]::Zero,[IntPtr]::Zero,2,$request.timeoutMs,[ref]$result) -eq [IntPtr]::Zero) {throw 'IO'}
+  Stage 'folder-picker-close' 'Window:Select Project Root (closed)'
   [void](Wait {if (-not (Find $script:root 'Window' 'Select Project Root')) {$true}})
-  Invoke (Find $dialog 'Button' '创建项目')
-  $script:stage='folder-consent'
+  Stage 'workspace-confirm' 'Button:创建项目'
+  Invoke (Wait {Find $dialog 'Button' '创建项目'})
+  Stage 'folder-consent' 'Window:信任此文件夹吗？'
   $trust=Wait {Find $script:root 'Window' '信任此文件夹吗？'}
+  Stage 'folder-consent-list' 'ListItem:requested-path'
   $folders=$trust.FindAll([System.Windows.Automation.TreeScope]::Descendants,[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::ListItem))
   if ($folders.Count -ne 1 -or $folders.Item(0).Current.Name -ne $request.path) {throw 'PROVENANCE'}
-  Invoke (Find $trust 'Button' '信任文件夹')
+  Stage 'folder-consent-trust' 'Button:信任文件夹'
+  Invoke (Wait {Find $trust 'Button' '信任文件夹'})
+  Stage 'folder-consent-close' 'Window:信任此文件夹吗？ (closed)'
   [void](Wait {if (-not (Find $script:root 'Window' '信任此文件夹吗？')) {$true}})
  } else {
   if ($request.operation -eq 'gpt-create') {
@@ -308,7 +322,9 @@ try {
 } catch {
  $code=$_.Exception.Message
  if ($code -notin @('INPUT','OWNER','IO','TIMEOUT','CONFLICT','PROVENANCE')) {$code='EXECUTION'}
- Respond @{ok=$false;code=$code;stage=$script:stage;errorType=$_.Exception.GetType().Name;line=$_.InvocationInfo.ScriptLineNumber;privateDiagnosticsOmitted=$true}
+ # Creation failures also emit a bounded structure survey (types/classes only) to stderr.
+ if ($request.operation -in @('workspace-create','gpt-create')) {try {[Console]::Error.WriteLine('ACB_UI_DIAGNOSTIC='+((Diagnose) | ConvertTo-Json -Depth 9 -Compress))} catch {}}
+ Respond @{ok=$false;code=$code;stage=$script:stage;target=$script:target;errorType=$_.Exception.GetType().Name;line=$_.InvocationInfo.ScriptLineNumber;privateDiagnosticsOmitted=$true}
 } finally {
  if ($locked) {$mutex.ReleaseMutex()}
  if ($mutex) {$mutex.Dispose()}

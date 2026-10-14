@@ -10,7 +10,7 @@ import {createWindowsNativeProjectHost,createWindowsNativeConversationHost,Windo
 
 test('windows native host: authorized UI identity setup registers pinned Codex READY without generation authority',async t=>{
   const scope=isolatedDemo();t.after(()=>scope.close());const config=defaults(scope.root);
-  let path='',prompt='',chatCreated=false,grants=0;const calls:string[]=[];
+  let path='',prompt='',chatCreated=false,codexCreated=false,grants=0;const calls:string[]=[];
   const ui=new class extends WindowsNativeUi {
     override async call(operation:Parameters<WindowsNativeUi['call']>[0],fields:Parameters<WindowsNativeUi['call']>[1]) {
       calls.push(operation);
@@ -21,9 +21,10 @@ test('windows native host: authorized UI identity setup registers pinned Codex R
   }(config);
   const native:WindowsNativeTools={
     listProjects:async()=>({projects:[{projectId:'fixture-native',projectKind:'local',hostId:'local',label:'fixture-project',path}]}),
-    listThreads:async()=>({pinnedThreads:[{id:'fixture-codex',kind:'codex',title:'fixture-project Codex',projectId:'fixture-native',cwd:path}],threads:[...(chatCreated?[{id:'fixture-gpt',kind:'chatgpt',title:'fixture-project'}]:[])]}),
+    listThreads:async()=>({pinnedThreads:codexCreated?[{id:'fixture-codex',kind:'codex',title:'fixture-project Codex',projectId:'fixture-native',cwd:path}]:[],threads:[...(chatCreated?[{id:'fixture-gpt',kind:'chatgpt',title:'fixture-project'}]:[])]}),
     readThread:async()=>({thread:{id:'fixture-gpt',kind:'chatgpt',title:'fixture-project',status:{type:'idle'}},turns:[{id:'fixture-turn',status:'completed',error:null,items:[{type:'userMessage',id:'fixture-user',content:[{type:'text',text:prompt}]}]}]}),
-    createCodexThread:async(projectId)=>{assert.equal(projectId,'fixture-native');return {threadId:'fixture-codex'};},
+    // The formal creator makes a new thread; it is listed only after creation.
+    createCodexThread:async(projectId)=>{assert.equal(projectId,'fixture-native');codexCreated=true;return {threadId:'fixture-codex'};},
   };
   const host=createWindowsNativeProjectHost({config,native,ui,authorizeInitialization:async(name,workspace)=>{grants++;assert.equal(name,'fixture-project');assert.equal(workspace,join(config.background.workspaceRoot,name));return true;}});
   const authority=new CallerAuthority(),context=authority.issue({principal:'fixture:controller',instance:'fixture',executor:'hermes',controller:true,reviewer:false});
@@ -163,4 +164,23 @@ test('windows native host: legacy ownership comes from recorded Codex membership
   for(const change of [{codexConversationIds:['other-codex']},{codexConversationIds:['legacy-codex','other-codex']},{codexConversationIds:['missing']},{workspacePath:'D:\\other'},{name:'renamed'}])
     await assert.rejects(host.verifyExisting!({...input,...change},signal),{code:'PROVENANCE'},JSON.stringify(change));
   state.gpt={...state.gpt,kind:'codex'};await assert.rejects(host.verifyExisting!(input,signal),{code:'PROVENANCE'});
+});
+
+test('windows native host: two Codex conversations are distinct members of the new workspace; stale receipts and duplicate paths are refused',async t=>{
+  const scope=isolatedDemo();t.after(()=>scope.close());const config=defaults(scope.root);
+  const {fileDesktop}=await import('./fixtures/native-desktop.ts'),desktop=fileDesktop(join(scope.root,'desktop.json'),config);
+  const host=createWindowsNativeProjectHost({config,...desktop,authorizeInitialization:async()=>true});
+  const authority=new CallerAuthority(),context=authority.issue({principal:'fixture:controller',instance:'fixture',executor:'hermes',controller:true,reviewer:false});
+  const ready=await new ProjectProvisioner(scope.db,authority,{root:config.background.workspaceRoot,timeoutMs:5000,host}).prepare('two-codex','two-codex',context,{codexConversations:2});
+  assert.equal(ready.state,'READY');const state=desktop.load(),codex=state.threads.filter(item=>item.kind==='codex');
+  assert.deepEqual(state.creates,{workspace:1,gpt:1,codex:2});assert.deepEqual(codex.map(item=>item.title),['two-codex Codex','two-codex Codex 2']);
+  assert.ok(codex.every(item=>item.projectId===ready.resources!.appProjectId && item.cwd===ready.resources!.workspacePath));
+  assert.deepEqual([ready.resources!.codexConversationId,...ready.resources!.extraCodexConversationIds!],codex.map(item=>item.id));
+  assert.equal(scope.db.prepare('SELECT COUNT(*) n FROM codex_conversations').get()!.n,2);
+  const signal=new AbortController().signal,existing=codex[0].id,appProjectId=ready.resources!.appProjectId!;
+  const stale=createWindowsNativeProjectHost({config,native:{...desktop.native,createCodexThread:async()=>({threadId:existing,projectId:appProjectId})},ui:desktop.ui,authorizeInitialization:async()=>true});
+  await assert.rejects(stale.createCodexConversation(appProjectId,ready.resources!.workspacePath!,signal,ready.id,2),{code:'PROVENANCE'});
+  await assert.rejects(host.createWorkspace('renamed',ready.resources!.workspacePath!,signal),{code:'CONFLICT'});
+  assert.deepEqual(await host.nativeWorkspaces!(ready.resources!.workspacePath!.toUpperCase(),signal),[{projectId:appProjectId,label:'two-codex'}]);
+  assert.equal(desktop.load().creates.workspace,1);
 });

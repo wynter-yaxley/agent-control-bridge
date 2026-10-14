@@ -69,7 +69,7 @@ test('project provisioning: identity setup can precede GPT model evidence, but g
   assert.equal(f.db.prepare('SELECT COUNT(*) n FROM execution_runs').get()!.n, 0);
 });
 
-for (const change of [{ source: 'unknown' }, { ordinaryChat: false }, { exactConversation: false }, { createOrdinaryChat: false }, { createWorkspace: false }, { ordinaryChat: 'true' }, { workspaceSurface: 'isolated-app-server' }, { workspaceSurface: 'unknown' }, { workspaceSurface: undefined }]) {
+for (const change of [{ createCodexConversation: false }, { source: 'unknown' }, { ordinaryChat: false }, { exactConversation: false }, { createOrdinaryChat: false }, { createWorkspace: false }, { ordinaryChat: 'true' }, { workspaceSurface: 'isolated-app-server' }, { workspaceSurface: 'unknown' }, { workspaceSurface: undefined }]) {
   test(`project provisioning: missing trusted creation capability ${JSON.stringify(change)} creates no resources`, async t => {
     const f = fixture(t), capabilities = await f.host.inspect(new AbortController().signal);
     f.host.inspect = async () => ({ ...capabilities, ...change }) as typeof capabilities;
@@ -194,4 +194,80 @@ test('legacy adoption: migrated mappings gain access only after native readback 
   await assert.rejects(p.adopt('legacy',foreign),{code:'AUTH'});
   assert.equal(f.db.prepare('SELECT app_project_id FROM conversation_workspaces').get()!.app_project_id,'native-legacy');
   assert.equal(f.db.prepare('SELECT principal FROM project_access').get()!.principal,'fixture:controller');
+});
+
+test('project provisioning: an existing root, including a drive root, is never passed to mkdir',async t=>{
+  const fs=(await import('node:fs')).default,{syncBuiltinESMExports}=await import('node:module'),{parse}=await import('node:path'),{randomUUID}=await import('node:crypto');
+  // The isolated ledger is created before mkdir is instrumented.
+  const f=fixture(t),real=fs.mkdirSync,calls:{path:string;recursive:boolean}[]=[];let create=true;
+  // Windows Node fails mkdirSync('D:\\',{recursive:true}) with EPERM; reproduce that for any existing root.
+  const mocked=t.mock.method(fs,'mkdirSync',((target:string,options?:{recursive?:boolean})=>{
+    calls.push({path:String(target),recursive:!!options?.recursive});
+    if(fs.existsSync(target)){const error=Object.assign(new Error('EPERM: operation not permitted, mkdir'),{code:'EPERM'});throw error;}
+    return create?real(target,options):undefined;
+  }) as typeof fs.mkdirSync);
+  syncBuiltinESMExports();t.after(()=>{mocked.mock.restore();syncBuiltinESMExports();});
+  // Each project registers its own native workspace identity.
+  f.host.createWorkspace=async(name,workspacePath)=>({appProjectId:`native-${name}`,workspacePath});
+  f.host.createOrdinaryChat=async appProjectId=>({conversationId:`${appProjectId}-gpt`});f.host.createCodexConversation=async appProjectId=>({conversationId:`${appProjectId}-codex`});
+  // Drive/filesystem root of the temp directory: nothing is created there (mkdir is recorded only).
+  create=false;const drive=parse(f.root).root,name=`acb-fixture-${randomUUID()}`;
+  const atRoot=await new ProjectProvisioner(f.db,f.authority,{root:drive,timeoutMs:100,host:f.host}).prepare(name,'drive-root',f.context);
+  assert.equal(atRoot.state,'READY');assert.deepEqual(calls,[{path:join(drive,name),recursive:false}]);
+  // Ordinary existing root: only the workspace directory is created; a missing root is created recursively.
+  create=true;calls.length=0;
+  const plain=await new ProjectProvisioner(f.db,f.authority,{root:f.root,timeoutMs:100,host:f.host}).prepare('plain-root','plain-root',f.context);
+  assert.equal(plain.state,'READY');assert.deepEqual(calls,[{path:join(f.root,'plain-root'),recursive:false}]);assert.equal(fs.existsSync(join(f.root,'plain-root')),true);
+  calls.length=0;const nested=join(f.root,'missing','nested');
+  assert.equal((await new ProjectProvisioner(f.db,f.authority,{root:nested,timeoutMs:100,host:f.host}).prepare('nested-root','nested-root',f.context)).state,'READY');
+  assert.deepEqual(calls,[{path:nested,recursive:true},{path:join(nested,'nested-root'),recursive:false}]);
+});
+
+test('project recovery: a lost workspace stays PROVENANCE until an explicit, verified, audited restart',async t=>{
+  const f=fixture(t),{writeFileSync,rmSync:remove}=await import('node:fs');let attempts=0,listed:{projectId:string;label:string}[]=[];
+  f.host.createWorkspace=async(_name,workspacePath)=>{attempts++;if(attempts<2)throw new BridgeError('TIMEOUT','[TEST] workspace-create timed out at workspace-confirm');return {appProjectId:'native-after-restart',workspacePath};};
+  const root=join(f.root,'workspaces'),p=new ProjectProvisioner(f.db,f.authority,{root,timeoutMs:100,host:f.host});
+  const first=await p.prepare('restart-project','restart-event',f.context);
+  assert.equal(first.state,'UNCERTAIN');assert.equal(first.phase,'workspace');assert.deepEqual(first.stages,{directoryCreated:true,nativeWorkspace:false,gptConversation:false,codexConversations:0,codexRequested:1});
+  // Reconciliation has no receipt to follow and never creates: only PROVENANCE.
+  await assert.rejects(p.reconcile(first.id,f.context),{code:'PROVENANCE'});assert.equal(attempts,1);
+  await assert.rejects(p.restartWorkspace(first.id,f.context),{code:'UNSUPPORTED'});
+  f.host.nativeWorkspaces=async()=>listed;
+  listed=[{projectId:'native-late',label:'restart-project'}];
+  await assert.rejects(p.restartWorkspace(first.id,f.context),{code:'PROVENANCE'});
+  listed=[];writeFileSync(join(first.workspacePath,'unknown.txt'),'[TEST]');
+  await assert.rejects(p.restartWorkspace(first.id,f.context),{code:'PROVENANCE'});
+  remove(join(first.workspacePath,'unknown.txt'));assert.equal(attempts,1);assert.equal(p.get(first.id,f.context).state,'UNCERTAIN');
+  const ready=await p.restartWorkspace(first.id,f.context);
+  assert.equal(ready.state,'READY');assert.equal(ready.resources!.appProjectId,'native-after-restart');assert.equal(attempts,2);assert.equal(ready.id,first.id);
+  assert.equal(f.db.prepare("SELECT COUNT(*) n FROM audit_log WHERE action='project_workspace_restart'").get()!.n,1);
+  await assert.rejects(p.restartWorkspace(first.id,f.context),{code:'STATE'});
+  // The restart budget is bounded; further failures are reported, not retried.
+  f.host.createWorkspace=async()=>{throw new BridgeError('TIMEOUT','[TEST] still timing out');};
+  const stuck=await p.prepare('stuck-project','stuck-event',f.context);
+  for(let i=0;i<2;i++)assert.equal((await p.restartWorkspace(stuck.id,f.context)).state,'UNCERTAIN');
+  await assert.rejects(p.restartWorkspace(stuck.id,f.context),{code:'CONFLICT'});
+  const foreign=f.authority.issue({principal:'fixture:foreign',instance:'two',executor:'hermes',controller:true,reviewer:false});
+  await assert.rejects(p.restartWorkspace(stuck.id,foreign),{code:'NOT_FOUND'});
+});
+
+test('project provisioning: two Codex conversations get distinct formal receipts in one workspace, without recreation',async t=>{
+  const f=fixture(t),created:number[]=[];
+  f.host.createCodexConversation=async(_project,_path,_signal,_key,index=0)=>{created.push(index);return {conversationId:`fixture-codex-${index}`};};
+  const p=new ProjectProvisioner(f.db,f.authority,{root:join(f.root,'workspaces'),timeoutMs:100,host:f.host});
+  const ready=await p.prepare('two-codex','two-codex-event',f.context,{codexConversations:2});
+  assert.equal(ready.state,'READY');assert.deepEqual(created,[0,1]);assert.deepEqual(ready.resources!.extraCodexConversationIds,['fixture-codex-1']);
+  assert.equal(ready.stages!.codexConversations,2);
+  assert.deepEqual(f.db.prepare('SELECT conversation_id FROM codex_conversations WHERE project_id=? ORDER BY conversation_id').all(ready.projectId).map(row=>row.conversation_id),['fixture-codex-0','fixture-codex-1']);
+  assert.equal(f.db.prepare('SELECT default_codex_conversation_id d FROM conversation_workspaces WHERE project_id=?').get(ready.projectId)!.d,'fixture-codex-0');
+  assert.equal((await p.prepare('two-codex','two-codex-event',f.context,{codexConversations:2})).id,ready.id);assert.deepEqual(created,[0,1]);
+  await assert.rejects(p.prepare('two-codex','two-codex-event',f.context),{code:'CONFLICT'});
+  await assert.rejects(p.prepare('bad-count','bad-count',f.context,{codexConversations:5}),{code:'INPUT'});
+  // A repeated receipt is refused and nothing is registered; a lost extra receipt is not guessed.
+  f.host.createCodexConversation=async()=>({conversationId:'fixture-codex'});
+  const repeated=await p.prepare('repeat-codex','repeat-event',f.context,{codexConversations:2});
+  assert.equal(repeated.state,'UNCERTAIN');assert.equal(repeated.errorCode,'PROVENANCE');assert.equal(f.db.prepare('SELECT COUNT(*) n FROM projects WHERE name=?').get('repeat-codex')!.n,0);
+  let extra=0;f.host.createCodexConversation=async(_project,_path,_signal,_key,index=0)=>{if(index){extra++;throw new BridgeError('IO','[TEST] receipt lost');}return {conversationId:'lost-codex-0'};};
+  const lost=await p.prepare('lost-codex','lost-event',f.context,{codexConversations:2});
+  assert.equal(lost.phase,'codex.extra');await assert.rejects(p.reconcile(lost.id,f.context),{code:'UNSUPPORTED'});assert.equal(extra,1);
 });
