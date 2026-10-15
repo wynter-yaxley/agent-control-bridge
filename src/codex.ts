@@ -13,6 +13,7 @@ class AppServer {
   private buffer = '';
   declined = 0;
   private failure?: BridgeError;
+  private wakers = new Set<() => void>();
   private pending = new Map<number, { resolve: (value: Row) => void; reject: (error: BridgeError) => void; timer: ReturnType<typeof setTimeout> }>();
   constructor(executable: string, spawnFn: typeof nodeSpawn) {
     this.child = spawnFn(executable, ['app-server', '--listen', 'stdio://'], { shell: false, windowsHide: true, env: controlledProcessEnv(), stdio: ['pipe', 'pipe', 'pipe'] });
@@ -30,7 +31,7 @@ class AppServer {
     let message: Row;
     try { message = JSON.parse(line); } catch { return; }
     if (typeof message?.method === 'string') {
-      if (message.id === undefined) return;
+      if (message.id === undefined) { if (message.method === 'turn/completed' || message.method === 'thread/status/changed') this.wake(); return; }
       if (message.method.endsWith('/requestApproval')) { this.declined++; this.write({ id: message.id, result: { decision: 'decline' } }); }
       else this.write({ id: message.id, error: { code: -32601, message: 'Not supported by Agent Control Bridge' } });
       return;
@@ -42,9 +43,17 @@ class AppServer {
     else item.resolve(message.result);
   }
   private write(message: unknown): void { if (!this.failure) this.child.stdin?.write(JSON.stringify(message) + '\n'); }
+  private wake(): void { for (const done of [...this.wakers]) done(); }
+  /** Waits up to `ms`, less when a turn or thread status notification arrives. Only a
+   * hint: the caller always re-reads the thread. */
+  wait(ms: number): Promise<void> {
+    return new Promise(resolve => { const done = () => { clearTimeout(timer); this.wakers.delete(done); resolve(); }; const timer = setTimeout(done, ms); this.wakers.add(done); });
+  }
+  get alive(): boolean { return !this.failure; }
   private fail(error: BridgeError): void {
     if (this.failure) return;
     this.failure = error;
+    this.wake();
     for (const item of this.pending.values()) { clearTimeout(item.timer); item.reject(error); }
     this.pending.clear();
   }
@@ -76,16 +85,31 @@ const checkPrompt = (prompt: unknown) => {
   if (typeof prompt !== 'string' || !prompt.trim() || prompt.length > 65536) throw new BridgeError('INPUT', 'Prompt must be 1..65536 characters');
   return prompt.replace(/\r\n/g, '\n').trim();
 };
-async function session<T>(options: CodexOptions, run: (server: AppServer) => Promise<T>): Promise<T> {
-  const server = new AppServer(options.executable, options.spawnFn ?? nodeSpawn);
-  try { await server.initialize(); return await run(server); } finally { server.close(); }
+/** One App Server process is kept and reused across calls (calls are serialized by the
+ * MCP server); it is replaced after it fails and closed after 10 idle minutes. */
+const IDLE_MS = 600000;
+let shared: { executable: string; spawnFn: typeof nodeSpawn; server: AppServer; ready: Promise<void>; idle?: ReturnType<typeof setTimeout> } | undefined;
+export function closeCodex(): void {
+  const current = shared; shared = undefined;
+  if (current) { clearTimeout(current.idle); current.server.close(); }
+}
+async function session<T>(options: CodexOptions, run: (server: AppServer, declined: () => number) => Promise<T>): Promise<T> {
+  const spawnFn = options.spawnFn ?? nodeSpawn;
+  if (shared && (!shared.server.alive || shared.executable !== options.executable || shared.spawnFn !== spawnFn)) closeCodex();
+  if (!shared) { const server = new AppServer(options.executable, spawnFn); shared = { executable: options.executable, spawnFn, server, ready: server.initialize() }; }
+  const current = shared;
+  clearTimeout(current.idle);
+  try { await current.ready; } catch (error) { if (shared === current) closeCodex(); throw error; }
+  const before = current.server.declined;
+  try { return await run(current.server, () => current.server.declined - before); }
+  finally { if (shared === current) { current.idle = setTimeout(closeCodex, IDLE_MS); current.idle.unref?.(); } }
 }
 async function readThread(server: AppServer, threadId: string): Promise<Row> {
   const thread = (await server.request('thread/read', { threadId, includeTurns: true })).thread;
   if (thread?.id !== threadId || !Array.isArray(thread.turns)) throw new BridgeError('PROVENANCE', 'Codex thread readback differs');
   return thread;
 }
-async function waitTurn(server: AppServer, options: CodexOptions, threadId: string, turnId: string): Promise<CodexReply> {
+async function waitTurn(server: AppServer, options: CodexOptions, threadId: string, turnId: string, declined: () => number): Promise<CodexReply> {
   const deadline = Date.now() + options.timeoutMs;
   for (let storeErrors = 0; ;) {
     let thread: Row;
@@ -97,9 +121,9 @@ async function waitTurn(server: AppServer, options: CodexOptions, threadId: stri
       continue;
     }
     const turn = thread.turns.find((item: Row) => item?.id === turnId);
-    if (turn && turn.status !== 'inProgress') return replyOf(threadId, turn, false, server.declined);
+    if (turn && turn.status !== 'inProgress') return replyOf(threadId, turn, false, declined());
     if (Date.now() >= deadline) throw new BridgeError('TIMEOUT', `Codex thread ${threadId}: reply is pending; call again with the same prompt to read it (it is not resent)`);
-    await delay(options.pollMs);
+    await server.wait(Math.min(options.pollMs, Math.max(1, deadline - Date.now())));
   }
 }
 async function startTurn(server: AppServer, threadId: string, prompt: string): Promise<string> {
@@ -114,7 +138,7 @@ async function startTurn(server: AppServer, threadId: string, prompt: string): P
 export async function sendCodex(options: CodexOptions, threadId: string, text: string): Promise<CodexReply> {
   if (typeof threadId !== 'string' || !ID.test(threadId)) throw new BridgeError('INPUT', 'Invalid Codex thread ID');
   const prompt = checkPrompt(text);
-  return session(options, async server => {
+  return session(options, async (server, declined) => {
     const before = await readThread(server, threadId), latest = before.turns.at(-1);
     if (asks(latest, prompt)) {
       if (latest.status === 'inProgress') throw new BridgeError('CONFLICT', 'This prompt was already sent and is still running; call again later to read the reply');
@@ -131,7 +155,7 @@ export async function sendCodex(options: CodexOptions, threadId: string, text: s
       await server.request('thread/resume', { threadId });
       turnId = await startTurn(server, threadId, prompt);
     }
-    return waitTurn(server, options, threadId, turnId);
+    return waitTurn(server, options, threadId, turnId, declined);
   });
 }
 
@@ -141,10 +165,10 @@ export async function createCodex(options: CodexOptions, cwd: string, title: str
   if (typeof title !== 'string' || !title.trim() || title.length > 200 || /[\r\n]/.test(title)) throw new BridgeError('INPUT', 'Title must be one line of 1..200 characters');
   if (typeof cwd !== 'string' || !cwd.trim()) throw new BridgeError('INPUT', 'A workspace directory is required');
   const prompt = checkPrompt(firstPrompt ?? '这是 Agent Control Bridge 新建的 Codex 对话。请只回复：ACB_READY，不执行命令、不修改文件。');
-  return session(options, async server => {
+  return session(options, async (server, declined) => {
     const threadId = (await server.request('thread/start', { cwd })).thread?.id;
     if (typeof threadId !== 'string' || !ID.test(threadId)) throw new BridgeError('PROVENANCE', 'thread/start returned no thread ID');
-    const reply = await waitTurn(server, options, threadId, await startTurn(server, threadId, prompt));
+    const reply = await waitTurn(server, options, threadId, await startTurn(server, threadId, prompt), declined);
     await server.request('thread/name/set', { threadId, name: title });
     return { ...reply, cwd, title };
   });
@@ -158,6 +182,16 @@ export async function createProject(options: CodexOptions, name: string, path: s
     if (typeof project?.id !== 'string') throw new BridgeError('PROVENANCE', 'project/create returned no project ID');
     const read = (await server.request('project/read', { projectId: project.id })).project ?? project;
     return { projectId: project.id, name: String(read.name ?? name), roots: read.roots ?? project.roots };
+  });
+}
+
+/** The most recent Codex thread (thread/list), used as the Native IPC caller context
+ * when none is configured. */
+export async function latestCodexThread(options: CodexOptions): Promise<string | null> {
+  return session(options, async server => {
+    const data = (await server.request('thread/list', { limit: 5 })).data;
+    const row = (Array.isArray(data) ? data : []).find((thread: Row) => typeof thread?.id === 'string' && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(thread.id));
+    return row ? String(row.id) : null;
   });
 }
 

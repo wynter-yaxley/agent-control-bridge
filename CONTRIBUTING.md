@@ -1,11 +1,8 @@
 # 贡献指南
 
-开始前阅读 [项目规范](AGENTS.md) 与 [项目规则](docs/PROJECT_RULES.md)。本项目只维护 Prompt 转发；新增功能先提出并获批准。
+开始前请阅读 [开发规范](AGENTS.md)。本项目只维护现有的 MCP 工具，新增功能请先提 Issue 讨论。
 
-## 开发与验证
-
-使用满足 package.json 的 Node 与 npm，运行 `npm ci`、`npm run typecheck`、`npm run build` 和 `npm test`（见 [README](README.md#开发)）。测试不得使用真实对话、业务数据或登录会话；真实发送结果单独报告，未验证不计通过。
-
-## 提交与版本
-
-不要提交凭据、日志、个人配置或运行数据。变更聚焦实际问题，面向用户的行为变化写入 [CHANGELOG](CHANGELOG.md)。不强推、不重写他人历史，不把提交或推送当作实机验证。
+1. `npm ci`，然后运行 `npm run typecheck`、`npm run build`、`npm test`。测试不得使用真实对话、业务数据或登录会话。
+2. 桌面行为的改动需要在 Windows 隔离环境中运行 `npm run smoke`，并在 PR 中如实写明结果；未实测的请标注。
+3. 不要提交凭据、日志、个人配置、本机路径或运行数据。面向用户的变化写进 [CHANGELOG](CHANGELOG.md)。
+4. 通过功能分支和 Pull Request 提交，不直接推送 main，不强推，不重写他人历史。

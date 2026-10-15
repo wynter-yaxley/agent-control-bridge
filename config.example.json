@@ -1,8 +1,5 @@
 {
-  "carrierThreadId": "00000000-0000-0000-0000-000000000000",
-  "codexExecutable": "C:\\Users\\<user>\\AppData\\Local\\OpenAI\\Codex\\bin\\<version>\\codex.exe",
   "workspaceRoot": "D:\\Workspaces",
-  "foregroundInput": false,
-  "timeoutMs": 300000,
-  "uiPollMs": 1000
+  "foregroundInput": true,
+  "timeoutMs": 240000
 }

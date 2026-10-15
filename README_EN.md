@@ -1,9 +1,72 @@
-# Agent Control Bridge
+# Agent Control Bridge (ACB)
 
-Lets Hermes, over MCP, create a local workspace and Codex project, create Codex and ChatGPT conversations, locate a target, forward a prompt and return the real reply. No task management or ledger.
+[![CI](https://github.com/wynter-yaxley/agent-control-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/wynter-yaxley/agent-control-bridge/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Node.js](https://img.shields.io/badge/node-%3E%3D24.19-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org/)
+[![Platform: Windows](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D6)](#requirements)
+[![MCP](https://img.shields.io/badge/MCP-stdio%20server-6E56CF)](https://modelcontextprotocol.io/)
+[![Hermes Skill](https://img.shields.io/badge/Hermes-skill%20included-F59E0B)](skills/agent-control-bridge/SKILL.md)
 
-- Codex: local `codex.exe app-server` (`project/create`, `thread/start {cwd}`, `turn/start`, `thread/read`, `thread/name/set`, `thread/search`, `thread/unarchive`), addressed by thread ID. The bridge never grants command/file approvals; they are declined and counted.
-- ChatGPT: desktop UIA plus Codex desktop Native IPC. A chat is located only if it is already shown or its natively read title is unique in the inventory (then its single sidebar entry is opened); ambiguity fails. An identical user-written draft is just sent; otherwise the prompt is typed with SendInput only with `--allow-foreground-input` and ChatGPT already in front (else `FOCUS_REQUIRED`). Native readback confirms the turn landed in the target ID.
-- No duplicate sends: a prompt that is already the latest turn is not resent; busy targets and foreign drafts are refused.
+[中文](README.md)
 
-Tools: `acb_threads`, `acb_projects`, `acb_workspace_create`, `acb_codex_create`, `acb_codex_find`, `acb_codex_send`, `acb_gpt_create`, `acb_gpt_open`, `acb_gpt_send`. `acb_gpt_create` takes an optional `project`: the new chat is started in that existing ChatGPT project through "更改项目", and nothing is typed or sent until the button reads the project back. Creating ChatGPT projects and moving existing chats into one are not programmable (the name box cannot take focus; the "移至项目" project list is invisible to UIA). With a ChatGPT and a Codex window open, only the window known to be ChatGPT is used. Requires Windows and Node >= 24.19.0. Live acceptance: `node scripts/acceptance.mjs`.
+ACB is an MCP server that lets Hermes (or any MCP client) drive the **ChatGPT desktop app** and the **Codex desktop app**: create workspaces and Codex projects, create or reuse conversations, send prompts and return the real replies, without the agent writing scripts.
+
+![Architecture](docs/images/architecture.svg)
+
+## Requirements
+
+Windows 10/11 (ChatGPT tools are Windows-only), Node.js 24.19+ on Windows, the Codex desktop app (signed in; its bundled `codex.exe` is found automatically), the ChatGPT desktop app (signed in) and Hermes on Windows or in WSL. The Codex tools only need `codex app-server` and may work on macOS/Linux, untested.
+
+## Install and connect Hermes
+
+```powershell
+git clone https://github.com/wynter-yaxley/agent-control-bridge.git
+cd agent-control-bridge
+npm install        # installs and builds dist/
+npm run check      # read-only self-check; prints the Hermes commands for this machine
+```
+
+Run the `hermes` commands printed by `npm run check` (one MCP registration and one skill copy, for Hermes on Windows or in WSL), for example:
+
+```bash
+hermes mcp add acb --command '/mnt/c/Program Files/nodejs/node.exe' --args 'D:\agent-control-bridge\dist\mcp.js' --allow-foreground-input
+cp -r '/mnt/d/agent-control-bridge/skills/agent-control-bridge' ~/.hermes/skills/
+```
+
+Then start a new Hermes session (or `/reload-mcp`). Keep the server name `acb`. `--allow-foreground-input` authorizes typing into the ChatGPT window; without it a GPT prompt is sent only when the identical text is already a draft. A manual alternative is [config/hermes-mcp.example.yaml](config/hermes-mcp.example.yaml).
+
+The skill [skills/agent-control-bridge/SKILL.md](skills/agent-control-bridge/SKILL.md) carries the working rules: Hermes coordinates, ChatGPT analyses and reviews, Codex builds and tests; reuse conversations; short reports; investigate only the direct cause of a failure; ask before non-core work. Hermes lists skills in every prompt and loads matching ones; check with `hermes skills list` or load it with `/agent-control-bridge`.
+
+Configuration is optional: options, then `ACB_CODEX`, `ACB_CARRIER_THREAD`, `ACB_WORKSPACE_ROOT`, `ACB_ALLOW_FOREGROUND_INPUT=1`, `ACB_DEBUG=1`, `ACB_CONFIG`, then a JSON file ([config.example.json](config.example.json)), then discovery. Defaults: newest desktop `codex.exe`, the most recent Codex conversation as desktop context, `%USERPROFILE%\acb-workspaces`, a 240 s send timeout (below Hermes' 300 s tool timeout), no logs.
+
+## Tools
+
+| Tool | Arguments | Mode |
+|---|---|---|
+| `acb_status` | — | read-only self-check |
+| `acb_threads`, `acb_projects` | — | read-only desktop inventory |
+| `acb_workspace_create` | `name`, `path?` | background (directory + Codex project, idempotent) |
+| `acb_codex_create` | `cwd`, `title`, `prompt?` | background |
+| `acb_codex_find` | `searchTerm` | background, read-only |
+| `acb_codex_send` | `threadId`, `prompt` | background |
+| `acb_gpt_create` | `title`, `project?` (an existing ChatGPT project) | foreground typing |
+| `acb_gpt_open` | `conversationId` | clicks in the ChatGPT window |
+| `acb_gpt_send` | `conversationId`, `prompt` | foreground typing |
+
+Errors are `{"ok":false,"code","message"}`. A repeated prompt is never resent: after `TIMEOUT`, call again with the same prompt to read the reply.
+
+## Workflow
+
+![Workflow](docs/images/workflow.svg)
+
+## Foreground and background
+
+Codex tools and the inventory tools run in the background and never touch the desktop. `acb_gpt_send` and `acb_gpt_create` type with SendInput into the ChatGPT window, which the user must have brought to the front: ACB never takes the foreground, moves the mouse or uses the clipboard. It returns `FOCUS_REQUIRED` when ChatGPT is not in front and stops with `CONFLICT` when focus moves while typing (the partial text stays in the composer; it is never sent). With a ChatGPT and a Codex window open, only the window known to be ChatGPT is used. The user still has to approve Codex commands, create ChatGPT projects, move existing chats into projects and open old chats that are not in the sidebar.
+
+## Limits
+
+ChatGPT projects cannot be created and existing chats cannot be moved into one (the project list is invisible to UIA); a new chat can start in an existing project. ChatGPT exposes no conversation UUID in the window, so identity is "unique title + desktop inventory" (`uiIdentity: "titleOnly"`).
+
+## Development
+
+`npm ci`, `npm run typecheck`, `npm test` (mocks only), `npm run smoke -- --name ACB-smoke --path C:\temp\acb-smoke` (real Windows run, sends real messages). The PowerShell workers must stay UTF-8 with BOM; the build checks it. MIT licensed. Upgrading from 0.3: `--carrier-thread` and `--codex` are optional, the default timeout is 240 s, `acb_status` is new, `scripts/acceptance.mjs` is now `npm run smoke`; existing tool names and arguments are unchanged.

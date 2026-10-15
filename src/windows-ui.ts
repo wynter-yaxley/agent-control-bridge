@@ -35,12 +35,12 @@ export class WindowsNativeUi {
       this.child.stdout!.setEncoding('utf8');
       const started=this.child;
       started.once('close',()=>{if(this.child===started){this.child=undefined;uiWorkers.delete(this);}});
-      // Forward only the worker's own stage/diagnostic lines; remember the last stage.
+      // Remember the last stage for error messages; forward stage lines only with ACB_DEBUG=1.
       started.stderr!.setEncoding('utf8');
       let partial='';
       started.stderr!.on('data',(chunk:string)=>{
         const lines=(partial+chunk).split(/\r?\n/);partial=lines.pop()!.slice(-65536);
-        for(const line of lines){if(!line.startsWith('ACB_UI_'))continue;if(line.startsWith('ACB_UI_STAGE='))this.lastStage=line.slice(13,160);process.stderr.write(line+'\n');}
+        for(const line of lines){if(!line.startsWith('ACB_UI_'))continue;if(line.startsWith('ACB_UI_STAGE='))this.lastStage=line.slice(13,160);if(this.config.debug)process.stderr.write(line+'\n');}
       });
       uiWorkers.add(this);
     }

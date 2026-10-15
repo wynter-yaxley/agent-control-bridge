@@ -87,7 +87,7 @@ test('gpt: a chat started in a project counts only when the app read the project
 });
 
 /** A scripted codex app-server answering JSON-RPC lines. */
-function appServer(threads: Record<string, { turns: Record<string, unknown>[]; archived?: boolean }>, storeErrors = 0) {
+function appServer(threads: Record<string, { turns: Record<string, unknown>[]; archived?: boolean }>, storeErrors = 0, deferred = false) {
   const seen: Record<string, any>[] = [];
   let failing = 0;
   const spawnFn = (() => {
@@ -108,7 +108,10 @@ function appServer(threads: Record<string, { turns: Record<string, unknown>[]; a
           // An approval request mid-turn must be declined.
           reply({ id: 'approval-1', method: 'item/commandExecution/requestApproval', params: { threadId: params.threadId } });
           const id = `turn-${thread.turns.length + 1}`;
-          thread.turns.push({ id, status: 'completed', items: [{ type: 'userMessage', content: [{ type: 'text', text: params.input[0].text }] }, { type: 'agentMessage', id: 'm1', phase: 'commentary', text: 'thinking' }, { type: 'agentMessage', id: 'm2', text: 'OK' }] });
+          const turn = { id, status: deferred ? 'inProgress' : 'completed', items: [{ type: 'userMessage', content: [{ type: 'text', text: params.input[0].text }] }, { type: 'agentMessage', id: 'm1', phase: 'commentary', text: 'thinking' }, { type: 'agentMessage', id: 'm2', text: 'OK' }] };
+          thread.turns.push(turn);
+          // The turn finishes later and the server says so with a notification.
+          if (deferred) setTimeout(() => { turn.status = 'completed'; reply({ method: 'turn/completed', params: { threadId: params.threadId, turn: { id } } }); }, 20);
           failing = storeErrors;
           reply({ id: message.id, result: { turn: { id, status: 'inProgress' } } });
         } else reply({ id: message.id, result: {} });
@@ -132,6 +135,18 @@ test('codex: sends one turn, declines approvals, recovers an archived thread onc
   const again = appServer(threads);
   assert.equal((await sendCodex(options(again.spawnFn), 'codex-id', prompt)).alreadySent, true);
   assert.equal(again.seen.filter(message => message.method === 'turn/start').length, 0);
+});
+
+test('codex: one App Server is reused across calls, and a completion notification ends the wait without polling', async () => {
+  const threads = { 'codex-id': { turns: [] as Record<string, unknown>[] } };
+  const server = appServer(threads, 0, true);
+  // A 60 s poll interval: only the turn/completed notification can end these waits in time.
+  const slow = { executable: 'codex', timeoutMs: 120000, pollMs: 60000, spawnFn: server.spawnFn };
+  const started = Date.now();
+  assert.equal((await sendCodex(slow, 'codex-id', 'first')).reply, 'OK');
+  assert.equal((await sendCodex(slow, 'codex-id', 'second')).turnId, 'turn-2');
+  assert.ok(Date.now() - started < 5000);
+  assert.equal(server.seen.filter(message => message.method === 'initialize').length, 1);
 });
 
 test('codex: a new conversation starts in the workspace, is persisted by its first turn and named', async () => {

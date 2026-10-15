@@ -1,13 +1,18 @@
 {
   "name": "agent-control-bridge",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "license": "MIT",
   "bin": {
     "agent-control-bridge-mcp": "dist/mcp.js"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wynter-yaxley/agent-control-bridge.git"
+  },
   "files": [
     "dist",
+    "skills",
     "config.example.json",
     "config/hermes-mcp.example.yaml",
     "README.md",
@@ -16,12 +21,16 @@
     "THIRD_PARTY_NOTICES.md"
   ],
   "type": "module",
-  "description": "Forward prompts from Hermes to existing ChatGPT and Codex desktop conversations and return their replies",
+  "description": "MCP server that lets Hermes (or any MCP client) drive the ChatGPT and Codex desktop apps: workspaces, conversations, prompts and replies",
+  "keywords": ["mcp", "hermes", "codex", "chatgpt", "agent"],
   "scripts": {
+    "prepare": "node scripts/build.mjs",
     "build": "node scripts/build.mjs",
     "typecheck": "tsc -p tsconfig.test.json",
     "test": "node --test \"test/*.test.ts\"",
-    "mcp": "node src/mcp.ts"
+    "start": "node dist/mcp.js",
+    "check": "node dist/mcp.js --check",
+    "smoke": "node scripts/smoke.mjs"
   },
   "devDependencies": {
     "@types/node": "24.10.0",
