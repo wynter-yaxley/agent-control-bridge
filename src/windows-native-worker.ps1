@@ -116,6 +116,8 @@ try {
  # document order, so visit last children first and stop after 400 nodes or the
  # deadline instead of a FindFirst over the whole conversation.
  function FindComposer($doc,$walker=[System.Windows.Automation.TreeWalker]::ControlViewWalker) {
+  # The blank new-chat page has no thread and its composer sits mid-document: search forward.
+  if ($script:landing) {foreach ($name in @('使用 ChatGPT Work','询问 ChatGPT')) {$hit=Find $doc 'Edit' $name;if ($hit) {return $hit}};return $null}
   $stack=[System.Collections.Generic.Stack[object]]::new();$visited=0
   $last=$walker.GetLastChild($doc);if ($null -ne $last) {$stack.Push($last)}
   while ($stack.Count -gt 0 -and $visited -lt 400) {
@@ -277,6 +279,7 @@ try {
   $mode=Within 10000 {@($script:root.FindAll([System.Windows.Automation.TreeScope]::Descendants,[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Button)) | Where-Object {$_.Current.Name.StartsWith('切换模式，当前模式：')})[0]}
   if (-not $mode -or $mode.Current.Name -ne '切换模式，当前模式：ChatGPT') {throw 'STATE'}
   $script:stage='gpt-blank'
+  $script:landing=$true
   $doc=Within 10000 {$current=Document;if ($current -and (FindComposer $current)) {$current}}
   if (-not $doc -or (Find $doc 'Text' '你说：') -or (Find $doc 'Text' '您说：') -or (Find $doc 'Text' 'ChatGPT 说：')) {throw 'PROVENANCE'}
   try {Compose (Normalize $request.prompt)} catch {ClearTyped;throw}

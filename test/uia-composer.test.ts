@@ -37,6 +37,14 @@ test('UIA composer lookup: found from the end of a long thread without walking i
   assert.equal(findComposer(`${thread}; Node 'footer' 'Group' '' 'main'; Node 'composer' 'Edit' '使用 ChatGPT Work' 'footer'`).found, 'composer');
 });
 
+test('UIA composer lookup: on the blank new-chat page the mid-document composer is found by a forward search', { skip: !available }, () => {
+  const landing = "Node 'doc' 'Document' '' ''; Node 'side' 'Group' '' 'doc'; for ($i=0;$i -lt 500;$i++) {Node \"s$i\" 'Button' '' 'side'}; Node 'main' 'Group' '' 'doc'; Node 'composer' 'Edit' '使用 ChatGPT Work' 'main'; Node 'tail' 'Group' '' 'doc'; for ($i=0;$i -lt 500;$i++) {Node \"t$i\" 'Text' '' 'tail'}";
+  // The reverse walk alone stops in the trailing nodes; the landing flag searches forward.
+  assert.equal(findComposer(landing).found, null);
+  const forward = "function Find($scope,[string]$type,[string]$name) {foreach ($node in $script:nodes.Values) {if ($node.Current.ControlType.ProgrammaticName -eq \"ControlType.$type\" -and $node.Current.Name -eq $name) {return $node}};$null}; $script:landing=$true";
+  assert.equal(findComposer(`${landing}; ${forward}`).found, 'composer');
+});
+
 test('UIA composer lookup: a missing composer or an expired deadline stops within its bound', { skip: !available }, () => {
   const missing = findComposer(thread);
   assert.equal(missing.found, null); assert.equal(missing.error, null); assert.ok(missing.calls <= 1 + 2 * 400, String(missing.calls));

@@ -26,7 +26,7 @@ const workspace = await call('1-workspace', 'acb_workspace_create', { name: valu
 const codex = await call('2-codex-create', 'acb_codex_create', { cwd: workspace.path, title: `${values.name} Codex`, prompt: `ACB 验收 ${stamp}：这是新建的 Codex 对话，请只回复 ACB_READY，不执行命令、不修改文件。` });
 const found = await call('3-codex-find', 'acb_codex_find', { searchTerm: stamp });
 if (!found.some(item => item.threadId === codex.threadId)) { log('FAIL 3-codex-find', 'created thread not found by search'); process.exit(1); }
-log('SKIP chatgpt-project', 'no verified ChatGPT project interface');
+log('SKIP chatgpt-project', 'ChatGPT project list is not exposed to UIA; not programmable');
 // The bridge never takes the foreground: the user brings ChatGPT to the front now.
 console.log('ACTION 请在 15 秒内把 ChatGPT 桌面窗口切到前台，并在运行期间不要操作键盘鼠标');
 await new Promise(done => setTimeout(done, 15000));
