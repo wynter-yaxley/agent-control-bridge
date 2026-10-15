@@ -1,46 +1,36 @@
 {
   "name": "agent-control-bridge",
-  "version": "0.1.0",
+  "version": "0.4.0",
   "private": true,
   "license": "MIT",
   "bin": {
-    "agent-control-bridge": "dist/cli.js"
+    "agent-control-bridge-mcp": "dist/mcp.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wynter-yaxley/agent-control-bridge.git"
   },
   "files": [
     "dist",
-    "tools/desktop/*.py",
-    "tools/desktop/tests/*.py",
-    "tools/desktop/gpt-read",
-    "tools/desktop/gpt-send",
-    "tools/desktop/codex-send",
-    "tools/desktop/codex-status",
-    "tools/desktop/codex-continue",
-    "tools/desktop/gpt-rename",
-    "tools/desktop/route-execution-guard",
-    "tools/desktop/README.md",
-    "tools/desktop/TOOLS.md",
-    "tools/desktop/requirements.txt",
+    "skills",
     "config.example.json",
-    "config/caller-policy.example.json",
-    "assets",
+    "config/hermes-mcp.example.yaml",
     "README.md",
     "README_EN.md",
     "LICENSE",
     "THIRD_PARTY_NOTICES.md"
   ],
   "type": "module",
-  "description": "A local task-control and state-management bridge for Hermes, ChatGPT and Codex",
+  "description": "MCP server that lets Hermes (or any MCP client) drive the ChatGPT and Codex desktop apps: workspaces, conversations, prompts and replies",
+  "keywords": ["mcp", "hermes", "codex", "chatgpt", "agent"],
   "scripts": {
-    "start": "node dist/cli.js",
-    "cli": "node src/cli.ts",
-    "test": "node scripts/test.mjs",
-    "test:e2e": "node --test test/e2e.test.ts test/workflow.test.ts",
-    "test:desktop": "python -B -m unittest discover -s tools/desktop/tests -v",
+    "prepare": "node scripts/build.mjs",
     "build": "node scripts/build.mjs",
     "typecheck": "tsc -p tsconfig.test.json",
-    "check": "node scripts/check.mjs",
-    "demo": "node src/cli.ts demo",
-    "test:install": "node scripts/clean-install.mjs"
+    "test": "node --test \"test/*.test.ts\"",
+    "start": "node dist/mcp.js",
+    "check": "node dist/mcp.js --check",
+    "smoke": "node scripts/smoke.mjs"
   },
   "devDependencies": {
     "@types/node": "24.10.0",
@@ -48,5 +38,9 @@
   },
   "engines": {
     "node": ">=24.19.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.1",
+    "zod": "4.6.5"
   }
 }

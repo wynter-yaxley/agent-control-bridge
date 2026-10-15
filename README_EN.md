@@ -1,147 +1,72 @@
-# Agent Control Bridge
+# Agent Control Bridge (ACB)
 
-[简体中文](README.md)
+[![CI](https://github.com/wynter-yaxley/agent-control-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/wynter-yaxley/agent-control-bridge/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Node.js](https://img.shields.io/badge/node-%3E%3D24.19-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org/)
+[![Platform: Windows](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D6)](#requirements)
+[![MCP](https://img.shields.io/badge/MCP-stdio%20server-6E56CF)](https://modelcontextprotocol.io/)
+[![Hermes Skill](https://img.shields.io/badge/Hermes-skill%20included-F59E0B)](skills/agent-control-bridge/SKILL.md)
 
-Agent Control Bridge is a local task-control and state-management bridge connecting Hermes, ChatGPT and Codex. It provides a task ledger, progress observation and independent review interfaces for Hermes on Feishu: ChatGPT generates engineering prompts, the bridge verifies and relays them, and Codex performs development.
+[中文](README.md)
 
-Each Agent retains its role: Hermes coordinates and reports to users; ChatGPT communicates and generates prompts; Codex develops; Bridge controls provenance, permissions and state; SQLite preserves traceable records. The project serves collaboration among existing desktop Agents and does not provide model inference.
+ACB is an MCP server that lets Hermes (or any MCP client) drive the **ChatGPT desktop app** and the **Codex desktop app**: create workspaces and Codex projects, create or reuse conversations, send prompts and return the real replies, without the agent writing scripts.
 
-## Core capabilities
+![Architecture](docs/images/architecture.svg)
 
-- **Task lifecycle**: atomic claims, version conflicts, leases, progress, delivery, cancellation and explicit recovery.
-- **Independent review**: executors submit work pending review; an authorized independent reviewer is the only entry to `SUCCEEDED`.
-- **Prompt relay interfaces**: verify trusted provenance, conversations, model capabilities and content hashes; record delivery and retain uncertain outcomes for investigation.
-- **SQLite ledger**: tasks, events, approvals, provenance, reviews and durable notifications; controlled Schema upgrades.
-- **Watcher**: event-triggered checks with periodic fallback, notification deduplication, restart recovery and overdue-blocking records.
-- **Desktop tools**: restricted CDP reads and authorized sending interfaces, writes disabled by default; no physical mouse or keyboard takeover.
-- **Credential-free Demo**: isolated Mocks demonstrate ChatGPT → Bridge → Codex → Watcher → independent review.
+## Requirements
 
-**Current limits**: the desktop generation adapter cannot yet independently prove GPT-6/High, so production automatic prompt delivery is refused by default. Feishu sending needs a Hermes message adapter. Codex history is a snapshot and does not fully reveal background execution; ledger cancellation does not prove the actual Agent stopped. See [deployment](docs/DEPLOYMENT.md).
+Windows 10/11 (ChatGPT tools are Windows-only), Node.js 24.19+ on Windows, the Codex desktop app (signed in; its bundled `codex.exe` is found automatically), the ChatGPT desktop app (signed in) and Hermes on Windows or in WSL. The Codex tools only need `codex app-server` and may work on macOS/Linux, untested.
 
-## Architecture
-
-![Agent Control Bridge architecture and data flows](assets/architecture.svg)
-
-```text
-User requirement → Hermes → ChatGPT prompt → Bridge verification/relay → Codex execution
-                                 Bridge ← state and delivery ← Codex
-                                    ↕ SQLite              ↓ Watcher
-User ← Hermes report ← independent review entry → Bridge final state
-```
-
-Each project registers **one Codex workspace + N Codex conversations in that workspace + one GPT conversation**. The GPT conversation name must match the workspace project name; development, tests and delivery occur in registered Codex conversations. New projects use isolated sets, and production adapters must independently check actual conversations.
-
-## Quickstart
-
-### Requirements
-
-The core CLI requires **Node.js >=24.19.0, npm and Git**. It uses Node's built-in SQLite, without third-party runtime dependencies or native SQLite extensions. Core targets Windows/Linux. Desktop integration targets Windows and needs Python >=3.10, optional `websocket-client`, installed and signed-in Agent applications, and controlled CDP. Demo needs none of these desktop prerequisites.
-
-```sh
-git clone https://github.com/wynter-yaxley/agent-control-bridge.git
-cd agent-control-bridge
-npm install
-npm run build
-npm test
-node dist/cli.js help
-node dist/cli.js demo
-```
-
-`demo` creates and removes a unique temporary database. It demonstrates test prompt generation, relay, Codex claim, progress, Watcher, delivery, executor self-review denial, independent Mock review and final query. `mock-chatgpt` provenance and `mock:gpt-6` model names explicitly identify test data. It invokes no paid model and reads no business database. Ordinary configuration or environment variables cannot enable production Mock authority.
-
-### Initialize a local ledger
-
-PowerShell:
+## Install and connect Hermes
 
 ```powershell
-Copy-Item config.example.json .bridge.config.json
-node dist/cli.js init --config .bridge.config.json
-node dist/cli.js config-show --config .bridge.config.json
-node dist/cli.js schema-version
+git clone https://github.com/wynter-yaxley/agent-control-bridge.git
+cd agent-control-bridge
+npm install        # installs and builds dist/
+npm run check      # read-only self-check; prints the Hermes commands for this machine
 ```
 
-Other shells can use `cp config.example.json .bridge.config.json`. External Agents and desktop operations are disabled by default; use a dedicated restricted data directory. See [deployment](docs/DEPLOYMENT.md) for a real environment.
+Run the `hermes` commands printed by `npm run check` (one MCP registration and one skill copy, for Hermes on Windows or in WSL), for example:
 
-## Configuration
+```bash
+hermes mcp add acb --command '/mnt/c/Program Files/nodejs/node.exe' --args 'D:\agent-control-bridge\dist\mcp.js' --allow-foreground-input
+cp -r '/mnt/d/agent-control-bridge/skills/agent-control-bridge' ~/.hermes/skills/
+```
 
-Priority: **explicit CLI options > matching environment variables > local configuration > built-in defaults**. `--config` or `ACB_CONFIG` selects the file; `--db` overrides the database path. Relative data paths in a configuration file resolve from its directory. Environment and CLI database paths resolve from the working directory. Unknown fields, invalid types and unsafe endpoints are rejected.
+Then start a new Hermes session (or `/reload-mcp`). Keep the server name `acb`. `--allow-foreground-input` authorizes typing into the ChatGPT window; without it a GPT prompt is sent only when the identical text is already a draft. A manual alternative is [config/hermes-mcp.example.yaml](config/hermes-mcp.example.yaml).
 
-| Setting | Default and purpose | Environment override |
+The skill [skills/agent-control-bridge/SKILL.md](skills/agent-control-bridge/SKILL.md) carries the working rules: Hermes coordinates, ChatGPT analyses and reviews, Codex builds and tests; reuse conversations; short reports; investigate only the direct cause of a failure; ask before non-core work. Hermes lists skills in every prompt and loads matching ones; check with `hermes skills list` or load it with `/agent-control-bridge`.
+
+Configuration is optional: options, then `ACB_CODEX`, `ACB_CARRIER_THREAD`, `ACB_WORKSPACE_ROOT`, `ACB_ALLOW_FOREGROUND_INPUT=1`, `ACB_DEBUG=1`, `ACB_CONFIG`, then a JSON file ([config.example.json](config.example.json)), then discovery. Defaults: newest desktop `codex.exe`, the most recent Codex conversation as desktop context, `%USERPROFILE%\acb-workspaces`, a 240 s send timeout (below Hermes' 300 s tool timeout), no logs.
+
+## Tools
+
+| Tool | Arguments | Mode |
 |---|---|---|
-| `database.path` | `./data/bridge.db`, dedicated ledger directory | `ACB_DB_PATH` |
-| `database.busyTimeoutMs` | `5000`, bounded SQLite lock wait | — |
-| `watcher.intervalMs` | `60000`, cross-process polling fallback | `ACB_WATCH_INTERVAL_MS` |
-| `watcher.timeoutMs` | `10000`, cooperative inspection budget | — |
-| `failureReporting.blockedAfterMs` | `600000`, persistent-blocking reporting threshold | `ACB_BLOCKED_REPORT_MS` |
-| `agents.chatgpt.model` | `gpt-6`, requested model, not verified actual execution | `ACB_CHATGPT_MODEL` |
-| `agents.chatgpt.reasoningEffort` | `high`, requested reasoning effort | `ACB_CHATGPT_REASONING` |
-| `desktop.cdpUrl` | Local loopback endpoint; concrete example in configuration | `ACB_CDP_URL` |
-| `desktop.enabled` / `allowForegroundAutomation` | `false`; configuration still grants no one-time approval | — |
-| `desktop.allowPhysicalInput` | `false`; physical input is unsupported | — |
+| `acb_status` | — | read-only self-check |
+| `acb_threads`, `acb_projects` | — | read-only desktop inventory |
+| `acb_workspace_create` | `name`, `path?` | background (directory + Codex project, idempotent) |
+| `acb_codex_create` | `cwd`, `title`, `prompt?` | background |
+| `acb_codex_find` | `searchTerm` | background, read-only |
+| `acb_codex_send` | `threadId`, `prompt` | background |
+| `acb_gpt_create` | `title`, `project?` (an existing ChatGPT project) | foreground typing |
+| `acb_gpt_open` | `conversationId` | clicks in the ChatGPT window |
+| `acb_gpt_send` | `conversationId`, `prompt` | foreground typing |
 
-Local events can trigger immediate Watcher checks; cross-process changes rely on periodic fallback. With timely inspections and a responsive event loop, the target is one period plus inspection and scheduling delays, **not an unconditional worst-case 60-second SLA**. Blocking notifications are local ledger events; Hermes must consume them and actually report to the user. See [config.example.json](config.example.json) for all fields.
+Errors are `{"ok":false,"code","message"}`. A repeated prompt is never resent: after `TIMEOUT`, call again with the same prompt to read the reply.
 
-## Usage
+## Workflow
 
-### Manual ledger walkthrough
+![Workflow](docs/images/workflow.svg)
 
-These operations record state and do not automatically execute code. The default CLI caller is `pi` without reviewer rights, so this walkthrough uses `pi`. A production Codex claim additionally requires a verified and delivered ChatGPT prompt.
+## Foreground and background
 
-```sh
-node dist/cli.js task-create -t "Local ledger walkthrough" -k demo -e pi
-node dist/cli.js task-list --status QUEUED
-node dist/cli.js task-claim TASK_ID --version 0 -e pi
-node dist/cli.js task-progress TASK_ID --version 1 --note "Manually simulated development"
-node dist/cli.js task-renew TASK_ID --version 2 --lease 600
-node dist/cli.js task-finish TASK_ID --version 3 --note "Delivery pending independent review"
-node dist/cli.js task-show TASK_ID
-node dist/cli.js watch
-```
+Codex tools and the inventory tools run in the background and never touch the desktop. `acb_gpt_send` and `acb_gpt_create` type with SendInput into the ChatGPT window, which the user must have brought to the front: ACB never takes the foreground, moves the mouse or uses the clipboard. It returns `FOCUS_REQUIRED` when ChatGPT is not in front and stops with `CONFLICT` when focus moves while typing (the partial text stays in the composer; it is never sent). With a ChatGPT and a Codex window open, only the window known to be ChatGPT is used. The user still has to approve Codex commands, create ChatGPT projects, move existing chats into projects and open old chats that are not in the sidebar.
 
-Replace `TASK_ID` with the returned UUID and use the latest queried version for each operation. `watch` is a separate observation process; stopping its terminal does not stop an external Agent. Only a deployed independent reviewer OS identity may run:
+## Limits
 
-```sh
-node dist/cli.js task-verify TASK_ID --version 4 --pass --reason "Independently checked delivery"
-node dist/cli.js task-show TASK_ID
-node dist/cli.js status
-```
+ChatGPT projects cannot be created and existing chats cannot be moved into one (the project list is invisible to UIA); a new chat can start in an existing project. ChatGPT exposes no conversation UUID in the window, so identity is "unique title + desktop inventory" (`uiIdentity: "titleOnly"`).
 
-SQLite stores review results and final state is queryable; a Hermes message adapter sends actual user notifications. Use `demo` for the full walkthrough without identity deployment.
+## Development
 
-### State machine and permissions
-
-```text
-QUEUED → RUNNING → WAITING_APPROVAL → independent verify(pass) → SUCCEEDED
-                  WAITING_APPROVAL → independent verify(fail) → FAILED
-RUNNING ⇄ BLOCKED
-expired RUNNING/BLOCKED → independent recover → FAILED → reviewer requeue → QUEUED
-UNKNOWN → reviewer requeue → QUEUED
-eligible active state → owner cancel → CANCELLED
-```
-
-`--by`, executor names, role strings and environment variables grant no authority. Caller identity comes from the OS principal and protected policy; updates check version, holder, instance and attempt. Executors cannot review themselves, and ordinary SQL final-success writes also have a review gate. Owners who can edit host code, policy or data belong to the trusted boundary; this ledger cannot isolate arbitrary malicious code sharing the same OS account. Linux currently supports the single-user core CLI and Demo; shared writable review across UIDs is not provided. See [identity and security](docs/DEPLOYMENT.md).
-
-The project does not obtain, copy, display, persist or modify credentials, Cookies or session Tokens. Business databases, personal configuration, logs, Profiles and caches are ignored. Keep private business content out of messages and logs as well.
-
-### Real desktop mode and extension
-
-Install and sign into external applications, configure local CDP, then have a trusted host install generation/transport adapters and register workspace/GPT/Codex conversations. If ChatGPT's actual model, effort or provenance cannot be verified, the artifact remains `REVIEW_REQUIRED`; reliable proof is required for automatic Codex execution. Manual file imports never authorize execution.
-
-Desktop sending may change editing focus and requires one-time trusted host approval; CLI options cannot authorize it. Defaults expose restricted reading and diagnostics only, and never restart an application in use. See [desktop tools](tools/desktop/README.md) for parameters, compatibility entries and failures, and [deployment](docs/DEPLOYMENT.md) for recovery.
-
-Additional Agents can implement narrow capability interfaces and register trusted adapters; new executor kinds also need compatible type and Schema extensions. See [development](docs/DEVELOPMENT.md).
-
-### Troubleshooting
-
-Successful JSON uses stdout; error JSON uses stderr. Exit codes: `1` file/I/O; `2` input/configuration; `3` authority/provenance; `4` state/version/lease/review; `5` database/Schema; `6` Agent/capability/dependency; `7` timeout; `8` execution failure.
-
-Run `init` for an absent database and re-query versions after conflicts. Back up legacy databases and test `migrate --db COPY.sqlite` on a copy; ordinary writes reject implicit upgrades. For AUTH/PROVENANCE errors check protected identity or adapters rather than bypassing with labels. Unreachable CDP alone does not prove a crash and cannot authorize an automatic restart.
-
-## License and documentation
-
-[MIT License](LICENSE); see [third-party notices](THIRD_PARTY_NOTICES.md) for dependencies.
-
-- [Deployment and recovery](docs/DEPLOYMENT.md)
-- [Project collaboration rules](docs/PROJECT_RULES.md)
-- [Contributing](CONTRIBUTING.md) and [development](docs/DEVELOPMENT.md)
-- [Historical audit](docs/audit/CODE_AUDIT_REPORT.md), [remediation](docs/audit/REMEDIATION.md) and [delivery record](docs/audit/DELIVERY.md)
+`npm ci`, `npm run typecheck`, `npm test` (mocks only), `npm run smoke -- --name ACB-smoke --path C:\temp\acb-smoke` (real Windows run, sends real messages). The PowerShell workers must stay UTF-8 with BOM; the build checks it. MIT licensed. Upgrading from 0.3: `--carrier-thread` and `--codex` are optional, the default timeout is 240 s, `acb_status` is new, `scripts/acceptance.mjs` is now `npm run smoke`; existing tool names and arguments are unchanged.

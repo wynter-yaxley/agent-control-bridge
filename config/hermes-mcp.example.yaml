@@ -1,0 +1,13 @@
+# Same result as `hermes mcp add acb ...` (see README). Merge into ~/.hermes/config.yaml
+# (Hermes in WSL) or %LOCALAPPDATA%\hermes\config.yaml (Hermes on Windows).
+# `npm run check` prints the matching `hermes mcp add` command for your installation.
+mcp_servers:
+  acb:
+    # Hermes on Windows: "C:\\Program Files\\nodejs\\node.exe"; Hermes in WSL: "/mnt/c/Program Files/nodejs/node.exe"
+    command: "C:\\Program Files\\nodejs\\node.exe"
+    # Windows path of dist\mcp.js in your clone, in both cases.
+    # --allow-foreground-input authorizes typing into the ChatGPT window (see README).
+    args: ["C:\\path\\to\\agent-control-bridge\\dist\\mcp.js", "--allow-foreground-input"]
+    # A send waits up to 240 s by default; this keeps Hermes' limit above it.
+    timeout: 300
+    supports_parallel_tool_calls: false

@@ -1,7 +1,0 @@
-#!/usr/bin/env python3
-from desktop_rename import main
-from desktop_common import entry
-import sys
-
-if __name__ == '__main__':
-    sys.exit(entry(main))

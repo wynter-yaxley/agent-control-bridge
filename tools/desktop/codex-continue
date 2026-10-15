@@ -1,9 +1,0 @@
-#!/usr/bin/env python3
-import argparse, json, sys
-from desktop_common import entry, ToolError
-def main():
-    parser=argparse.ArgumentParser(description='Legacy raw resume is disabled; use trusted bridge delivery adapter')
-    parser.add_argument('thread',nargs='?'); parser.add_argument('prompt',nargs='?'); parser.add_argument('--confirm',action='store_true')
-    args=parser.parse_args()
-    raise ToolError('PROVENANCE','Raw CLI prompts and --confirm do not establish ChatGPT provenance')
-if __name__=='__main__': sys.exit(entry(main))

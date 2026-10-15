@@ -1,4 +1,0 @@
-[
-  { "principal": "<EXECUTOR_WINDOWS_SID>", "instance": "pi-production", "executor": "pi", "reviewer": false },
-  { "principal": "<INDEPENDENT_REVIEWER_WINDOWS_SID>", "instance": "hermes-reviewer", "executor": "hermes", "reviewer": true }
-]

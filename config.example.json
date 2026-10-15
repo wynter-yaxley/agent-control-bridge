@@ -1,41 +1,5 @@
 {
-  "database": {
-    "path": "./data/bridge.db",
-    "busyTimeoutMs": 5000
-  },
-  "watcher": {
-    "intervalMs": 60000,
-    "timeoutMs": 10000
-  },
-  "agents": {
-    "chatgpt": {
-      "enabled": false,
-      "model": "gpt-6",
-      "reasoningEffort": "high"
-    },
-    "codex": {
-      "enabled": false
-    },
-    "hermes": {
-      "enabled": false
-    },
-    "pi": {
-      "enabled": false
-    }
-  },
-  "desktop": {
-    "enabled": false,
-    "cdpUrl": "http://127.0.0.1:9222",
-    "python": "python",
-    "allowForegroundAutomation": false,
-    "allowPhysicalInput": false,
-    "remoteAllowOrigins": "*"
-  },
-  "logging": {
-    "level": "info",
-    "redactSecrets": true
-  },
-  "failureReporting": {
-    "blockedAfterMs": 600000
-  }
+  "workspaceRoot": "D:\\Workspaces",
+  "foregroundInput": true,
+  "timeoutMs": 240000
 }

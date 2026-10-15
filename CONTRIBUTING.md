@@ -1,19 +1,8 @@
 # 贡献指南
 
-开始前阅读 [项目规范](AGENTS.md)、[通用协作规则](docs/PROJECT_RULES.md)与 [开发说明](docs/DEVELOPMENT.md)。开发执行、测试和交付在登记的 Codex workspace 对话中进行；GPT 对话只沟通和生成工程 Prompt。执行者提交待独立验收，不自行宣布最终成功。
+开始前请阅读 [开发规范](AGENTS.md)。本项目只维护现有的 MCP 工具，新增功能请先提 Issue 讨论。
 
-## 开发与验证
-
-使用满足 package.json 的 Node、npm 与 Python 环境，运行 `npm ci`，再按开发说明完成类型检查、构建、测试、安全检查和隔离安装演练。测试不得使用业务数据库、真实模型或登录会话；外部集成结果必须单列，未验证不计通过。
-
-变更应聚焦实际问题，保留兼容数据和原审查记录，补充相应失败与对抗用例。CLI 参数、错误码、帮助与中英文说明同时更新。来源验证、独立验收和默认桌面权限不可为测试关闭。
-
-## 提交与版本
-
-不要提交凭据、运行库、日志、个人配置或测试残留。公开前检查当前内容和 Git 历史；发现疑似真实秘密停止公开操作，由所有者处理，不自行使用或修改凭据。不强推、不重写他人历史。
-
-采用语义化版本号，面向用户的行为变化写入 [CHANGELOG](CHANGELOG.md) 的 Unreleased。正式 GitHub Release 在独立验收后对应确定版本 tag，记录兼容性、实际测试证据及未验证边界；不要把提交、推送或发布当作验收。
-
-## 交付与独立验收
-
-开发交付记录放 docs/audit/，修复证据放 [REMEDIATION](docs/audit/REMEDIATION.md)，不把过程记录塞进 README。独立验收者使用固定 [结论 / 证据 / 遗留模板](docs/ACCEPTANCE_TEMPLATE.md)。执行者可以建议验收命令，不可填写虚假的独立结论。
+1. `npm ci`，然后运行 `npm run typecheck`、`npm run build`、`npm test`。测试不得使用真实对话、业务数据或登录会话。
+2. 桌面行为的改动需要在 Windows 隔离环境中运行 `npm run smoke`，并在 PR 中如实写明结果；未实测的请标注。
+3. 不要提交凭据、日志、个人配置、本机路径或运行数据。面向用户的变化写进 [CHANGELOG](CHANGELOG.md)。
+4. 通过功能分支和 Pull Request 提交，不直接推送 main，不强推，不重写他人历史。
