@@ -14,8 +14,14 @@ test('setup: Codex is found in the desktop app (newest version folder), else on 
   touch(join(root, 'OpenAI', 'Codex', 'bin', 'old', 'codex.exe'), 1000);
   touch(join(root, 'OpenAI', 'Codex', 'bin', 'new', 'codex.exe'), 2000);
   assert.deepEqual(findCodex({ LOCALAPPDATA: root }, 'win32'), { path: join(root, 'OpenAI', 'Codex', 'bin', 'new', 'codex.exe'), source: 'desktop' });
-  touch(join(root, 'tools', 'codex'), 1000);
-  assert.deepEqual(findCodex({ PATH: `${join(root, 'missing')}:${join(root, 'tools')}` }, 'linux'), { path: join(root, 'tools', 'codex'), source: 'PATH' });
+  // PATH is split by the separator of the given platform, not of the host.
+  touch(join(root, 'win', 'codex.exe'), 1000);
+  assert.deepEqual(findCodex({ PATH: `${join(root, 'missing')};${join(root, 'win')}` }, 'win32'), { path: join(root, 'win', 'codex.exe'), source: 'PATH' });
+  // Windows paths contain ":" (drive letters), so the ":"-separated case runs on other hosts only.
+  if (process.platform !== 'win32') {
+    touch(join(root, 'tools', 'codex'), 1000);
+    assert.deepEqual(findCodex({ PATH: `${join(root, 'missing')}:${join(root, 'tools')}` }, 'linux'), { path: join(root, 'tools', 'codex'), source: 'PATH' });
+  }
   assert.equal(findCodex({ PATH: '' }, 'linux'), null);
 });
 

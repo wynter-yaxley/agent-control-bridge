@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { delimiter, join, resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { BridgeError } from './errors.ts';
 
 export interface BridgeConfig {
@@ -42,7 +42,7 @@ export function findCodex(env: Env = process.env, platform: string = process.pla
       if (newest) return { path: newest.file, source: 'desktop' };
     } catch { /* no desktop install */ }
   }
-  for (const dir of (env.PATH ?? env.Path ?? '').split(delimiter)) {
+  for (const dir of (env.PATH ?? env.Path ?? '').split(platform === 'win32' ? ';' : ':')) {
     const file = dir && join(dir, platform === 'win32' ? 'codex.exe' : 'codex');
     if (file && existsSync(file)) return { path: file, source: 'PATH' };
   }

@@ -11,7 +11,9 @@ const raw = readFileSync(new URL('../src/windows-native-worker.ps1', import.meta
 const source = raw.toString('utf8');
 const fn = (name: string) => new RegExp(`\\n function ${name}[ (][\\s\\S]*?\\n }\\n`).exec(source)![0];
 function pwsh(script: string): any {
-  const result = spawnSync(shell, ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(`$ErrorActionPreference='Stop'\n${script}`, 'utf16le').toString('base64')], { encoding: 'utf8', windowsHide: true, timeout: 60000 });
+  // Windows PowerShell 5.1 writes stdout in the OEM code page unless told otherwise; the
+  // worker itself sets UTF-8 the same way, so Chinese results read back unchanged.
+  const result = spawnSync(shell, ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(`$ErrorActionPreference='Stop'\n[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false)\n${script}`, 'utf16le').toString('base64')], { encoding: 'utf8', windowsHide: true, timeout: 60000 });
   assert.equal(result.status, 0, result.stderr);
   return JSON.parse(result.stdout);
 }
