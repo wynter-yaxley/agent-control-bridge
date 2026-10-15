@@ -6,7 +6,7 @@ import type { spawn } from 'node:child_process';
 import { createGpt, sendGpt } from '../src/gpt.ts';
 import { createCodex, sendCodex } from '../src/codex.ts';
 import { createWorkspace } from '../src/workspace.ts';
-import type { NativeChatPage } from '../src/native.ts';
+import type { NativeChatPage, NativeThread } from '../src/native.ts';
 
 const prompt = '[TEST] reply with OK';
 const page = (status: string, turns: NativeChatPage['turns'], kind = 'chatgpt'): NativeChatPage => ({ thread: { id: 'gpt-id', kind, title: '测试消息', status: { type: status } }, turns });
@@ -57,6 +57,33 @@ test('gpt: a new chat is identified by its own marker turn, never by title, then
   assert.deepEqual(await createGpt(deps, 'ACB 测试'), { conversationId: 'new-id', title: 'ACB 测试' });
   assert.match(marker, /ACB_INIT_[a-f0-9-]{36}$/);
   await assert.rejects(createGpt(deps, 'old'), { code: 'CONFLICT' });
+});
+
+test('gpt: a chat started in a project counts only when the app read the project back; a wrong window sends nothing', async () => {
+  function setup(echo: string | undefined, projectId: string | null, label = 'ACB项目', fail?: string) {
+    const inventory: NativeThread[] = [row('old-id', 'old')];
+    let marker = '', titled = '', renamed = false, sentProject: string | undefined;
+    const { deps } = gpt([]);
+    Object.assign(deps.native, { listThreads: async () => inventory, setThreadTitle: async (_id: string, _source: string, title: string) => { titled = title; renamed = true; },
+      listProjects: async () => [{ projectId: 'p-1', projectKind: 'chatgpt', label, path: '', hostId: '' }],
+      readThread: async (id: string) => ({ thread: { id, kind: 'chatgpt', title: titled || '新聊天', status: { type: 'idle' } }, turns: id === 'new-id' ? [answered('t', marker)] : [] }) });
+    deps.ui.call = (async (operation: string, fields: { prompt?: string; project?: string }) => {
+      if (operation !== 'gpt-create') return { ok: true };
+      if (fail) throw Object.assign(new Error(fail), { code: fail });
+      marker = fields.prompt!; sentProject = fields.project; inventory.push({ ...row('new-id', '新聊天'), projectId });
+      return { ok: true, project: echo };
+    }) as typeof deps.ui.call;
+    return { deps, renamed: () => renamed, sentProject: () => sentProject };
+  }
+  const ok = setup('ACB项目', 'p-1');
+  assert.deepEqual(await createGpt(ok.deps, 'ACB 项目对话', 'ACB项目'), { conversationId: 'new-id', title: 'ACB 项目对话', project: { name: 'ACB项目', confirmedBy: 'ui+native', projectId: 'p-1' } });
+  assert.equal(ok.sentProject(), 'ACB项目');
+  assert.deepEqual((await createGpt(setup('ACB项目', null).deps, 'ACB 项目对话', 'ACB项目')).project, { name: 'ACB项目', confirmedBy: 'ui', projectId: null });
+  // Not read back by the UI, or a native project of another name, or the worker refused the window.
+  for (const [blocked, code, renamed] of [[setup(undefined, 'p-1'), 'PROVENANCE', false], [setup('ACB项目', 'p-1', '别的项目'), 'PROVENANCE', true], [setup('ACB项目', 'p-1', 'ACB项目', 'OWNER'), 'OWNER', false]] as const) {
+    await assert.rejects(createGpt(blocked.deps, 'ACB 项目对话', 'ACB项目'), { code });
+    assert.equal(blocked.renamed(), renamed);
+  }
 });
 
 /** A scripted codex app-server answering JSON-RPC lines. */

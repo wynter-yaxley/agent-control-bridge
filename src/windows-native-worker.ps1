@@ -1,4 +1,4 @@
-$initClock=[Diagnostics.Stopwatch]::StartNew()
+﻿$initClock=[Diagnostics.Stopwatch]::StartNew()
 $ErrorActionPreference='Stop'
 $ProgressPreference='SilentlyContinue'
 [Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false)
@@ -50,6 +50,8 @@ $script:identity=$null
 $script:typed=$null
 $script:treeReadable=$true
 $script:inputMode=$null
+$script:landing=$false
+$script:handle=[IntPtr]::Zero
 $mutex=$null
 $locked=$false
 try {
@@ -61,11 +63,10 @@ try {
  $processes=@(Get-Process -Name ChatGPT -ErrorAction SilentlyContinue)
  if ($processes.Count -eq 0) {throw 'OWNER'}
  $script:stage='chatgpt-window'
- $windows=@($processes | Where-Object {$_.MainWindowHandle -ne 0})
- if ($windows.Count -ne 1) {throw 'OWNER'}
+ # Every top-level window of the app: it can show a ChatGPT and a Codex window side by side.
+ $all=@(foreach ($process in $processes) {[System.Windows.Automation.AutomationElement]::RootElement.FindAll([System.Windows.Automation.TreeScope]::Children,[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ProcessIdProperty,[int]$process.Id))})
+ if ($all.Count -eq 0) {throw 'OWNER'}
  $script:stage='input'
- $window=$windows[0]
- $script:root=[System.Windows.Automation.AutomationElement]::FromHandle($window.MainWindowHandle)
  function Find($scope,[string]$type,[string]$name,[string]$id='') {
   $conditions=[System.Collections.Generic.List[System.Windows.Automation.Condition]]::new()
   $conditions.Add([System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::$type))
@@ -98,8 +99,8 @@ try {
    if ($doc) {return $doc}
    $script:treeReadable=$false
    Start-Sleep -Milliseconds 700
-   $fresh=@(Get-Process -Name ChatGPT -ErrorAction SilentlyContinue | Where-Object {$_.MainWindowHandle -ne 0})
-   if ($fresh.Count -eq 1) {$script:root=[System.Windows.Automation.AutomationElement]::FromHandle($fresh[0].MainWindowHandle)}
+   # Always the same window (by handle), never whichever window the app reports as main.
+   try {$script:root=[System.Windows.Automation.AutomationElement]::FromHandle($script:handle)} catch {}
   }
   return $null
  }
@@ -156,7 +157,7 @@ try {
   $script:stage='input-authorize'
   if ($request.foregroundInput -ne $true) {throw 'AUTH'}
   if (-not [AcbFolderControls]::Interactive()) {throw 'OWNER'}
-  $handle=[IntPtr]$window.MainWindowHandle
+  $handle=$script:handle
   # The user keeps ChatGPT in front; this worker never takes the foreground itself.
   $script:stage='input-foreground';[Console]::Error.WriteLine("ACB_UI_STAGE=$script:stage")
   if ([AcbInput]::GetForegroundWindow() -ne $handle) {throw 'FOCUS_REQUIRED'}
@@ -175,7 +176,7 @@ try {
  # After a failure, remove only what this worker typed (the field was empty before).
  function ClearTyped {
   if ($null -eq $script:typed) {return}
-  try {if ([AcbInput]::GetForegroundWindow() -eq [IntPtr]$window.MainWindowHandle -and (Focused $script:typed)) {[void][AcbInput]::Clear()}} catch {}
+  try {if ([AcbInput]::GetForegroundWindow() -eq $script:handle -and (Focused $script:typed)) {[void][AcbInput]::Clear()}} catch {}
   $script:typed=$null
  }
  # Writes $prompt into an empty ordinary composer and requires it to read back within ~10 s.
@@ -199,6 +200,84 @@ try {
   $pattern=$null
   return @($script:root.FindAll([System.Windows.Automation.TreeScope]::Descendants,$condition) | Where-Object {($offscreen -or -not $_.Current.IsOffscreen) -and $_.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern,[ref]$pattern)})
  }
+ function Prefixed($scope,[string]$prefix) {
+  return @($scope.FindAll([System.Windows.Automation.TreeScope]::Descendants,[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Button)) | Where-Object {$_.Current.Name.StartsWith($prefix)})
+ }
+ # The mode switch names the window's kind ("ChatGPT", "Codex", ...); $null when not shown.
+ function WindowMode($win) {
+  $prefix='切换模式，当前模式：';$switch=@(Prefixed $win $prefix)
+  if ($switch.Count -ne 1) {return $null}
+  return $switch[0].Current.Name.Substring($prefix.Length)
+ }
+ function WindowKind($win) {
+  $mode=WindowMode $win
+  if ($mode) {return $mode}
+  $doc=Find $win 'Document' ''
+  if ($doc -and (FindComposer $doc)) {return 'ChatGPT'}
+  return $null
+ }
+ # Both windows have a "新聊天" button: only the single window known to be ChatGPT is used.
+ # A window of unknown kind is accepted only when it is the app's only window (-strict: never).
+ function PickGptWindow($wins,[switch]$strict) {
+  $kinds=@($wins | ForEach-Object {[pscustomobject]@{Window=$_;Kind=(WindowKind $_)}})
+  $gpt=@($kinds | Where-Object {$_.Kind -eq 'ChatGPT'})
+  if ($gpt.Count -eq 1) {return $gpt[0].Window}
+  if (-not $strict -and $gpt.Count -eq 0 -and $kinds.Count -eq 1 -and -not $kinds[0].Kind) {return $kinds[0].Window}
+  throw 'OWNER'
+ }
+ # A named chat is used in the one window showing that title, never in a Codex window.
+ function PickWindow {
+  if ($request.name -and $request.operation -ne 'chat-open-title') {
+   $titled=@($all | Where-Object {$doc=Find $_ 'Document' '';$doc -and $doc.Current.Name -eq $request.name})
+   if ($titled.Count -gt 1) {throw 'PROVENANCE'}
+   if ($titled.Count -eq 1) {$kind=WindowKind $titled[0];if ($kind -and $kind -ne 'ChatGPT') {throw 'OWNER'};return $titled[0]}
+  }
+  return PickGptWindow $all -strict:($request.operation -eq 'gpt-create')
+ }
+ # The blank GPT new-chat page: GPT mode (-strict: the switch must be shown) and no message yet.
+ function GptLanding([switch]$strict) {
+  $mode=WindowMode $script:root
+  if (($strict -and $mode -ne 'ChatGPT') -or ($mode -and $mode -ne 'ChatGPT')) {return $false}
+  $doc=Document
+  return ($doc -and $null -ne (FindComposer $doc) -and -not (Find $doc 'Text' '你说：') -and -not (Find $doc 'Text' '您说：') -and -not (Find $doc 'Text' 'ChatGPT 说：'))
+ }
+ function Expand($element) {
+  if (-not [AcbFolderControls]::Interactive()) {throw 'OWNER'}
+  $pattern=$null
+  if ($null -eq $element -or -not $element.Current.IsEnabled -or $element.Current.IsOffscreen) {throw 'STATE'}
+  if (-not $element.TryGetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern,[ref]$pattern)) {Invoke $element;return}
+  # Radix menus may report Collapsed while open; Expand then refuses, which means open.
+  try {([System.Windows.Automation.ExpandCollapsePattern]$pattern).Expand()} catch [InvalidOperationException] {}
+ }
+ function Choose($item) {
+  $pattern=$null
+  if ($item.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern,[ref]$pattern)) {Invoke $item;return}
+  if (-not [AcbFolderControls]::Interactive()) {throw 'OWNER'}
+  if ($item.Current.IsOffscreen -or -not $item.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern,[ref]$pattern)) {throw 'STATE'}
+  ([System.Windows.Automation.SelectionItemPattern]$pattern).Select()
+ }
+ function ProjectItems([string]$name) {
+  return @($script:root.FindAll([System.Windows.Automation.TreeScope]::Descendants,[System.Windows.Automation.AndCondition]::new([System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::ListItem),[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::NameProperty,$name))))
+ }
+ function ElementKey($element) {return ($element.GetRuntimeId() -join '.')}
+ # Puts the blank new chat into an existing ChatGPT project via "更改项目". The sidebar
+ # lists projects too, so only an item that appeared with the menu counts, and the
+ # button must read the project back; otherwise nothing is typed or sent.
+ function ChooseProject([string]$project) {
+  $script:stage='gpt-project';[Console]::Error.WriteLine("ACB_UI_STAGE=$script:stage")
+  $label='更改项目：'
+  $button=@(Prefixed $script:root $label)
+  if ($button.Count -ne 1) {throw 'PROVENANCE'}
+  if ($button[0].Current.Name -eq "$label$project") {return}
+  $before=@(ProjectItems $project | ForEach-Object {ElementKey $_})
+  Expand $button[0]
+  $script:stage='gpt-project-list'
+  $items=@(Within 5000 {@(ProjectItems $project | Where-Object {(ElementKey $_) -notin $before})} | Where-Object {$_})
+  if ($items.Count -ne 1) {throw 'PROVENANCE'}
+  Choose $items[0]
+  $script:stage='gpt-project-confirm'
+  if (-not (Within 5000 {$now=@(Prefixed $script:root $label);if ($now.Count -eq 1 -and $now[0].Current.Name -eq "$label$project") {$true}})) {throw 'PROVENANCE'}
+ }
  function AssertConversation([string]$id) {
   $script:stage='conversation-identity'
   if (-not $id) {throw 'PROVENANCE'}
@@ -215,7 +294,7 @@ try {
   $doc=Document
   $text=([System.Windows.Automation.TextPattern]$doc.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern)).DocumentRange.GetText(65537)
   if ($text.Length -gt 65536) {throw 'PROVENANCE'}
-  return @{title=$doc.Current.Name;text=$text;ordinaryComposer=($null -ne (FindComposer $doc));pid=$window.Id;conversationId=(ConversationId)}
+  return @{title=$doc.Current.Name;text=$text;ordinaryComposer=($null -ne (FindComposer $doc));pid=$script:root.Current.ProcessId;conversationId=(ConversationId)}
  }
  function OpenChat([string]$title) {
   # No navigation. The title comes from the native read of the target conversation;
@@ -248,6 +327,9 @@ try {
   return $body
  }
  function GptBusy {return ($null -ne (Find (Document) 'Button' '停止') -or $null -ne (Find (Document) 'Text' 'ChatGPT 正在回应'))}
+ $script:stage='chatgpt-window'
+ $script:root=PickWindow
+ $script:handle=[IntPtr]$script:root.Current.NativeWindowHandle
  if ($request.operation -eq 'snapshot') {
   $script:stage='current-gpt-view'
   $snapshot=Snapshot
@@ -270,24 +352,27 @@ try {
   Respond @{ok=$true;conversationId=(ConversationId)};return
  }
  if ($request.operation -eq 'gpt-create') {
+  # $script:root is the single window known to be ChatGPT (PickWindow -strict); its own
+  # visible "新聊天" button is used, never the Codex window's.
   $script:stage='gpt-new-chat';[Console]::Error.WriteLine("ACB_UI_STAGE=$script:stage")
   $new=Buttons '新聊天'
   if ($new.Count -ne 1) {throw 'PROVENANCE'}
   Invoke $new[0]
   # Only an ordinary ChatGPT chat is used; the mode is read, never switched by guess.
   $script:stage='gpt-mode'
-  $mode=Within 10000 {@($script:root.FindAll([System.Windows.Automation.TreeScope]::Descendants,[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Button)) | Where-Object {$_.Current.Name.StartsWith('切换模式，当前模式：')})[0]}
-  if (-not $mode -or $mode.Current.Name -ne '切换模式，当前模式：ChatGPT') {throw 'STATE'}
+  if ((Within 10000 {WindowMode $script:root}) -ne 'ChatGPT') {throw 'STATE'}
   $script:stage='gpt-blank'
   $script:landing=$true
-  $doc=Within 10000 {$current=Document;if ($current -and (FindComposer $current)) {$current}}
-  if (-not $doc -or (Find $doc 'Text' '你说：') -or (Find $doc 'Text' '您说：') -or (Find $doc 'Text' 'ChatGPT 说：')) {throw 'PROVENANCE'}
+  if (-not (Within 10000 {GptLanding -strict})) {throw 'PROVENANCE'}
+  if ($request.project) {ChooseProject $request.project;$script:stage='gpt-blank';if (-not (Within 10000 {GptLanding -strict})) {throw 'PROVENANCE'}}
   try {Compose (Normalize $request.prompt)} catch {ClearTyped;throw}
+  # Still the blank GPT page of this window right before the identity marker is sent.
   $script:stage='gpt-send-button'
+  if (-not (GptLanding)) {ClearTyped;throw 'PROVENANCE'}
   $send=Within 10000 {Find (Document) 'Button' '发送'}
   if (-not $send) {ClearTyped;throw 'TIMEOUT'}
   Invoke $send
-  Respond @{ok=$true;conversationId=(ConversationId)};return
+  Respond @{ok=$true;conversationId=(ConversationId);project=$request.project};return
  }
  $script:stage='chat-open'
  OpenChat $request.name

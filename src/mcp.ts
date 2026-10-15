@@ -42,8 +42,8 @@ export function createServer(config: BridgeConfig): McpServer {
     args => run(() => searchCodex(codex(), args.searchTerm)));
   server.registerTool('acb_codex_send', { description: 'Send a prompt to a Codex thread by ID, wait for and return its final reply. Archived threads are unarchived once; approvals are never granted by the bridge. A prompt that is already the latest turn is not resent.', inputSchema: z.object({ threadId: id, prompt }).strict() },
     args => run(() => sendCodex(codex(), args.threadId, args.prompt)));
-  server.registerTool('acb_gpt_create', { description: 'Create a new ordinary ChatGPT conversation with a unique title and return its exact ID. Needs --allow-foreground-input and the ChatGPT window in front.', inputSchema: z.object({ title }).strict() },
-    args => run(() => createGpt(gpt(), args.title)));
+  server.registerTool('acb_gpt_create', { description: 'Create a new ordinary ChatGPT conversation with a unique title and return its exact ID, optionally inside an existing ChatGPT project (by its name, read back before sending). Needs --allow-foreground-input and the ChatGPT window in front.', inputSchema: z.object({ title, project: z.string().min(1).max(200).optional() }).strict() },
+    args => run(() => createGpt(gpt(), args.title, args.project)));
   server.registerTool('acb_gpt_open', { description: 'Locate a ChatGPT conversation by ID in the desktop app (current view or its single sidebar entry) and confirm it is the one shown.', inputSchema: z.object({ conversationId: id }).strict() },
     args => run(async () => { const deps = gpt(), page = await deps.native.readThread(args.conversationId); return { conversationId: args.conversationId, title: page.thread.title, navigation: await openGpt(deps, args.conversationId, page.thread.title) }; }));
   server.registerTool('acb_gpt_send', { description: 'Locate a ChatGPT conversation, send a prompt (an identical user-written draft is sent as is; otherwise typed with --allow-foreground-input), wait for and return its reply. A prompt that is already the latest turn is not resent.', inputSchema: z.object({ conversationId: id, prompt }).strict() },

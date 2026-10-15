@@ -5,7 +5,7 @@ import type { BridgeConfig } from './config.ts';
 import { BridgeError, ERROR_CODES, controlledProcessEnv, type ErrorCode } from './errors.ts';
 
 export interface WindowsUiSnapshot { title: string; text: string; ordinaryComposer: boolean; pid: number; conversationId: string | null }
-export interface UiResult { inputMode?: 'drafted' | 'typed'; treeReadable?: boolean; ok: boolean; code?: string; stage?: string; errorType?: string; line?: number; snapshot?: WindowsUiSnapshot; body?: string; conversationId?: string | null; completionVerified?: boolean; identity?: 'uuid' | 'titleOnly' }
+export interface UiResult { inputMode?: 'drafted' | 'typed'; treeReadable?: boolean; ok: boolean; code?: string; stage?: string; errorType?: string; line?: number; snapshot?: WindowsUiSnapshot; body?: string; conversationId?: string | null; completionVerified?: boolean; identity?: 'uuid' | 'titleOnly'; project?: string | null }
 const UI_REPORT_GRACE_MS = 5000;
 
 /** Fixed UIA operations on the existing ChatGPT window (windows-native-worker.ps1). */
@@ -18,7 +18,7 @@ export class WindowsNativeUi {
   private lastStage = '';
   constructor(config: BridgeConfig) { this.config = config; }
   close(): void { this.child?.kill(); this.child=undefined; uiWorkers.delete(this); }
-  call(operation: 'snapshot' | 'chat-send' | 'chat-read-reply' | 'chat-open-title' | 'gpt-create', fields: { name: string; conversationId?: string; prompt?: string }, signal: AbortSignal): Promise<UiResult> {
+  call(operation: 'snapshot' | 'chat-send' | 'chat-read-reply' | 'chat-open-title' | 'gpt-create', fields: { name: string; conversationId?: string; prompt?: string; project?: string }, signal: AbortSignal): Promise<UiResult> {
     const pending=this.queue.then(()=>this.request(operation,fields,signal));
     // A failed operation is returned to its caller; subsequent requests are not replayed.
     this.queue=pending.then(()=>undefined,()=>undefined);

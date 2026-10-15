@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { BridgeError } from './errors.ts';
-import type { NativeChatPage, NativeThread } from './native.ts';
+import type { NativeChatPage, NativeProject, NativeThread } from './native.ts';
 import type { UiResult } from './windows-ui.ts';
 
 export interface GptDeps {
@@ -9,8 +9,9 @@ export interface GptDeps {
     readThread(id: string): Promise<NativeChatPage>;
     listThreads(): Promise<NativeThread[]>;
     setThreadTitle(id: string, source: 'chatgpt', title: string): Promise<void>;
+    listProjects?(): Promise<NativeProject[]>;
   };
-  ui: { call(operation: 'snapshot' | 'chat-open-title' | 'chat-send' | 'chat-read-reply' | 'gpt-create', fields: { name: string; conversationId?: string; prompt?: string }, signal: AbortSignal): Promise<UiResult> };
+  ui: { call(operation: 'snapshot' | 'chat-open-title' | 'chat-send' | 'chat-read-reply' | 'gpt-create', fields: { name: string; conversationId?: string; prompt?: string; project?: string }, signal: AbortSignal): Promise<UiResult> };
   timeoutMs: number;
   pollMs: number;
 }
@@ -86,23 +87,31 @@ export async function sendGpt(deps: GptDeps, conversationId: string, text: strin
 
 /** Starts a new ordinary ChatGPT chat with a one-time identity marker, finds its exact
  * UUID in the native inventory, then names it natively. Titles must be unique so later
- * location stays unambiguous. */
-export async function createGpt(deps: GptDeps, title: string): Promise<{ conversationId: string; title: string }> {
+ * location stays unambiguous. With `project`, the chat is started in that existing
+ * ChatGPT project; the UI must read the project back before anything is sent. */
+export async function createGpt(deps: GptDeps, title: string, project?: string): Promise<{ conversationId: string; title: string; project?: { name: string; confirmedBy: 'ui' | 'ui+native'; projectId: string | null } }> {
   if (typeof title !== 'string' || !title.trim() || title.length > 200 || /[\r\n]/.test(title)) throw new BridgeError('INPUT', 'Title must be one line of 1..200 characters');
+  if (project !== undefined && (typeof project !== 'string' || !project.trim() || project.length > 200 || /[\r\n]/.test(project))) throw new BridgeError('INPUT', 'Project must be one line of 1..200 characters');
   const inventory = await deps.native.listThreads();
   if (inventory.some(thread => thread.title === title)) throw new BridgeError('CONFLICT', 'A conversation with this title already exists; choose a unique title');
   const baseline = new Set(inventory.map(thread => thread.id));
   const prompt = `这是 Agent Control Bridge 新建对话的身份标记，不执行任务。请只回复：ACB_INIT_${randomUUID()}`;
-  await deps.ui.call('gpt-create', { name: '', prompt }, signal(deps));
-  const id = await until(async () => {
+  const sent = await deps.ui.call('gpt-create', project ? { name: '', prompt, project } : { name: '', prompt }, signal(deps));
+  if (project && sent.project !== project) throw new BridgeError('PROVENANCE', 'The project selection was not confirmed by the app');
+  const row = await until(async () => {
     for (const thread of await deps.native.listThreads()) {
       if (baseline.has(thread.id) || thread.kind !== 'chatgpt') continue;
-      if (asks((await deps.native.readThread(thread.id)).turns[0], prompt)) return thread.id;
+      if (asks((await deps.native.readThread(thread.id)).turns[0], prompt)) return thread;
     }
     return undefined;
   }, 120000, deps.pollMs);
+  const id = row?.id;
   if (!id) throw new BridgeError('TIMEOUT', 'The new chat was sent but did not appear in the native inventory; check the app before creating another');
   await deps.native.setThreadTitle(id, 'chatgpt', title);
   if (!await until(async () => (await deps.native.readThread(id)).thread.title === title || undefined, 15000, deps.pollMs)) throw new BridgeError('STATE', `Chat ${id} was created but could not be renamed`);
-  return { conversationId: id, title };
+  if (!project) return { conversationId: id, title };
+  // The UI read the project back; a native project ID, when exposed, must name the same project.
+  const native = row.projectId ? (await deps.native.listProjects?.())?.find(item => item.projectId === row.projectId) : undefined;
+  if (native && native.label !== project) throw new BridgeError('PROVENANCE', `Chat ${id} was created in another project (${native.label})`);
+  return { conversationId: id, title, project: { name: project, confirmedBy: native ? 'ui+native' : 'ui', projectId: row.projectId } };
 }

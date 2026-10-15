@@ -43,13 +43,13 @@
 | `acb_codex_create` | `cwd`, `title`, `prompt?` | 新 Codex 对话（首轮已应答以便持久化）：`threadId / reply / title` |
 | `acb_codex_find` | `searchTerm` | `thread/search` 命中的 `threadId / name / cwd` |
 | `acb_codex_send` | `threadId`, `prompt` | `reply / turnId / messageIds / alreadySent / approvalsDeclined` |
-| `acb_gpt_create` | `title` | 新普通 ChatGPT 对话 `conversationId / title` |
+| `acb_gpt_create` | `title`, `project?` | 新普通 ChatGPT 对话 `conversationId / title`；给出 `project` 时在该已有 ChatGPT 项目中新建，返回 `project.name / confirmedBy / projectId` |
 | `acb_gpt_open` | `conversationId` | `title / navigation`（`current` 或 `sidebar`） |
 | `acb_gpt_send` | `conversationId`, `prompt` | `reply / turnId / inputMode / uiIdentity / navigation / alreadySent` |
 
 多对话转发：把一个工具返回的 `reply` 作为另一个对话的 `prompt` 发送即可。失败时返回 `{ ok:false, code, message }`。
 
-ChatGPT 原生「项目」的创建与归入：未实现。Windows 实测显示项目名称框无法聚焦，「移至项目」子菜单只暴露「新建项目」，已有项目的列表不暴露给 UIA，因此无法用程序选择目标项目；需要用户在 ChatGPT 中手动操作。
+ChatGPT 项目：`acb_gpt_create` 可在新聊天页的「更改项目」中选择一个已有项目，只选随菜单出现、名称唯一的条目，并须在按钮上回读到该项目名后才输入和发送；未确认即失败。新建项目（名称框无法聚焦）和把已有对话移入项目（「移至项目」的项目列表不暴露给 UIA）无法用程序完成，需要用户在 ChatGPT 中手动操作。ChatGPT 应用同时开着 ChatGPT 与 Codex 窗口时，只使用能确认为 ChatGPT 的那一个窗口。
 
 ## 开发与验收
 
