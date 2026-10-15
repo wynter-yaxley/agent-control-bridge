@@ -33,6 +33,8 @@ const thread = "Node 'doc' 'Document' '' ''; Node 'side' 'Group' '' 'doc'; for (
 test('UIA composer lookup: found from the end of a long thread without walking it', { skip: !available }, () => {
   const result = findComposer(`${thread}; Node 'footer' 'Group' '' 'main'; Node 'form' 'Group' '' 'footer'; Node 'composer' 'Edit' '询问 ChatGPT' 'form'; Node 'send' 'Button' '发送' 'form'`);
   assert.equal(result.found, 'composer'); assert.ok(result.calls < 20, String(result.calls));
+  // A blank new chat names its composer by its own placeholder.
+  assert.equal(findComposer(`${thread}; Node 'footer' 'Group' '' 'main'; Node 'composer' 'Edit' '使用 ChatGPT Work' 'footer'`).found, 'composer');
 });
 
 test('UIA composer lookup: a missing composer or an expired deadline stops within its bound', { skip: !available }, () => {

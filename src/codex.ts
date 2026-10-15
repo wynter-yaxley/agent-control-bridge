@@ -87,8 +87,16 @@ async function readThread(server: AppServer, threadId: string): Promise<Row> {
 }
 async function waitTurn(server: AppServer, options: CodexOptions, threadId: string, turnId: string): Promise<CodexReply> {
   const deadline = Date.now() + options.timeoutMs;
-  for (;;) {
-    const turn = (await readThread(server, threadId)).turns.find((item: Row) => item?.id === turnId);
+  for (let storeErrors = 0; ;) {
+    let thread: Row;
+    // While the rollout is being written, thread/read can fail briefly: back off, at most 3 times in a row.
+    try { thread = await readThread(server, threadId); storeErrors = 0; }
+    catch (error) {
+      if (!(error instanceof BridgeError) || error.code !== 'EXECUTION' || ++storeErrors > 3) throw error;
+      await delay(options.pollMs * storeErrors);
+      continue;
+    }
+    const turn = thread.turns.find((item: Row) => item?.id === turnId);
     if (turn && turn.status !== 'inProgress') return replyOf(threadId, turn, false, server.declined);
     if (Date.now() >= deadline) throw new BridgeError('TIMEOUT', `Codex thread ${threadId}: reply is pending; call again with the same prompt to read it (it is not resent)`);
     await delay(options.pollMs);

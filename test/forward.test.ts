@@ -60,8 +60,9 @@ test('gpt: a new chat is identified by its own marker turn, never by title, then
 });
 
 /** A scripted codex app-server answering JSON-RPC lines. */
-function appServer(threads: Record<string, { turns: Record<string, unknown>[]; archived?: boolean }>) {
+function appServer(threads: Record<string, { turns: Record<string, unknown>[]; archived?: boolean }>, storeErrors = 0) {
   const seen: Record<string, any>[] = [];
+  let failing = 0;
   const spawnFn = (() => {
     const child = new EventEmitter() as any, stdout = new PassThrough();
     child.stdout = stdout; child.stderr = new PassThrough(); child.kill = () => true;
@@ -71,6 +72,7 @@ function appServer(threads: Record<string, { turns: Record<string, unknown>[]; a
         const message = JSON.parse(line), params = message.params ?? {}; seen.push(message);
         if (message.id === undefined || !message.method) continue;
         if (message.method === 'thread/start') { threads['new-thread'] = { turns: [] }; reply({ id: message.id, result: { thread: { id: 'new-thread' } } }); }
+        else if (message.method === 'thread/read' && failing > 0) { failing--; reply({ id: message.id, error: { code: -32603, message: 'thread store internal error' } }); }
         else if (message.method === 'thread/read') reply({ id: message.id, result: { thread: { id: params.threadId, status: { type: 'idle' }, turns: threads[params.threadId].turns } } });
         else if (message.method === 'thread/unarchive') { threads[params.threadId].archived = false; reply({ id: message.id, result: {} }); }
         else if (message.method === 'turn/start') {
@@ -80,6 +82,7 @@ function appServer(threads: Record<string, { turns: Record<string, unknown>[]; a
           reply({ id: 'approval-1', method: 'item/commandExecution/requestApproval', params: { threadId: params.threadId } });
           const id = `turn-${thread.turns.length + 1}`;
           thread.turns.push({ id, status: 'completed', items: [{ type: 'userMessage', content: [{ type: 'text', text: params.input[0].text }] }, { type: 'agentMessage', id: 'm1', phase: 'commentary', text: 'thinking' }, { type: 'agentMessage', id: 'm2', text: 'OK' }] });
+          failing = storeErrors;
           reply({ id: message.id, result: { turn: { id, status: 'inProgress' } } });
         } else reply({ id: message.id, result: {} });
       }
@@ -110,6 +113,11 @@ test('codex: a new conversation starts in the workspace, is persisted by its fir
   assert.equal(created.threadId, 'new-thread'); assert.equal(created.reply, 'OK'); assert.equal(created.title, 'ACB Codex');
   assert.deepEqual(server.seen.filter(message => ['thread/start', 'turn/start', 'thread/name/set'].includes(message.method)).map(message => [message.method, message.params]),
     [['thread/start', { cwd: 'D:\\ws' }], ['turn/start', { threadId: 'new-thread', input: [{ type: 'text', text: 'hi' }] }], ['thread/name/set', { threadId: 'new-thread', name: 'ACB Codex' }]]);
+  // A readback failing while the rollout is written is retried, at most 3 times in a row.
+  const transient = appServer({}, 3);
+  assert.equal((await createCodex(options(transient.spawnFn), 'D:\\ws', 'ACB Codex', 'hi')).reply, 'OK');
+  assert.equal(transient.seen.filter(message => message.method === 'turn/start').length, 1);
+  await assert.rejects(createCodex(options(appServer({}, 4).spawnFn), 'D:\\ws', 'ACB Codex', 'hi'), (error: any) => error.code === 'EXECUTION');
 });
 
 test('workspace: creates the directory and registers it with a key stable per directory', async t => {

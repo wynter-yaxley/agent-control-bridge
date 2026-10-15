@@ -82,11 +82,12 @@ try {
    Start-Sleep -Milliseconds $request.pollMs
   } while ($true)
  }
- # Hidden, disabled or non-invokable controls are never invoked.
- function Invoke($element) {
+ # Hidden, disabled or non-invokable controls are never invoked; only a sidebar chat
+ # entry may be scrolled out of view (-offscreen), its InvokePattern still navigates.
+ function Invoke($element,[switch]$offscreen) {
   if (-not [AcbFolderControls]::Interactive()) {throw 'OWNER'}
   $pattern=$null
-  if ($null -eq $element -or -not $element.Current.IsEnabled -or $element.Current.IsOffscreen -or -not $element.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern,[ref]$pattern)) {throw 'STATE'}
+  if ($null -eq $element -or -not $element.Current.IsEnabled -or ($element.Current.IsOffscreen -and -not $offscreen) -or -not $element.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern,[ref]$pattern)) {throw 'STATE'}
   ([System.Windows.Automation.InvokePattern]$pattern).Invoke()
  }
  function Value($element) {return ([System.Windows.Automation.ValuePattern]$element.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)).Current.Value.Trim()}
@@ -120,7 +121,8 @@ try {
   while ($stack.Count -gt 0 -and $visited -lt 400) {
    if ([DateTime]::UtcNow -ge $deadline) {throw 'TIMEOUT'}
    $node=$stack.Pop();$visited++
-   if ($node.Current.ControlType.ProgrammaticName -eq 'ControlType.Edit' -and $node.Current.Name -eq '询问 ChatGPT') {return $node}
+   # A blank new chat names its composer by the placeholder "使用 ChatGPT Work".
+   if ($node.Current.ControlType.ProgrammaticName -eq 'ControlType.Edit' -and $node.Current.Name -in @('询问 ChatGPT','使用 ChatGPT Work')) {return $node}
    $previous=$walker.GetPreviousSibling($node);if ($null -ne $previous) {$stack.Push($previous)}
    $child=$walker.GetLastChild($node);if ($null -ne $child) {$stack.Push($child)}
   }
@@ -190,10 +192,10 @@ try {
   if (-not $written) {$after=FindComposer (Document);$script:stage=if (-not $after -or -not (ComposerText $after)) {'chat-compose-verify-empty'} else {'chat-compose-verify-different'};throw 'STATE'}
   $script:typed=$null
  }
- function Buttons([string]$name) {
+ function Buttons([string]$name,[switch]$offscreen) {
   $condition=[System.Windows.Automation.AndCondition]::new([System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Button),[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::NameProperty,$name))
   $pattern=$null
-  return @($script:root.FindAll([System.Windows.Automation.TreeScope]::Descendants,$condition) | Where-Object {-not $_.Current.IsOffscreen -and $_.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern,[ref]$pattern)})
+  return @($script:root.FindAll([System.Windows.Automation.TreeScope]::Descendants,$condition) | Where-Object {($offscreen -or -not $_.Current.IsOffscreen) -and $_.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern,[ref]$pattern)})
  }
  function AssertConversation([string]$id) {
   $script:stage='conversation-identity'
@@ -257,10 +259,11 @@ try {
  if (-not $locked) {throw 'CONFLICT'}
  if ($request.operation -eq 'chat-open-title') {
   # Fallback navigation: only a sidebar chat entry whose title is unique is opened.
+  # Entries scrolled out of the sidebar view count too, so uniqueness covers them all.
   $script:stage='open-title'
-  $entries=Buttons $request.name
+  $entries=Buttons $request.name -offscreen
   if ($entries.Count -ne 1) {throw 'PROVENANCE'}
-  Invoke $entries[0]
+  Invoke $entries[0] -offscreen
   if (-not (Within 10000 {$doc=Document;if ($doc -and $doc.Current.Name -eq $request.name) {$true}})) {throw 'TIMEOUT'}
   Respond @{ok=$true;conversationId=(ConversationId)};return
  }
@@ -304,7 +307,7 @@ try {
    $body=Wait {
     AssertConversation $request.conversationId
     if ((Document).Current.Name -ne $request.name) {throw 'PROVENANCE'}
-    $composer=Find (Document) 'Edit' '询问 ChatGPT'
+    $composer=FindComposer (Document)
     if ($composer -and $composer.Current.IsEnabled -and -not (GptBusy)) {
      $final=Reply $request.prompt
      AssertConversation $request.conversationId
