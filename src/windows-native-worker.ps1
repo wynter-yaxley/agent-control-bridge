@@ -173,6 +173,21 @@ try {
   if ($uri.AbsolutePath -match '^/c/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})$') {return $Matches[1]}
   return $null
  }
+ # Bounded reverse walk for the ordinary composer: it sits after every message in
+ # document order, so visit last children first and stop after 400 nodes or the
+ # deadline instead of a FindFirst over the whole conversation.
+ function FindComposer($doc,$walker=[System.Windows.Automation.TreeWalker]::ControlViewWalker) {
+  $stack=[System.Collections.Generic.Stack[object]]::new();$visited=0
+  $last=$walker.GetLastChild($doc);if ($null -ne $last) {$stack.Push($last)}
+  while ($stack.Count -gt 0 -and $visited -lt 400) {
+   if ([DateTime]::UtcNow -ge $deadline) {throw 'TIMEOUT'}
+   $node=$stack.Pop();$visited++
+   if ($node.Current.ControlType.ProgrammaticName -eq 'ControlType.Edit' -and $node.Current.Name -eq '询问 ChatGPT') {return $node}
+   $previous=$walker.GetPreviousSibling($node);if ($null -ne $previous) {$stack.Push($previous)}
+   $child=$walker.GetLastChild($node);if ($null -ne $child) {$stack.Push($child)}
+  }
+  return $null
+ }
  function AssertConversation([string]$id) {
   $script:stage='conversation-identity'
   if (-not $id) {throw 'PROVENANCE'}
@@ -182,19 +197,22 @@ try {
   # operator-opened current chat whose title and ordinary composer match is accepted;
   # this titleOnly mode does not prove the UUID identity.
   $doc=Document
-  if (-not $doc -or -not $request.name -or $doc.Current.Name -ne $request.name -or $null -eq (Find $doc 'Edit' '询问 ChatGPT')) {throw 'PROVENANCE'}
+  if (-not $doc -or -not $request.name -or $doc.Current.Name -ne $request.name -or $null -eq (FindComposer $doc)) {throw 'PROVENANCE'}
   $script:identity='titleOnly'
  }
  function Snapshot {
   $doc=Document
   $text=([System.Windows.Automation.TextPattern]$doc.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern)).DocumentRange.GetText(65537)
   if ($text.Length -gt 65536) {throw 'PROVENANCE'}
-  return @{title=$doc.Current.Name;text=$text;ordinaryComposer=($null -ne (Find $doc 'Edit' '询问 ChatGPT'));pid=$window.Id;conversationId=(ConversationId)}
+  return @{title=$doc.Current.Name;text=$text;ordinaryComposer=($null -ne (FindComposer $doc));pid=$window.Id;conversationId=(ConversationId)}
  }
  function OpenChat([string]$title) {
-  # No title-only navigation: the current public UI identity must already match.
+  # No navigation. The title comes from the native read of the target conversation;
+  # a different current chat stops here, before any composer or draft is touched.
+  $script:stage='conversation-title'
+  $doc=Document
+  if (-not $title -or -not $doc -or $doc.Current.Name -ne $title) {throw 'PROVENANCE'}
   AssertConversation $request.conversationId
-  if ((Document).Current.Name -ne $title) {throw 'PROVENANCE'}
  }
  function Reply([string]$prompt) {
   $nodes=(Document).FindAll([System.Windows.Automation.TreeScope]::Descendants,[System.Windows.Automation.Condition]::TrueCondition)
@@ -266,6 +284,7 @@ try {
    if ($draft -and $draft -ne $edit.Current.Name -and $draft -ne $request.prompt) {throw 'CONFLICT'}
    $script:stage='chat-compose-set';[Console]::Error.WriteLine("ACB_UI_STAGE=$script:stage")
    AssertConversation $request.conversationId
+   if ((Document).Current.Name -ne $request.name) {throw 'PROVENANCE'}
    if ($draft -ne $request.prompt) {SetValue (Document) $composer '' $request.prompt}
    $script:stage='chat-send-button';[Console]::Error.WriteLine("ACB_UI_STAGE=$script:stage")
    $send=Wait {Find (Document) 'Button' '发送'}
