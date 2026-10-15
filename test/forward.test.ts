@@ -131,6 +131,23 @@ test('gpt: the chat verified after creation accepts the second prompt and return
   assert.equal(creates, 1); assert.equal(sends, 1);
 });
 
+test('gpt: a stale sidebar inventory after rename must converge before create succeeds', async () => {
+  let marker = '', title = 'New chat', readsAfterRename = 0, renames = 0, creates = 0;
+  const deps = { timeoutMs: 500, pollMs: 1,
+    native: {
+      listThreads: async () => marker ? [row('new-id', renames && ++readsAfterRename >= 4 ? title : 'New chat')] : [],
+      readThread: async (id: string) => ({ thread: { id, kind: 'chatgpt', title, status: { type: 'idle' } }, turns: [answered('init', marker)] }),
+      setThreadTitle: async (_id: string, _source: string, value: string) => { title = value; renames++; },
+    },
+    ui: { call: async (operation: string, fields: { prompt?: string }) => {
+      if (operation === 'gpt-create') { creates++; marker = fields.prompt!; }
+      return { ok: true, snapshot: { title, text: '', ordinaryComposer: true, pid: 1, conversationId: null } };
+    } },
+  };
+  assert.deepEqual(await createGpt(deps, 'settled title'), { conversationId: 'new-id', title: 'settled title' });
+  assert.ok(readsAfterRename >= 5); assert.equal(renames, 1); assert.equal(creates, 1);
+});
+
 /** A scripted codex app-server answering JSON-RPC lines. */
 function appServer(threads: Record<string, { turns: Record<string, unknown>[]; archived?: boolean }>, storeErrors = 0, deferred = false) {
   const seen: Record<string, any>[] = [];

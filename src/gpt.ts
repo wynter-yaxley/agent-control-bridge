@@ -93,11 +93,14 @@ export async function sendGpt(deps: GptDeps, conversationId: string, text: strin
 export async function createGpt(deps: GptDeps, title: string, project?: string): Promise<{ conversationId: string; title: string; project?: { name: string; confirmedBy: 'ui' | 'ui+native'; projectId: string | null } }> {
   if (typeof title !== 'string' || !title.trim() || title.length > 200 || /[\r\n]/.test(title)) throw new BridgeError('INPUT', 'Title must be one line of 1..200 characters');
   if (project !== undefined && (typeof project !== 'string' || !project.trim() || project.length > 200 || /[\r\n]/.test(project))) throw new BridgeError('INPUT', 'Project must be one line of 1..200 characters');
+  const deadline = Date.now() + deps.timeoutMs;
+  const budget = (cap: number) => Math.max(0, Math.min(cap, deadline - Date.now()));
   const inventory = await deps.native.listThreads();
   if (inventory.some(thread => thread.title === title)) throw new BridgeError('CONFLICT', 'A conversation with this title already exists; choose a unique title');
   const baseline = new Set(inventory.map(thread => thread.id));
   const prompt = `这是 Agent Control Bridge 新建对话的身份标记，不执行任务。请只回复：ACB_INIT_${randomUUID()}`;
   let id: string | null = null, actualTitle: string | null = null, stage = 'initialization', submitted = false, identityVerified = false;
+  let verification: Record<string, unknown> | undefined;
   try {
     const sent = await deps.ui.call('gpt-create', project ? { name: '', prompt, project } : { name: '', prompt }, signal(deps));
     submitted = true;
@@ -120,7 +123,7 @@ export async function createGpt(deps: GptDeps, title: string, project?: string):
         return rows.find(t => t.id === candidate) ?? { id: candidate, kind: 'chatgpt', title: page.thread.title, projectId: null, cwd: null };
       }
       return undefined;
-    }, Math.min(120000, deps.timeoutMs), deps.pollMs);
+    }, budget(120000), deps.pollMs);
     if (!row || !id) throw new BridgeError('TIMEOUT', 'The marker was submitted but its completed conversation could not be confirmed in the native inventory');
     const createdId = id;
     stage = 'title';
@@ -138,9 +141,13 @@ export async function createGpt(deps: GptDeps, title: string, project?: string):
       const nativeTitle = page.thread.title === title;
       stage = !nativeTitle ? 'title' : 'persistence';
       const located = view?.ordinaryComposer && view.title === title && (view.conversationId ? view.conversationId === createdId : matching.length === 1 && matching[0].id === createdId);
+      verification = { nativeTitle: page.thread.title, inventoryTitle: rows.find(t => t.id === createdId)?.title ?? null, uiTitle: view?.title ?? null, ordinaryComposer: view?.ordinaryComposer ?? false };
       stable = nativeTitle && done(page, page.turns[0]) && located ? stable + 1 : 0;
       return stable >= 2 ? true : undefined;
-    }, Math.min(15000, deps.timeoutMs), deps.pollMs);
+    // The host's sidebar inventory can lag an ID-addressed title write by about
+    // a minute. Wait for convergence within the original create budget rather
+    // than treating a 15 s stale inventory as successful persistence (or bypassing it).
+    }, budget(120000), deps.pollMs);
     if (!confirmed) throw new BridgeError(stage === 'title' ? 'STATE' : 'PROVENANCE', 'The created chat title, persisted identity and ChatGPT page did not agree');
     if (!project) return { conversationId: createdId, title };
     const native = row.projectId ? (await deps.native.listProjects?.())?.find(item => item.projectId === row.projectId) : undefined;
@@ -150,6 +157,6 @@ export async function createGpt(deps: GptDeps, title: string, project?: string):
     const failure = asBridgeError(error);
     if (!submitted && !failure.details?.submission) throw error;
     throw new BridgeError(failure.code, `${failure.message}; creation is partially complete: read the known conversation, do not create again or resend the initialization marker`,
-      { ...failure.details, status: 'partial', conversationId: id, title: actualTitle, requestedTitle: title, identityVerified, submission: failure.details?.submission ?? 'sent', stage });
+      { ...failure.details, status: 'partial', conversationId: id, title: actualTitle, requestedTitle: title, identityVerified, submission: failure.details?.submission ?? 'sent', stage, ...(verification ? { verification } : {}) });
   }
 }
