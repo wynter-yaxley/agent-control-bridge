@@ -22,7 +22,7 @@ $hostIdentity=$null
 while ($null -ne ($inputText=[Console]::In.ReadLine())) {
  $pipe=$null;$script:stage='input'
  try {
- if($inputText.Length -gt 16384){throw 'IO'}
+ if($inputText.Length -gt 300000){throw 'IO'}
  $inputData=$inputText | ConvertFrom-Json
  Fields $inputData @('requestJson','timeoutMs','maxFrameBytes','maxCandidates','expectedProcessId','expectedProcessStartedAt')
  foreach($spec in @(@('timeoutMs',1,60000),@('maxFrameBytes',4096,4194304),@('maxCandidates',1,32))){$value=$inputData.($spec[0]);if($value -isnot [int] -or $value -lt $spec[1] -or $value -gt $spec[2]){throw 'IO'}}
@@ -40,11 +40,29 @@ while ($null -ne ($inputText=[Console]::In.ReadLine())) {
  }elseif($request.method -eq 'tools/call'){
   Fields $params @('arguments','callId','namespace','threadId','tool','turnId','callerSource')
   foreach($key in @('namespace','callerSource','threadId','callId','turnId','tool')){if($params.($key) -isnot [string]){throw 'IO'}}
-  if($params.namespace -ne 'codex_app' -or $params.callerSource -ne 'codex' -or $params.threadId -notmatch '^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$' -or $params.callId -cnotmatch '^acb-readonly-[a-f0-9-]{36}$' -or $params.turnId -cnotmatch '^acb-readonly-[a-f0-9-]{36}$'){throw 'IO'}
-  if($params.tool -eq 'list_threads'){Fields $params.arguments @('limit');if($params.arguments.limit -isnot [int] -or $params.arguments.limit -notin @(1,30)){throw 'IO'}}
+  # Reads use acb-readonly-, the four ID-addressed writes acb-write-; anything else is refused.
+  $id='^[A-Za-z0-9_-]{1,200}$';$uuid='^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$'
+  $prefix=if($params.tool -cin @('create_thread','set_thread_title','navigate_to_codex_page','move_thread_to_project')){'acb-write-'}else{'acb-readonly-'}
+  if($params.namespace -ne 'codex_app' -or $params.callerSource -ne 'codex' -or $params.threadId -notmatch $uuid -or $params.callId -cnotmatch ('^'+$prefix+'[a-f0-9-]{36}$') -or $params.turnId -cnotmatch ('^'+$prefix+'[a-f0-9-]{36}$')){throw 'IO'}
+  $a=$params.arguments
+  $text={param($value,[int]$max) $value -is [string] -and $value.Trim().Length -gt 0 -and $value.Length -le $max -and $value -notmatch '[\x00-\x08\x0b\x0c\x0e-\x1f]'}
+  if($params.tool -eq 'list_threads'){Fields $a @('limit');if($a.limit -isnot [int] -or $a.limit -notin @(1,30)){throw 'IO'}}
   elseif($params.tool -eq 'read_thread'){
-   Fields $params.arguments @('threadId','turnLimit','includeOutputs','maxOutputCharsPerItem')
-   if($params.arguments.threadId -isnot [string] -or $params.arguments.threadId -notmatch '^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$' -or $params.arguments.turnLimit -isnot [int] -or $params.arguments.turnLimit -ne 1 -or $params.arguments.includeOutputs -isnot [bool] -or $params.arguments.maxOutputCharsPerItem -isnot [int] -or -not (($params.arguments.includeOutputs -ceq $false -and $params.arguments.maxOutputCharsPerItem -eq 0) -or ($params.arguments.includeOutputs -ceq $true -and $params.arguments.maxOutputCharsPerItem -eq 20000))){throw 'IO'}
+   Fields $a @('threadId','turnLimit','includeOutputs','maxOutputCharsPerItem')
+   if($a.threadId -isnot [string] -or $a.threadId -notmatch $uuid -or $a.turnLimit -isnot [int] -or $a.turnLimit -ne 1 -or $a.includeOutputs -isnot [bool] -or $a.maxOutputCharsPerItem -isnot [int] -or -not (($a.includeOutputs -ceq $false -and $a.maxOutputCharsPerItem -eq 0) -or ($a.includeOutputs -ceq $true -and $a.maxOutputCharsPerItem -eq 20000))){throw 'IO'}
+  }elseif($params.tool -eq 'list_projects'){Fields $a @()}
+  elseif($params.tool -ceq 'create_thread'){
+   Fields $a @('title','prompt','target');Fields $a.target @('type','projectId','environment');Fields $a.target.environment @('type')
+   if(-not (& $text $a.title 200) -or $a.title -match '\n' -or -not (& $text $a.prompt 65536) -or $a.target.type -cne 'project' -or $a.target.projectId -isnot [string] -or $a.target.projectId -notmatch $id -or $a.target.environment.type -cne 'local'){throw 'IO'}
+  }elseif($params.tool -ceq 'set_thread_title'){
+   Fields $a @('source','threadId','title')
+   if($a.source -cnotin @('codex','chatgpt') -or $a.threadId -notmatch $uuid -or -not (& $text $a.title 200) -or $a.title -match '\n'){throw 'IO'}
+  }elseif($params.tool -ceq 'navigate_to_codex_page'){
+   Fields $a @('threadId','source','hostId')
+   if($a.threadId -isnot [string] -or $a.threadId -notmatch $uuid -or ($null -ne $a.source -and $a.source -cnotin @('codex','chatgpt')) -or ($null -ne $a.hostId -and $a.hostId -notmatch $id)){throw 'IO'}
+  }elseif($params.tool -ceq 'move_thread_to_project'){
+   Fields $a @('threadId','source','projectId')
+   if($a.threadId -isnot [string] -or $a.threadId -notmatch $uuid -or $a.source -cnotin @('codex','chatgpt') -or $a.projectId -isnot [string] -or $a.projectId -notmatch $id){throw 'IO'}
   }else{throw 'IO'}
  }else{throw 'IO'}
  $script:stage='load-native'

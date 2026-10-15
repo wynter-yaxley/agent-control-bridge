@@ -5,7 +5,7 @@ import type { BridgeConfig } from './config.ts';
 import { BridgeError, ERROR_CODES, controlledProcessEnv, type ErrorCode } from './errors.ts';
 
 export interface WindowsUiSnapshot { title: string; text: string; ordinaryComposer: boolean; pid: number; conversationId: string | null }
-export interface UiResult { ok: boolean; code?: string; stage?: string; errorType?: string; line?: number; snapshot?: WindowsUiSnapshot; body?: string; conversationId?: string | null; completionVerified?: boolean; identity?: 'uuid' | 'titleOnly' }
+export interface UiResult { confirmed?: boolean; trusted?: boolean; ok: boolean; code?: string; stage?: string; errorType?: string; line?: number; snapshot?: WindowsUiSnapshot; body?: string; conversationId?: string | null; completionVerified?: boolean; identity?: 'uuid' | 'titleOnly' }
 const UI_REPORT_GRACE_MS = 5000;
 
 /** Fixed UIA operations on the existing ChatGPT window (windows-native-worker.ps1). */
@@ -18,7 +18,7 @@ export class WindowsNativeUi {
   private lastStage = '';
   constructor(config: BridgeConfig) { this.config = config; }
   close(): void { this.child?.kill(); this.child=undefined; uiWorkers.delete(this); }
-  call(operation: 'snapshot' | 'chat-send' | 'chat-read-reply', fields: { name: string; conversationId?: string; prompt?: string }, signal: AbortSignal): Promise<UiResult> {
+  call(operation: 'snapshot' | 'chat-send' | 'chat-read-reply' | 'chat-open-title' | 'gpt-create' | 'workspace-create', fields: { name: string; conversationId?: string; prompt?: string; path?: string }, signal: AbortSignal): Promise<UiResult> {
     const pending=this.queue.then(()=>this.request(operation,fields,signal));
     // A failed operation is returned to its caller; subsequent requests are not replayed.
     this.queue=pending.then(()=>undefined,()=>undefined);
@@ -73,7 +73,7 @@ export class WindowsNativeUi {
       signal.addEventListener('abort',abort,{once:true});
       child.stdout!.on('data',read);child.once('error',failed);child.once('close',closed);child.stdin!.on('error',inputFailed);
       // A smaller worker budget lets it report its own stage before outer deadlines fire.
-      child.stdin!.write(JSON.stringify({operation,...fields,timeoutMs:Math.max(1000,this.config.timeoutMs-UI_REPORT_GRACE_MS),pollMs:this.config.uiPollMs})+'\n');
+      child.stdin!.write(JSON.stringify({operation,...fields,timeoutMs:Math.max(1000,this.config.timeoutMs-UI_REPORT_GRACE_MS),pollMs:this.config.uiPollMs,foregroundInput:this.config.foregroundInput})+'\n');
     });
   }
 }

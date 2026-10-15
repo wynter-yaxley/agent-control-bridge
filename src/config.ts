@@ -9,6 +9,10 @@ export interface BridgeConfig {
   /** An existing Codex thread used as the Native IPC caller context. */
   carrierThreadId: string | null;
   codexExecutable: string | null;
+  /** Default parent directory for new workspaces. */
+  workspaceRoot: string | null;
+  /** The user's authorization for foreground SendInput typing into ChatGPT. */
+  foregroundInput: boolean;
   nativeInterface: { timeoutMs: number; maxFrameBytes: number; maxCandidates: number };
 }
 const int = (value: unknown, fallback: number, min: number, max: number, field: string) => {
@@ -22,7 +26,7 @@ const text = (value: unknown, field: string) => {
   return value;
 };
 /** Reads only the fields it uses; older configuration files keep working (other keys are ignored). */
-export function loadConfig(path?: string, overrides: { carrierThreadId?: string; codexExecutable?: string } = {}): BridgeConfig {
+export function loadConfig(path?: string, overrides: { carrierThreadId?: string; codexExecutable?: string; foregroundInput?: boolean } = {}): BridgeConfig {
   let raw: Record<string, any> = {};
   if (path) {
     const file = resolve(path);
@@ -35,6 +39,8 @@ export function loadConfig(path?: string, overrides: { carrierThreadId?: string;
     uiPollMs: int(raw.uiPollMs ?? raw.desktop?.uiPollMs, 1000, 1, 10000, 'uiPollMs'),
     carrierThreadId: text(overrides.carrierThreadId ?? raw.carrierThreadId, 'carrierThreadId'),
     codexExecutable: text(overrides.codexExecutable ?? raw.codexExecutable ?? raw.agents?.codex?.executable, 'codexExecutable'),
+    workspaceRoot: text(raw.workspaceRoot, 'workspaceRoot'),
+    foregroundInput: overrides.foregroundInput === true || raw.foregroundInput === true,
     nativeInterface: { timeoutMs: int(native.timeoutMs, 30000, 1, 60000, 'nativeInterface.timeoutMs'), maxFrameBytes: int(native.maxFrameBytes, 2097152, 4096, 4194304, 'nativeInterface.maxFrameBytes'),
       maxCandidates: int(native.maxCandidates, 16, 1, 32, 'nativeInterface.maxCandidates') },
   };

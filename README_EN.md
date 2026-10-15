@@ -1,9 +1,9 @@
 # Agent Control Bridge
 
-Lets Hermes forward one prompt over MCP to an **existing** ChatGPT or Codex desktop conversation and return the real reply. Nothing else: no workspace or conversation creation, task management or ledger.
+Lets Hermes, over MCP, create a local workspace and its native project, create ChatGPT and Codex conversations, open a target conversation, forward a prompt and return the real reply. No task management or ledger.
 
-- ChatGPT: UIA writes the prompt into the open chat and clicks Send; Native IPC `read_thread` confirms the turn completed, then UIA reads the reply correlated to that prompt. The target title comes from the native read of the target ID; a different current chat is refused before the composer is touched. Without a `/c/<UUID>` route the match is `titleOnly` (reported as `uiIdentity`). The user opens the target chat first.
-- Codex: local `codex app-server` (`thread/resume`, `turn/start`, then `thread/read` until the turn ends). Command/file approval requests are declined.
-- No duplicate sends: if the target's latest turn already carries the same prompt it is not sent again; its reply is returned (CONFLICT while running). A busy conversation or a foreign draft is refused. Sends run one at a time.
+- ChatGPT: the target is opened by ID with the app's own navigation (a sidebar click only when its title is unique in the native inventory) and confirmed against the natively read title (UUID when exposed, else `titleOnly`). The prompt is typed with foreground SendInput only with `--allow-foreground-input`; window and focus are checked before every chunk and the text must read back before Send. Native IPC `read_thread` confirms the turn landed in that ID; UIA reads the reply.
+- New chats are identified by a one-time marker turn, never by title, and named with native `set_thread_title`. Codex conversations are created with native `create_thread`; Codex prompts go through local `codex app-server` and command/file approvals are declined.
+- No duplicate sends: a prompt that is already the latest turn is not sent again; busy targets and foreign drafts are refused; calls run one at a time.
 
-Tools: `acb_threads`, `acb_gpt_send {conversationId, prompt}`, `acb_codex_send {threadId, prompt}`. Configure `carrierThreadId` (an existing Codex thread ID) and `codexExecutable`; see [config.example.json](config.example.json). Requires Windows and Node >= 24.19.0. `npm ci && npm run build`, then `node dist/mcp.js --config <file>`.
+Tools: `acb_threads`, `acb_projects`, `acb_workspace_create`, `acb_gpt_create`, `acb_codex_create`, `acb_gpt_open`, `acb_gpt_send`, `acb_codex_send`. Configure `carrierThreadId`, `codexExecutable`, `workspaceRoot`; see [config.example.json](config.example.json). Requires Windows and Node >= 24.19.0. `npm ci && npm run build`, then `node dist/mcp.js --config <file> --allow-foreground-input`. Live acceptance: `node scripts/acceptance.mjs`.

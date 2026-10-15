@@ -90,6 +90,11 @@ export class NativeReadWorker {
     });
   }
 }
+type ReadTool = 'list_threads' | 'read_thread' | 'list_projects';
+type WriteTool = 'create_thread' | 'set_thread_title' | 'navigate_to_codex_page' | 'move_thread_to_project';
+const WRITES: WriteTool[] = ['create_thread', 'set_thread_title', 'navigate_to_codex_page', 'move_thread_to_project'];
+export interface NativeThread { id: string; kind: string; title: string; projectId: string | null; cwd: string | null }
+export interface NativeProject { projectId: string; projectKind: string; label: string; path: string; hostId: string }
 const sharedWorker = new NativeReadWorker();
 export const closeNativeWorker = () => sharedWorker.close();
 
@@ -103,10 +108,10 @@ export class NativeClient {
     identifier(options.carrierThreadId);
     this.options = options; this.worker = options.worker ?? sharedWorker;
   }
-  private async call(tool: 'list_threads' | 'read_thread', args: JsonObject): Promise<JsonObject> {
-    const id = randomUUID();
-    const request = { jsonrpc: '2.0', id, method: 'tools/call', params: { arguments: args, callId: `acb-readonly-${randomUUID()}`, namespace: 'codex_app',
-      threadId: this.options.carrierThreadId, tool, turnId: `acb-readonly-${randomUUID()}`, callerSource: 'codex' } };
+  private async call(tool: ReadTool | WriteTool | null, args: JsonObject): Promise<JsonObject> {
+    const id = randomUUID(), prefix = tool && WRITES.includes(tool as WriteTool) ? 'acb-write-' : 'acb-readonly-';
+    const request = tool === null ? { jsonrpc: '2.0', id, method: 'tools/list', params: { threadStartKind: 'all' } } : { jsonrpc: '2.0', id, method: 'tools/call', params: { arguments: args, callId: `${prefix}${randomUUID()}`, namespace: 'codex_app',
+      threadId: this.options.carrierThreadId, tool, turnId: `${prefix}${randomUUID()}`, callerSource: 'codex' } };
     const envelope = await this.worker.request({ requestJson: JSON.stringify(request), timeoutMs: this.options.timeoutMs, maxFrameBytes: this.options.maxFrameBytes,
       maxCandidates: this.options.maxCandidates, expectedProcessId: this.peerPid ?? null, expectedProcessStartedAt: this.peerStartedAt ?? null }, this.options.timeoutMs);
     if (envelope.ok !== true) throw new BridgeError(envelope.code === 'TIMEOUT' ? 'TIMEOUT' : envelope.code === 'OWNER' ? 'OWNER' : 'IO', `Native worker refused the request at ${String(envelope.stage)}`);
@@ -118,16 +123,43 @@ export class NativeClient {
     if (response.jsonrpc !== '2.0' || response.id !== id) throw new BridgeError('IO', 'Native response identity mismatch');
     if (response.error !== undefined) throw new BridgeError(object(response.error).code === -32602 ? 'IPC_CONFIG' : 'IO', 'Native request was rejected');
     const result = object(response.result);
+    if (tool === null) return result;
     if (result.success !== true || !Array.isArray(result.contentItems)) throw new BridgeError('IO', 'Native tool did not report success');
     const text = result.contentItems.filter(item => object(item).type === 'inputText');
     if (text.length !== 1 || typeof object(text[0]).text !== 'string') throw new BridgeError('IO', 'Native tool response has an unexpected shape');
+    // Writes may answer in plain text; reads must be JSON.
     try { return object(JSON.parse(object(text[0]).text as string)); }
-    catch (error) { if (error instanceof BridgeError) throw error; throw new BridgeError('IO', 'Native tool response JSON is invalid'); }
+    catch (error) { if (tool && WRITES.includes(tool as WriteTool)) return { text: String(object(text[0]).text).slice(0, 2000) }; if (error instanceof BridgeError) throw error; throw new BridgeError('IO', 'Native tool response JSON is invalid'); }
   }
-  async listThreads(): Promise<{ id: string; kind: string; title: string }[]> {
+  async listThreads(): Promise<NativeThread[]> {
     const result = await this.call('list_threads', { limit: 30 });
     return [...(Array.isArray(result.pinnedThreads) ? result.pinnedThreads : []), ...(Array.isArray(result.threads) ? result.threads : [])].map(object)
-      .map(row => ({ id: String(row.id), kind: String(row.kind), title: String(row.title ?? '') }));
+      .map(row => ({ id: String(row.id), kind: String(row.kind), title: String(row.title ?? ''), projectId: typeof row.projectId === 'string' ? row.projectId : null, cwd: typeof row.cwd === 'string' ? row.cwd : null }));
+  }
+  async catalog(): Promise<Record<string, JsonObject>> {
+    const tools = (await this.call(null, {})).tools;
+    if (!Array.isArray(tools)) throw new BridgeError('IO', 'Invalid native tool catalog');
+    return Object.fromEntries(tools.map(object).filter(tool => tool.namespace === 'codex_app').map(tool => [String(tool.name), object(tool.inputSchema ?? {})]));
+  }
+  async listProjects(): Promise<NativeProject[]> {
+    const result = await this.call('list_projects', {});
+    return (Array.isArray(result.projects) ? result.projects : []).map(object).map(row => ({ projectId: String(row.projectId), projectKind: String(row.projectKind), label: String(row.label ?? ''), path: String(row.path ?? ''), hostId: String(row.hostId ?? '') }));
+  }
+  /** Native create_thread in one local project; the prompt starts its first turn. */
+  async createThread(input: { projectId: string; title: string; prompt: string }): Promise<{ threadId?: string }> {
+    const result = await this.call('create_thread', { title: input.title, prompt: input.prompt, target: { type: 'project', projectId: input.projectId, environment: { type: 'local' } } });
+    const threadId = result.threadId ?? object(result.thread ?? {}).id;
+    return { threadId: typeof threadId === 'string' && UUID.test(threadId) ? threadId : undefined };
+  }
+  async setThreadTitle(threadId: string, source: 'chatgpt' | 'codex', title: string): Promise<void> { await this.call('set_thread_title', { source, threadId: identifier(threadId), title }); }
+  async moveToProject(threadId: string, source: 'chatgpt' | 'codex', projectId: string): Promise<void> { await this.call('move_thread_to_project', { threadId: identifier(threadId), source, projectId }); }
+  /** Opens a conversation by ID through the app's own navigation tool, using only the
+   * arguments its advertised schema names (threadId, optional source). */
+  async navigate(threadId: string, source: 'chatgpt' | 'codex'): Promise<void> {
+    const schema = (await this.catalog()).navigate_to_codex_page, properties = object(schema?.properties ?? {});
+    const required = Array.isArray(schema?.required) ? schema.required.map(String) : [];
+    if (!schema || !properties.threadId || required.some(name => !['threadId', 'source'].includes(name))) throw new BridgeError('UNSUPPORTED', `navigate_to_codex_page does not take a thread ID (fields: ${Object.keys(properties).join(',') || 'none'}; required: ${required.join(',') || 'none'})`);
+    await this.call('navigate_to_codex_page', { threadId: identifier(threadId), ...(properties.source ? { source } : {}) });
   }
   async readThread(threadId: string): Promise<NativeChatPage> {
     const result = await this.call('read_thread', { threadId: identifier(threadId), turnLimit: 1, includeOutputs: true, maxOutputCharsPerItem: 20000 });

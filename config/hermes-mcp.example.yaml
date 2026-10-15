@@ -2,13 +2,14 @@
 mcp_servers:
   acb:
     command: "${ACB_NODE_EXECUTABLE}"
-    args: ["${ACB_MCP_ENTRY}", "--config", "${ACB_CONFIG_PATH}"]
+    args: ["${ACB_MCP_ENTRY}", "--config", "${ACB_CONFIG_PATH}", "--allow-foreground-input"]
     enabled: true
     # One send waits up to timeoutMs (300 s) for the reply, plus a margin.
+    # --allow-foreground-input is the user's authorization for SendInput typing into ChatGPT.
     timeout: 400
     connect_timeout: 30
     supports_parallel_tool_calls: false
     tools:
-      include: [acb_threads, acb_gpt_send, acb_codex_send]
+      include: [acb_threads, acb_projects, acb_workspace_create, acb_gpt_create, acb_codex_create, acb_gpt_open, acb_gpt_send, acb_codex_send]
       resources: false
       prompts: false

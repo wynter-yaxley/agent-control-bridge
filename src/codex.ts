@@ -1,6 +1,7 @@
 import { spawn as nodeSpawn, type ChildProcess } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { BridgeError, controlledProcessEnv } from './errors.ts';
+import type { NativeChatPage, NativeProject, NativeThread } from './native.ts';
 
 type Row = Record<string, any>;
 const ID = /^[a-zA-Z0-9_-]{1,200}$/;
@@ -100,4 +101,35 @@ export async function sendCodex(options: { executable: string; timeoutMs: number
       await delay(options.pollMs);
     }
   } finally { server.close(); }
+}
+
+/** Creates a Codex conversation in a native local project with native create_thread.
+ * The required first prompt starts its first turn; the call waits for that reply. */
+export async function createCodex(deps: { native: { listProjects(): Promise<NativeProject[]>; listThreads(): Promise<NativeThread[]>; readThread(id: string): Promise<NativeChatPage>; createThread(input: { projectId: string; title: string; prompt: string }): Promise<{ threadId?: string }> }; timeoutMs: number; pollMs: number },
+  projectId: string, title: string, firstPrompt?: string): Promise<{ threadId: string; projectId: string; title: string; reply: string }> {
+  if (typeof title !== 'string' || !title.trim() || title.length > 200 || /[\r\n]/.test(title)) throw new BridgeError('INPUT', 'Title must be one line of 1..200 characters');
+  const prompt = (firstPrompt ?? '这是 Agent Control Bridge 新建的 Codex 对话。请只回复：ACB_READY，不执行命令、不修改文件。').replace(/\r\n/g, '\n').trim();
+  if (!prompt || prompt.length > 65536) throw new BridgeError('INPUT', 'Prompt must be 1..65536 characters');
+  const project = (await deps.native.listProjects()).find(item => item.projectId === projectId);
+  if (!project || project.projectKind !== 'local') throw new BridgeError('PROVENANCE', 'Project is not a native local project');
+  const baseline = new Set((await deps.native.listThreads()).map(thread => thread.id));
+  const sent = (page: NativeChatPage) => page.turns[0]?.items.some(item => item.type === 'userMessage' && item.content.some(part => (part.text ?? '').trim() === prompt));
+  const created = await deps.native.createThread({ projectId, title, prompt });
+  const deadline = Date.now() + deps.timeoutMs;
+  let threadId = created.threadId;
+  for (;;) {
+    if (!threadId) for (const thread of await deps.native.listThreads())
+      if (!baseline.has(thread.id) && thread.kind === 'codex' && thread.projectId === projectId && sent(await deps.native.readThread(thread.id))) { threadId = thread.id; break; }
+    if (threadId) {
+      const page = await deps.native.readThread(threadId), turn = page.turns[0];
+      if (page.thread.kind !== 'codex') throw new BridgeError('PROVENANCE', 'create_thread returned a non-Codex thread');
+      if (turn && sent(page) && turn.status !== 'inProgress') {
+        if (turn.status !== 'completed' || turn.error) throw new BridgeError('EXECUTION', `Codex thread ${threadId} was created but its first turn ended as ${turn.status}`);
+        const reply = turn.items.filter(item => item.type === 'agentMessage' && item.phase !== 'commentary').map(item => item.type === 'agentMessage' ? item.text : '').join('\n\n');
+        return { threadId, projectId, title, reply };
+      }
+    }
+    if (Date.now() >= deadline) throw new BridgeError('TIMEOUT', threadId ? `Codex thread ${threadId} was created; its first reply is pending` : 'create_thread returned no thread ID and none appeared; check the app before creating another');
+    await delay(deps.pollMs);
+  }
 }
