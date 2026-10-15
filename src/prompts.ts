@@ -9,7 +9,7 @@ import { ConversationRegistry } from './topology.ts';
 import { isDemoDatabase } from './demo-scope.ts';
 export interface Generation {
   content: string; sourceConversationId?: string; sourceConversationName?: string; sourceMessageId: string; actualModel: string | null; actualReasoningEffort: string | null;
-  completionEvidence?: { source: 'windows-uia' | 'visible-dom'; turnId: string; userMessageId: string; assistantMessageId: string; observedAt: string; nativeCompleted: true; uiIdle: true; replyActions?: true };
+  completionEvidence?: { source: 'windows-uia' | 'visible-dom'; turnId: string; userMessageId: string; assistantMessageId: string; observedAt: string; nativeCompleted: true; uiIdle: true; replyActions?: true; uiIdentity?: 'uuid' | 'titleOnly' };
 }
 // Adapter objects are installed by trusted host code, never deserialized from CLI/Agent JSON.
 export interface ChatgptAdapter {

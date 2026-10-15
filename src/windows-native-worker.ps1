@@ -77,6 +77,7 @@ $script:stage='input'
 $script:target=''
 $script:effects=$null
 $script:entry=$null
+$script:identity=$null
 $mutex=$null
 $locked=$false
 try {
@@ -174,7 +175,15 @@ try {
  }
  function AssertConversation([string]$id) {
   $script:stage='conversation-identity'
-  if (-not $id -or (ConversationId) -ne $id) {throw 'PROVENANCE'}
+  if (-not $id) {throw 'PROVENANCE'}
+  $current=ConversationId
+  if ($current) {if ($current -ne $id) {throw 'PROVENANCE'};$script:identity='uuid';return}
+  # The desktop app exposes only app://-/index.html (no /c/UUID route). Then only the
+  # operator-opened current chat whose title and ordinary composer match is accepted;
+  # this titleOnly mode does not prove the UUID identity.
+  $doc=Document
+  if (-not $doc -or -not $request.name -or $doc.Current.Name -ne $request.name -or $null -eq (Find $doc 'Edit' '询问 ChatGPT')) {throw 'PROVENANCE'}
+  $script:identity='titleOnly'
  }
  function Snapshot {
   $doc=Document
@@ -247,7 +256,7 @@ try {
   $script:stage='chat-open'
   OpenChat $request.name
   if ($request.operation -eq 'chat-open') {
-   Respond @{ok=$true;snapshot=(Snapshot)};return
+   Respond @{ok=$true;snapshot=(Snapshot);identity=$script:identity};return
   }
   if ($request.operation -eq 'chat-send') {
    $script:stage='chat-compose-find';[Console]::Error.WriteLine("ACB_UI_STAGE=$script:stage")
@@ -262,7 +271,7 @@ try {
    $send=Wait {Find (Document) 'Button' '发送'}
    AssertConversation $request.conversationId
    Invoke $send
-   Respond @{ok=$true;conversationId=(ConversationId)};return
+   Respond @{ok=$true;conversationId=(ConversationId);identity=$script:identity};return
   }
   if ($request.mode -ne 'codex') {
    $script:stage='gpt-reply';[Console]::Error.WriteLine("ACB_UI_STAGE=$script:stage")
@@ -276,7 +285,7 @@ try {
      if (-not (GptBusy)) {return $final}
     }
    }
-   Respond @{ok=$true;body=$body;conversationId=(ConversationId);completionVerified=$true};return
+   Respond @{ok=$true;body=$body;conversationId=(ConversationId);completionVerified=$true;identity=$script:identity};return
   }
   Respond @{ok=$true};return
  }

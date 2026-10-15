@@ -271,3 +271,20 @@ test('windows native host: create_thread refusals before the call are UNSUPPORTE
   const created=await host.createCodexConversation('native-refusals',path,signal,key,0,attempt);
   assert.equal(created.conversationId,desktop.load().threads.find(item=>item.kind==='codex')!.id);assert.equal(desktop.load().creates.codex,1);
 });
+
+test('windows native host: without a UUID route the current chat is used only on an explicit titleOnly match',async()=>{
+  const config=defaults(),prompt='[TEST] requirement',signal=new AbortController().signal;let sent=false,identity:'titleOnly'|undefined='titleOnly',title='same title';
+  const page=()=>({thread:{id:'target-id',kind:'chatgpt',title:'same title',status:{type:'idle'}},turns:[{id:sent?'new-turn':'old-turn',status:'completed',error:null,items:sent?[{type:'userMessage',id:'user',content:[{type:'text',text:prompt}]},{type:'agentMessage',id:'assistant',text:'[reference]'}]:[]}]});
+  const native={readThread:async()=>page()} as unknown as WindowsNativeTools;
+  const ui=new class extends WindowsNativeUi {override async call(op:Parameters<WindowsNativeUi['call']>[0]){
+    if(op==='chat-open')return {ok:true,identity,snapshot:{title,text:'',ordinaryComposer:true,pid:1,conversationId:null}};
+    if(op==='chat-send'){sent=true;return {ok:true,identity};}
+    return {ok:true,identity,conversationId:undefined,completionVerified:true,body:'[TEST] final body'};
+  }}(config);
+  const {ordinaryChat}=createWindowsNativeConversationHost({config,native,ui,authorizeUiOperation:async()=>true});
+  title='other title';await assert.rejects(ordinaryChat.inspectConversation('target-id',signal),{code:'PROVENANCE'});
+  title='same title';identity=undefined;await assert.rejects(ordinaryChat.inspectConversation('target-id',signal),{code:'PROVENANCE'});
+  identity='titleOnly';assert.equal((await ordinaryChat.inspectConversation('target-id',signal)).conversationId,'target-id');
+  const result=await ordinaryChat.generate('target-id',prompt,{signal,model:config.agents.chatgpt.model,reasoningEffort:config.agents.chatgpt.reasoningEffort});
+  assert.equal(result.content,'[TEST] final body');assert.equal(result.completionEvidence?.uiIdentity,'titleOnly');
+});

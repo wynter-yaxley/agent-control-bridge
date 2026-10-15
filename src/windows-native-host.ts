@@ -24,7 +24,7 @@ export interface WindowsNativeTools {
 export interface WindowsUiSnapshot { title: string; text: string; ordinaryComposer: boolean; pid: number; conversationId: string | null }
 /** Read-only state of the native "add project" entry; constants only. */
 export interface WorkspaceEntry { state: 'ready' | 'missing' | 'ambiguous' | 'offscreen' | 'disabled' | 'not-invokable'; count: number; offscreen?: boolean; enabled?: boolean; invoke?: boolean; scrollItem?: boolean; emptyBounds?: boolean; arranged?: boolean; ancestors?: string[] }
-interface UiResult { ok: boolean; code?: string; stage?: string; target?: string; errorType?: string; line?: number; ordinaryModeObserved?: boolean; snapshot?: WindowsUiSnapshot; body?: string; conversationId?: string; completionVerified?: boolean; entry?: WorkspaceEntry; effectsStarted?: boolean; timings?: { initMs: number; actionMs: number } }
+interface UiResult { ok: boolean; code?: string; stage?: string; target?: string; errorType?: string; line?: number; ordinaryModeObserved?: boolean; snapshot?: WindowsUiSnapshot; body?: string; conversationId?: string; completionVerified?: boolean; identity?: 'uuid' | 'titleOnly'; entry?: WorkspaceEntry; effectsStarted?: boolean; timings?: { initMs: number; actionMs: number } }
 const pathKey = (value: string) => win32.normalize(value).toLowerCase();
 const UI_REPORT_GRACE_MS = 5000;
 const initializationPrompt = (key: string) => `这是 Agent Control Bridge 的会话身份初始化，不执行工程任务。请只回复：ACB_INIT_${key}。`;
@@ -35,6 +35,8 @@ const hasPrompt = (page: NativeChatPage, prompt: string) => page.turns.some(turn
 // The worker sends this exact prompt only after observing a blank ordinary chat,
 // so its native readback is a durable receipt that survives Bridge restarts.
 const hasInitialization = (page: NativeChatPage, key: string) => hasPrompt(page, initializationPrompt(key));
+/** Exact UUID when the UI exposes one; otherwise only the worker's explicit titleOnly match (no UUID identity). */
+const uiIdentityMatches = (result: { conversationId?: string | null; identity?: string }, id: string) => result.conversationId === id || (!result.conversationId && result.identity === 'titleOnly');
 const operationKeyPattern = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 
 export function createWindowsNativeReadTools(config: BridgeConfig, carrierThreadId: string, createCodexThread?: WindowsNativeTools['createCodexThread']): WindowsNativeTools {
@@ -365,7 +367,8 @@ export function createWindowsNativeConversationHost(options: {
          !visible.messages.some(item=>item.role==='user' && item.sourceMessageId===user.id && item.text===prompt))throw new BridgeError('PROVENANCE','CDP final body lacks exact user/assistant identity or explicit completion');
       result={ok:true,conversationId:id,completionVerified:true,body:reply.text};
     } else result=await ui.call('chat-read-reply',{name:completed.thread.title,conversationId:id,prompt,mode:'gpt'},signal);
-    if(result.conversationId!==id || result.completionVerified!==true || !result.body?.trim())throw new BridgeError('PROVENANCE','Final GPT UI identity or completion is unverified');
+    // titleOnly: no UUID route in the desktop URI; title/composer matched, not a UUID identity.
+    if(!uiIdentityMatches(result,id) || result.completionVerified!==true || !result.body?.trim())throw new BridgeError('PROVENANCE','Final GPT UI identity or completion is unverified');
     const after=await native.readThread(id,signal),latest=after.turns[0],messages=latest?.items.filter(item=>item.type==='agentMessage') ?? [];
     if(after.thread.id!==id || after.thread.kind!=='chatgpt' || after.thread.title!==completed.thread.title || after.thread.status.type!=='idle' ||
         latest?.id!==turn.id || latest.status!=='completed' || latest.error || messages.length!==1 || messages[0].id!==replies[0].id)
@@ -373,7 +376,7 @@ export function createWindowsNativeConversationHost(options: {
     return {content:result.body,sourceConversationId:id,sourceConversationName:after.thread.title,sourceMessageId:messages[0].id,
       actualModel:null,actualReasoningEffort:null,complete:true,evidenceSource:'application-host' as const,
       completionEvidence:{source:options.gptReader?'visible-dom' as const:'windows-uia' as const,turnId:turn.id,userMessageId:turn.items.find(item=>item.type==='userMessage')!.id,
-        assistantMessageId:messages[0].id,observedAt:new Date().toISOString(),nativeCompleted:true as const,uiIdle:true as const,...(options.gptReader?{}:{replyActions:true as const})}};
+        assistantMessageId:messages[0].id,observedAt:new Date().toISOString(),nativeCompleted:true as const,uiIdle:true as const,...(options.gptReader?{}:{replyActions:true as const,uiIdentity:result.identity==='titleOnly'?'titleOnly' as const:'uuid' as const})}};
   };
   const ordinaryChat: OrdinaryChatHost = {
     async inspect() {return {source:'application-host',ordinaryChat:true,background:false,exactConversation:true,completeMessages:true,actualGenerationParameters:false,
@@ -383,8 +386,8 @@ export function createWindowsNativeConversationHost(options: {
       if(page.thread.id!==id || page.thread.kind!=='chatgpt')throw new BridgeError('PROVENANCE','Native conversation is not ChatGPT');
       if(!ordinaryIds.has(id)) {
         await authorize(page,'read',signal);
-        const snapshot=(await ui.call('chat-open',{name:page.thread.title,conversationId:id},signal)).snapshot!;
-        if(snapshot.conversationId!==id || !snapshot.ordinaryComposer)throw new BridgeError('PROVENANCE','Target is not the exact ordinary GPT conversation');
+        const opened=await ui.call('chat-open',{name:page.thread.title,conversationId:id},signal),snapshot=opened.snapshot!;
+        if(!uiIdentityMatches({conversationId:snapshot.conversationId ?? undefined,identity:opened.identity},id) || (opened.identity==='titleOnly' && snapshot.title!==page.thread.title) || !snapshot.ordinaryComposer)throw new BridgeError('PROVENANCE','Target is not the exact ordinary GPT conversation');
         ordinaryIds.add(id);
       }
       return {source:'application-host',kind:'ordinary-chat',conversationId:id,name:page.thread.title};
