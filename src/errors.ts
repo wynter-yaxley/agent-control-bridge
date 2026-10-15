@@ -1,5 +1,5 @@
-export type ErrorCode = 'AUTH' | 'INPUT' | 'CONFIG' | 'IPC_CONFIG' | 'OWNER' | 'PROVENANCE' | 'STATE' | 'CONFLICT' | 'DEPENDENCY' | 'UNSUPPORTED' | 'TIMEOUT' | 'EXECUTION' | 'IO';
-export const ERROR_CODES: readonly string[] = ['AUTH', 'INPUT', 'CONFIG', 'IPC_CONFIG', 'OWNER', 'PROVENANCE', 'STATE', 'CONFLICT', 'DEPENDENCY', 'UNSUPPORTED', 'TIMEOUT', 'EXECUTION', 'IO'];
+export type ErrorCode = 'FOCUS_REQUIRED' | 'AUTH' | 'INPUT' | 'CONFIG' | 'IPC_CONFIG' | 'OWNER' | 'PROVENANCE' | 'STATE' | 'CONFLICT' | 'DEPENDENCY' | 'UNSUPPORTED' | 'TIMEOUT' | 'EXECUTION' | 'IO';
+export const ERROR_CODES: readonly string[] = ['FOCUS_REQUIRED', 'AUTH', 'INPUT', 'CONFIG', 'IPC_CONFIG', 'OWNER', 'PROVENANCE', 'STATE', 'CONFLICT', 'DEPENDENCY', 'UNSUPPORTED', 'TIMEOUT', 'EXECUTION', 'IO'];
 export class BridgeError extends Error {
   readonly code: ErrorCode;
   constructor(code: ErrorCode, message: string) { super(message); this.name = 'BridgeError'; this.code = code; }

@@ -16,12 +16,6 @@ public static class AcbFolderControls {
  [DllImport("user32.dll")] static extern bool CloseDesktop(IntPtr handle);
  [DllImport("user32.dll",CharSet=CharSet.Unicode)] static extern bool GetUserObjectInformation(IntPtr handle,int index,StringBuilder text,int size,out int needed);
  public static bool Interactive() {var handle=OpenInputDesktop(0,false,1);if(handle==IntPtr.Zero)return false;try {var text=new StringBuilder(256);int needed;return GetUserObjectInformation(handle,2,text,512,out needed)&&text.ToString()=="Default";}finally {CloseDesktop(handle);}}
- [DllImport("user32.dll")] public static extern IntPtr GetDlgItem(IntPtr dialog,int id);
- [DllImport("user32.dll",CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr window,StringBuilder text,int count);
- [DllImport("user32.dll",CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr window,StringBuilder text,int count);
- [DllImport("user32.dll",CharSet=CharSet.Unicode,EntryPoint="SendMessageTimeoutW")] public static extern IntPtr SetText(IntPtr window,uint message,UIntPtr wparam,string text,uint flags,uint timeout,out UIntPtr result);
- [DllImport("user32.dll",CharSet=CharSet.Unicode,EntryPoint="SendMessageTimeoutW")] public static extern IntPtr GetText(IntPtr window,uint message,UIntPtr count,StringBuilder text,uint flags,uint timeout,out UIntPtr result);
- [DllImport("user32.dll",EntryPoint="SendMessageTimeoutW")] public static extern IntPtr Click(IntPtr window,uint message,UIntPtr wparam,IntPtr lparam,uint flags,uint timeout,out UIntPtr result);
 }
 /** Authorized foreground keyboard input (SendInput, Unicode packets). */
 public static class AcbInput {
@@ -31,9 +25,6 @@ public static class AcbInput {
  [StructLayout(LayoutKind.Sequential)] struct INPUT {public uint type;public UNION u;}
  [DllImport("user32.dll",SetLastError=true)] static extern uint SendInput(uint count,INPUT[] inputs,int size);
  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
- [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr window);
- [DllImport("user32.dll")] static extern bool IsIconic(IntPtr window);
- [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr window,int command);
  static INPUT Key(ushort vk,ushort scan,uint flags) {var input=new INPUT();input.type=1;input.u.ki.wVk=vk;input.u.ki.wScan=scan;input.u.ki.dwFlags=flags;return input;}
  static bool Send(System.Collections.Generic.List<INPUT> list) {var items=list.ToArray();return SendInput((uint)items.Length,items,Marshal.SizeOf(typeof(INPUT)))==items.Length;}
  // Unicode packets; a newline is Shift+Enter so the composer does not submit.
@@ -47,14 +38,6 @@ public static class AcbInput {
  }
  // Ctrl+A, Delete: removes only text this worker typed into a field that was empty.
  public static bool Clear() {var list=new System.Collections.Generic.List<INPUT>{Key(0x11,0,0),Key(0x41,0,0),Key(0x41,0,2),Key(0x11,0,2),Key(0x2E,0,0),Key(0x2E,0,2)};return Send(list);}
- // A lone Alt tap allows this process to move the existing window to the foreground.
- public static bool Front(IntPtr window) {
-  if (IsIconic(window)) ShowWindow(window,9);
-  if (GetForegroundWindow()==window) return true;
-  var list=new System.Collections.Generic.List<INPUT>{Key(0x12,0,0),Key(0x12,0,2)};Send(list);
-  SetForegroundWindow(window);System.Threading.Thread.Sleep(200);
-  return GetForegroundWindow()==window;
- }
 }
 '@
 [Console]::Error.WriteLine('ACB_UI_STAGE=worker-loaded')
@@ -65,6 +48,8 @@ function Respond($result) {$result.timings=@{initMs=$initMs;actionMs=$actionCloc
 $script:stage='input'
 $script:identity=$null
 $script:typed=$null
+$script:treeReadable=$true
+$script:inputMode=$null
 $mutex=$null
 $locked=$false
 try {
@@ -105,7 +90,18 @@ try {
   ([System.Windows.Automation.InvokePattern]$pattern).Invoke()
  }
  function Value($element) {return ([System.Windows.Automation.ValuePattern]$element.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)).Current.Value.Trim()}
- function Document {return Find $script:root 'Document' ''}
+ # The Chromium tree can be briefly unreadable: re-acquire the window and retry, at most 3 times.
+ function Document {
+  for ($attempt=0;$attempt -lt 3;$attempt++) {
+   $doc=Find $script:root 'Document' ''
+   if ($doc) {return $doc}
+   $script:treeReadable=$false
+   Start-Sleep -Milliseconds 700
+   $fresh=@(Get-Process -Name ChatGPT -ErrorAction SilentlyContinue | Where-Object {$_.MainWindowHandle -ne 0})
+   if ($fresh.Count -eq 1) {$script:root=[System.Windows.Automation.AutomationElement]::FromHandle($fresh[0].MainWindowHandle)}
+  }
+  return $null
+ }
  function ConversationId {
   $doc=Document
   $pattern=$null
@@ -157,12 +153,12 @@ try {
   if ($request.foregroundInput -ne $true) {throw 'AUTH'}
   if (-not [AcbFolderControls]::Interactive()) {throw 'OWNER'}
   $handle=[IntPtr]$window.MainWindowHandle
+  # The user keeps ChatGPT in front; this worker never takes the foreground itself.
   $script:stage='input-foreground';[Console]::Error.WriteLine("ACB_UI_STAGE=$script:stage")
-  if ([AcbInput]::GetForegroundWindow() -ne $handle) {try {$script:root.SetFocus()} catch {};Start-Sleep -Milliseconds 200}
-  if ([AcbInput]::GetForegroundWindow() -ne $handle -and -not [AcbInput]::Front($handle)) {throw 'OWNER'}
+  if ([AcbInput]::GetForegroundWindow() -ne $handle) {throw 'FOCUS_REQUIRED'}
   $script:stage='input-focus'
   $edit.SetFocus()
-  if (-not (Within 3000 {if (Focused $edit) {$true}})) {throw 'STATE'}
+  if (-not (Within 3000 {if (Focused $edit) {$true}})) {throw 'FOCUS_REQUIRED'}
   $script:stage='input-type';[Console]::Error.WriteLine("ACB_UI_STAGE=$script:stage")
   $script:typed=$edit
   for ($offset=0;$offset -lt $text.Length;$offset+=64) {
@@ -184,8 +180,10 @@ try {
   $edit=Within 10000 {FindComposer (Document)}
   if (-not $edit) {throw 'PROVENANCE'}
   $draft=ComposerText $edit
-  if ($draft -eq $prompt) {return}
+  # drafted: the user already wrote exactly this prompt; nothing is typed.
+  if ($draft -eq $prompt) {$script:inputMode='drafted';return}
   if ($draft) {throw 'CONFLICT'}
+  $script:inputMode='typed'
   TypeInto $edit $prompt
   $script:stage='chat-compose-verify';[Console]::Error.WriteLine("ACB_UI_STAGE=$script:stage")
   $written=Within 10000 {$current=FindComposer (Document);if ($current -and (ComposerText $current) -eq $prompt) {$current}}
@@ -253,7 +251,7 @@ try {
   if ($request.conversationId) {AssertConversation $request.conversationId}
   Respond @{ok=$true;snapshot=$snapshot};return
  }
- if ($request.operation -notin @('chat-send','chat-read-reply','chat-open-title','gpt-create','workspace-create')) {throw 'INPUT'}
+ if ($request.operation -notin @('chat-send','chat-read-reply','chat-open-title','gpt-create')) {throw 'INPUT'}
  $mutex=[Threading.Mutex]::new($false,'ACB_Desktop_Write_Lock')
  $locked=$mutex.WaitOne(0)
  if (-not $locked) {throw 'CONFLICT'}
@@ -285,65 +283,6 @@ try {
   Invoke $send
   Respond @{ok=$true;conversationId=(ConversationId)};return
  }
- if ($request.operation -eq 'workspace-create') {
-  $script:stage='workspace-add-button';[Console]::Error.WriteLine("ACB_UI_STAGE=$script:stage")
-  $condition=[System.Windows.Automation.AndCondition]::new([System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Button),[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::NameProperty,'添加新项目'))
-  $entries=@($script:root.FindAll([System.Windows.Automation.TreeScope]::Descendants,$condition))
-  if ($entries.Count -ne 1) {throw 'PROVENANCE'}
-  $scroll=$null
-  if ($entries[0].Current.IsOffscreen -and $entries[0].TryGetCurrentPattern([System.Windows.Automation.ScrollItemPattern]::Pattern,[ref]$scroll)) {([System.Windows.Automation.ScrollItemPattern]$scroll).ScrollIntoView();Start-Sleep -Milliseconds 500}
-  Invoke $entries[0]
-  $script:stage='workspace-create-dialog'
-  [void](Within 10000 {Find $script:root 'Edit' '' 'chatgpt-project-name'})
-  $dialog=Find $script:root 'Window' '创建项目';if (-not $dialog) {$dialog=$script:root}
-  $script:stage='workspace-name'
-  $nameEdit=Find $dialog 'Edit' '' 'chatgpt-project-name'
-  if (-not $nameEdit) {throw 'TIMEOUT'}
-  try {([System.Windows.Automation.ValuePattern]$nameEdit.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)).SetValue($request.name)} catch {}
-  if (-not (Within 3000 {if ((Value $nameEdit) -eq $request.name) {$true}})) {
-   if (Value $nameEdit) {throw 'CONFLICT'}
-   TypeInto $nameEdit $request.name
-   if (-not (Within 5000 {if ((Value $nameEdit) -eq $request.name) {$true}})) {throw 'STATE'}
-   $script:typed=$null
-  }
-  $script:stage='workspace-add'
-  $add=Within 5000 {Find $dialog 'Button' '添加'}
-  if (-not $add) {throw 'TIMEOUT'}
-  Invoke $add
-  $script:stage='folder-picker'
-  $picker=Within 10000 {Find $script:root 'Window' 'Select Project Root'}
-  if (-not $picker) {throw 'TIMEOUT'}
-  $pickerHandle=[IntPtr]$picker.Current.NativeWindowHandle
-  $script:stage='folder-edit'
-  $folderEdits=$picker.FindAll([System.Windows.Automation.TreeScope]::Descendants,[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::AutomationIdProperty,'1152'))
-  $folderEdit=@($folderEdits | Where-Object {$_.Current.ClassName -eq 'Edit' -and $_.Current.NativeWindowHandle -ne 0})[0]
-  if (-not $folderEdit) {throw 'PROVENANCE'}
-  $editHandle=[IntPtr]$folderEdit.Current.NativeWindowHandle
-  $result=[UIntPtr]::Zero
-  if ([AcbFolderControls]::SetText($editHandle,12,[UIntPtr]::Zero,$request.path,2,10000,[ref]$result) -eq [IntPtr]::Zero -or $result -eq [UIntPtr]::Zero) {throw 'IO'}
-  $buffer=[Text.StringBuilder]::new(4096)
-  if ([AcbFolderControls]::GetText($editHandle,13,[UIntPtr]4096,$buffer,2,10000,[ref]$result) -eq [IntPtr]::Zero -or $buffer.ToString() -ne $request.path) {throw 'PROVENANCE'}
-  $script:stage='folder-select'
-  $button=[AcbFolderControls]::GetDlgItem($pickerHandle,1)
-  $class=[Text.StringBuilder]::new(256);$label=[Text.StringBuilder]::new(256)
-  [void][AcbFolderControls]::GetClassName($button,$class,256);[void][AcbFolderControls]::GetWindowText($button,$label,256)
-  if ($class.ToString() -ne 'Button' -or $label.ToString() -ne '选择文件夹') {throw 'PROVENANCE'}
-  if ([AcbFolderControls]::Click($button,245,[UIntPtr]::Zero,[IntPtr]::Zero,2,10000,[ref]$result) -eq [IntPtr]::Zero) {throw 'IO'}
-  $script:stage='folder-picker-close'
-  if (-not (Within 10000 {if (-not (Find $script:root 'Window' 'Select Project Root')) {$true}})) {throw 'TIMEOUT'}
-  # Observed: the create dialog may close by itself after the folder pick; confirm only if it is still open.
-  $script:stage='workspace-confirm'
-  $confirm=Within 3000 {$open=Find $script:root 'Edit' '' 'chatgpt-project-name';if ($open) {@(Buttons '创建项目')[0]}}
-  if ($confirm) {Invoke $confirm}
-  $script:stage='folder-consent'
-  $trust=Within 5000 {Find $script:root 'Window' '信任此文件夹吗？'}
-  if ($trust) {
-   $folders=$trust.FindAll([System.Windows.Automation.TreeScope]::Descendants,[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::ListItem))
-   if ($folders.Count -ne 1 -or $folders.Item(0).Current.Name -ne $request.path) {throw 'PROVENANCE'}
-   Invoke (Find $trust 'Button' '信任文件夹')
-  }
-  Respond @{ok=$true;confirmed=($null -ne $confirm);trusted=($null -ne $trust)};return
- }
  $script:stage='chat-open'
  OpenChat $request.name
  if ($request.operation -eq 'chat-send') {
@@ -358,7 +297,7 @@ try {
    if (-not $send) {ClearTyped;throw 'TIMEOUT'}
    AssertConversation $request.conversationId
    Invoke $send
-   Respond @{ok=$true;conversationId=(ConversationId);identity=$script:identity};return
+   Respond @{ok=$true;conversationId=(ConversationId);identity=$script:identity;inputMode=$script:inputMode};return
  }
  if ($request.operation -eq 'chat-read-reply') {
    $script:stage='gpt-reply';[Console]::Error.WriteLine("ACB_UI_STAGE=$script:stage")
@@ -376,8 +315,8 @@ try {
  }
 } catch {
  $code=$_.Exception.Message
- if ($code -notin @('INPUT','OWNER','IO','TIMEOUT','CONFLICT','PROVENANCE','STATE','AUTH')) {$code='EXECUTION'}
- Respond @{ok=$false;code=$code;stage=$script:stage;errorType=$_.Exception.GetType().Name;line=$_.InvocationInfo.ScriptLineNumber;privateDiagnosticsOmitted=$true}
+ if ($code -notin @('INPUT','OWNER','IO','TIMEOUT','CONFLICT','PROVENANCE','STATE','AUTH','FOCUS_REQUIRED')) {$code='EXECUTION'}
+ Respond @{ok=$false;code=$code;stage=$script:stage;treeReadable=$script:treeReadable;errorType=$_.Exception.GetType().Name;line=$_.InvocationInfo.ScriptLineNumber;privateDiagnosticsOmitted=$true}
 } finally {
  if ($locked) {$mutex.ReleaseMutex()}
  if ($mutex) {$mutex.Dispose()}

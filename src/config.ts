@@ -42,6 +42,6 @@ export function loadConfig(path?: string, overrides: { carrierThreadId?: string;
     workspaceRoot: text(raw.workspaceRoot, 'workspaceRoot'),
     foregroundInput: overrides.foregroundInput === true || raw.foregroundInput === true,
     nativeInterface: { timeoutMs: int(native.timeoutMs, 30000, 1, 60000, 'nativeInterface.timeoutMs'), maxFrameBytes: int(native.maxFrameBytes, 2097152, 4096, 4194304, 'nativeInterface.maxFrameBytes'),
-      maxCandidates: int(native.maxCandidates, 16, 1, 32, 'nativeInterface.maxCandidates') },
+      maxCandidates: int(native.maxCandidates, 32, 1, 32, 'nativeInterface.maxCandidates') },
   };
 }

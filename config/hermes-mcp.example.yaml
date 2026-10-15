@@ -10,6 +10,6 @@ mcp_servers:
     connect_timeout: 30
     supports_parallel_tool_calls: false
     tools:
-      include: [acb_threads, acb_projects, acb_workspace_create, acb_gpt_create, acb_codex_create, acb_gpt_open, acb_gpt_send, acb_codex_send]
+      include: [acb_threads, acb_projects, acb_workspace_create, acb_codex_create, acb_codex_find, acb_codex_send, acb_gpt_create, acb_gpt_open, acb_gpt_send]
       resources: false
       prompts: false

@@ -1,61 +1,59 @@
 # Agent Control Bridge
 
-让 Hermes 通过 MCP 创建本地 Workspace 与原生项目、新建 ChatGPT / Codex 对话、自动打开目标对话、转发 Prompt 并取回真实回复。不管理任务、不保存台账。
+让 Hermes 通过 MCP 创建本地 Workspace 与 Codex 项目、新建 Codex / ChatGPT 对话、定位目标对话、转发 Prompt 并取回真实回复。不管理任务、不保存台账。
 
 [English](README_EN.md)
 
 ## 两条链路
 
-| 目标 | 发送 | 回复 |
+| 目标 | 通道 | 说明 |
 |---|---|---|
-| ChatGPT 普通对话 | 按 ID 打开目标后，用前台 SendInput 写入输入框（需 `--allow-foreground-input`），核对写入内容后由 UIA 点击“发送” | 先由 Codex 桌面的 Native IPC `read_thread` 确认该轮完成，再用 UIA 读取与该 Prompt 对应的完整回复 |
-| Codex 对话 | 本机 `codex app-server`：`thread/resume` + `turn/start` | 轮询 `thread/read` 直到该轮结束，返回最终回复（不含 commentary） |
+| Codex | 本机 `codex.exe app-server`（stdio） | `project/create`、`thread/start {cwd}`、`turn/start`、`thread/read`、`thread/name/set`、`thread/search`、`thread/unarchive`。按 threadId 直接操作，不切换界面 |
+| ChatGPT | 桌面应用 UIA + Codex 桌面 Native IPC（`read_thread` / `list_threads` / `set_thread_title`） | 当前对话已显示目标时直接使用；否则仅在标题于原生清单中唯一时点击侧栏条目打开。输入：用户已写好相同草稿时只点击发送；否则在 `--allow-foreground-input` 授权且 ChatGPT 已在前台时用 SendInput 键入 |
 
 ## 基础保护
 
-- **目标识别**：ChatGPT 目标标题来自 Native IPC 按会话 ID 读取的结果，而不是当前窗口。UIA 先核对当前对话标题，不一致立即退出，不碰输入框和草稿；页面暴露 `/c/<UUID>` 时再按 UUID 精确核对，否则为 `titleOnly`（不保证 UUID 身份，结果中返回 `uiIdentity`）。需要由用户先在 ChatGPT 桌面应用里打开目标对话。
-- **不重复发送**：发送前读取目标对话的最新一轮；如果它已经是同一条 Prompt，就不再发送，只读取它的回复（仍在运行时返回 CONFLICT）。超时后用同一 Prompt 再调用一次即可取回回复。对话正忙时拒绝发送。
-- **不误写**：输入框里有其他未发送草稿时拒绝；同一时间只执行一次发送；Codex 的命令/文件审批请求一律拒绝。
-- **只读宿主校验**：Native IPC 只允许 `list_threads` 与 `read_thread`，并核对管道另一端是同一用户、签名有效的 Codex 进程。
+- **目标识别**：ChatGPT 标题以原生按 ID 读取为准；同名对话存在、或目标不在最近清单中时直接失败。页面无 `/c/<UUID>` 路由时结果为 `titleOnly`。发送后用原生回读确认 Prompt 落在目标 ID。新建对话以一次性标记确认 ID，不按标题推断。
+- **输入**：不夺取前台；ChatGPT 不在前台或输入框无焦点时返回 `FOCUS_REQUIRED`。每段键入前核对前台窗口与焦点，换行用 Shift+Enter，键入后内容须一致才点击发送；失败时只清除自己键入的内容。不使用剪贴板、CDP 或 `ValuePattern.SetValue`（对该输入框无效）。
+- **不重复发送**：目标最新一轮已是同一 Prompt 时只读取回复；`TIMEOUT` 后用同一 Prompt 再调用即可读取。忙碌对话、他人草稿一律拒绝；同一时间只执行一个调用。
+- **Codex 审批**：桥不代替用户批准命令或文件操作，审批请求会被拒绝并在结果中计数（`approvalsDeclined`）。
 
-## 安装与配置
+## 配置
 
-需要 Windows、Node >= 24.19.0、已登录的 ChatGPT 与 Codex 桌面应用，以及本机 `codex.exe`。
-
-    npm ci
-    npm run build
-
-配置（见 [config.example.json](config.example.json)；旧版配置文件也可直接使用，未用到的字段被忽略）：
+需要 Windows、Node >= 24.19.0、已登录的 ChatGPT 与 Codex 桌面应用和本机 `codex.exe`。`npm ci && npm run build`。
 
 | 字段 | 含义 |
 |---|---|
 | `carrierThreadId` | 任意一个已有 Codex 对话 ID，作为 Native IPC 调用上下文 |
-| `codexExecutable` | `codex.exe` 的绝对路径 |
+| `codexExecutable` | `codex.exe` 绝对路径 |
 | `workspaceRoot` | 新建 Workspace 的默认父目录 |
-| `foregroundInput` | `true` 表示用户授权前台 SendInput 输入（也可用 `--allow-foreground-input`） |
-| `timeoutMs` | 单次等待回复的上限，默认 300000 |
-| `uiPollMs` | UIA / 回读轮询间隔，默认 1000 |
+| `foregroundInput` | `true` 表示用户授权 SendInput 键入（或 `--allow-foreground-input`） |
+| `timeoutMs` / `uiPollMs` | 单次等待上限（默认 300000）/ 轮询间隔（默认 1000） |
+| `nativeInterface.maxCandidates` | 原生管道候选上限，默认 32 |
 
-也可用命令行参数覆盖：`node dist/mcp.js --config <文件> --carrier-thread <Codex ID> --codex <codex.exe>`。
+启动：`node dist/mcp.js --config <文件> [--carrier-thread <ID>] [--codex <codex.exe>] [--allow-foreground-input]`。
 
 ## MCP 工具
 
 | 工具 | 输入 | 输出 |
 |---|---|---|
-| `acb_threads` | 无 | 最近的原生对话 `id / kind / title / projectId` |
+| `acb_threads` | 无 | 最近原生对话 `id / kind / title / projectId / cwd` |
 | `acb_projects` | 无 | 原生项目 `projectId / projectKind / label / path` |
-| `acb_workspace_create` | `name`, `path?` | 建目录（默认 `workspaceRoot/name`）并通过“添加新项目”登记原生项目；已登记的目录直接关联 |
-| `acb_gpt_create` | `title`, `projectId?` | 新建普通 ChatGPT 对话，按一次性标记确认 ID，原生命名（可移入项目） |
-| `acb_codex_create` | `projectId`, `title`, `prompt?` | 原生 `create_thread` 在本地项目中新建 Codex 对话，返回首轮回复 |
-| `acb_gpt_open` | `conversationId` | 按 ID 打开并核对当前显示的对话 |
-| `acb_gpt_send` | `conversationId`, `prompt` | `reply`, `turnId`, `title`, `uiIdentity`, `alreadySent` |
-| `acb_codex_send` | `threadId`, `prompt` | `reply`, `turnId`, `messageIds`, `alreadySent` |
+| `acb_workspace_create` | `name`, `path?` | 建目录并 `project/create`：`projectId / name / roots / path / directoryCreated`；同一目录重复调用返回同一项目 |
+| `acb_codex_create` | `cwd`, `title`, `prompt?` | 新 Codex 对话（首轮已应答以便持久化）：`threadId / reply / title` |
+| `acb_codex_find` | `searchTerm` | `thread/search` 命中的 `threadId / name / cwd` |
+| `acb_codex_send` | `threadId`, `prompt` | `reply / turnId / messageIds / alreadySent / approvalsDeclined` |
+| `acb_gpt_create` | `title` | 新普通 ChatGPT 对话 `conversationId / title` |
+| `acb_gpt_open` | `conversationId` | `title / navigation`（`current` 或 `sidebar`） |
+| `acb_gpt_send` | `conversationId`, `prompt` | `reply / turnId / inputMode / uiIdentity / navigation / alreadySent` |
 
-失败时返回 `{ ok:false, code, message }`；`TIMEOUT` 表示已发送但回复未就绪，不会自动重发。Hermes 接入样例见 [config/hermes-mcp.example.yaml](config/hermes-mcp.example.yaml)。
+多对话转发：把一个工具返回的 `reply` 作为另一个对话的 `prompt` 发送即可。失败时返回 `{ ok:false, code, message }`。
 
-## 开发
+ChatGPT 原生「项目」的创建与归入：当前没有经实测可用的接口，未实现。
+
+## 开发与验收
 
     npm run typecheck
     npm test
 
-测试只使用模拟对象。Windows 实机验收：`node scripts/acceptance.mjs --config <文件> --carrier-thread <ID> --codex <codex.exe> --name <新 Workspace 名>`，依次执行创建 Workspace → GPT/Codex 对话 → 打开 → 发送 → 回复，首个失败即停止。
+测试只使用模拟对象。Windows 实机验收：`node scripts/acceptance.mjs --config <文件> --carrier-thread <ID> --codex <codex.exe> --name <新 Workspace 名> --path <隔离目录>`，按 Workspace → Codex 项目与对话 → 搜索 → GPT 对话 → 定位 → 收发 → 转发 顺序执行，首个失败即停止。

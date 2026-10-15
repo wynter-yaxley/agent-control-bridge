@@ -91,8 +91,8 @@ export class NativeReadWorker {
   }
 }
 type ReadTool = 'list_threads' | 'read_thread' | 'list_projects';
-type WriteTool = 'create_thread' | 'set_thread_title' | 'navigate_to_codex_page' | 'move_thread_to_project';
-const WRITES: WriteTool[] = ['create_thread', 'set_thread_title', 'navigate_to_codex_page', 'move_thread_to_project'];
+type WriteTool = 'set_thread_title';
+const WRITES: WriteTool[] = ['set_thread_title'];
 export interface NativeThread { id: string; kind: string; title: string; projectId: string | null; cwd: string | null }
 export interface NativeProject { projectId: string; projectKind: string; label: string; path: string; hostId: string }
 const sharedWorker = new NativeReadWorker();
@@ -145,22 +145,7 @@ export class NativeClient {
     const result = await this.call('list_projects', {});
     return (Array.isArray(result.projects) ? result.projects : []).map(object).map(row => ({ projectId: String(row.projectId), projectKind: String(row.projectKind), label: String(row.label ?? ''), path: String(row.path ?? ''), hostId: String(row.hostId ?? '') }));
   }
-  /** Native create_thread in one local project; the prompt starts its first turn. */
-  async createThread(input: { projectId: string; title: string; prompt: string }): Promise<{ threadId?: string }> {
-    const result = await this.call('create_thread', { title: input.title, prompt: input.prompt, target: { type: 'project', projectId: input.projectId, environment: { type: 'local' } } });
-    const threadId = result.threadId ?? object(result.thread ?? {}).id;
-    return { threadId: typeof threadId === 'string' && UUID.test(threadId) ? threadId : undefined };
-  }
   async setThreadTitle(threadId: string, source: 'chatgpt' | 'codex', title: string): Promise<void> { await this.call('set_thread_title', { source, threadId: identifier(threadId), title }); }
-  async moveToProject(threadId: string, source: 'chatgpt' | 'codex', projectId: string): Promise<void> { await this.call('move_thread_to_project', { threadId: identifier(threadId), source, projectId }); }
-  /** Opens a conversation by ID through the app's own navigation tool, using only the
-   * arguments its advertised schema names (threadId, optional source). */
-  async navigate(threadId: string, source: 'chatgpt' | 'codex'): Promise<void> {
-    const schema = (await this.catalog()).navigate_to_codex_page, properties = object(schema?.properties ?? {});
-    const required = Array.isArray(schema?.required) ? schema.required.map(String) : [];
-    if (!schema || !properties.threadId || required.some(name => !['threadId', 'source'].includes(name))) throw new BridgeError('UNSUPPORTED', `navigate_to_codex_page does not take a thread ID (fields: ${Object.keys(properties).join(',') || 'none'}; required: ${required.join(',') || 'none'})`);
-    await this.call('navigate_to_codex_page', { threadId: identifier(threadId), ...(properties.source ? { source } : {}) });
-  }
   async readThread(threadId: string): Promise<NativeChatPage> {
     const result = await this.call('read_thread', { threadId: identifier(threadId), turnLimit: 1, includeOutputs: true, maxOutputCharsPerItem: 20000 });
     // The current host nests turns in thread; older builds returned them beside it.

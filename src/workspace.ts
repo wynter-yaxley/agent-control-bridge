@@ -1,43 +1,24 @@
+import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, statSync } from 'node:fs';
 import { isAbsolute, join, normalize } from 'node:path';
-import { setTimeout as delay } from 'node:timers/promises';
 import { BridgeError } from './errors.ts';
-import type { NativeProject } from './native.ts';
-import type { UiResult } from './windows-ui.ts';
+import { createProject, type CodexOptions } from './codex.ts';
 
-export interface WorkspaceDeps {
-  native: { listProjects(): Promise<NativeProject[]> };
-  ui: { call(operation: 'workspace-create', fields: { name: string; path: string }, signal: AbortSignal): Promise<UiResult> };
-  root: string | null;
-  timeoutMs: number;
-  pollMs: number;
-}
-export interface Workspace { projectId: string; label: string; path: string; directoryCreated: boolean; projectCreated: boolean }
-const key = (path: string) => { const value = normalize(path).replace(/[\\/]+$/, ''); return process.platform === 'win32' ? value.toLowerCase() : value; };
+export interface Workspace { projectId: string; name: string; path: string; roots: unknown; directoryCreated: boolean }
+/** Stable UUID-shaped key per directory, so a repeated create returns the same project. */
+const keyFor = (path: string) => { const hex = createHash('sha256').update((process.platform === 'win32' ? path.toLowerCase() : path)).digest('hex');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20, 32)}`; };
 
-/** Creates (or reuses) a local directory and its native ChatGPT/Codex project. A
- * project already registered for the directory is associated, never duplicated. */
-export async function createWorkspace(deps: WorkspaceDeps, name: string, path?: string): Promise<Workspace> {
+/** Creates a local workspace directory (or uses an existing one) and registers it as a
+ * Codex project through the App Server (project/create). */
+export async function createWorkspace(options: CodexOptions & { root: string | null; create?: typeof createProject }, name: string, path?: string): Promise<Workspace> {
   if (typeof name !== 'string' || !name.trim() || name.length > 100 || /[<>:"/\\|?*\x00-\x1f]/.test(name) || /[. ]$/.test(name)) throw new BridgeError('INPUT', 'Workspace name is not a valid folder name');
-  if (!path && !deps.root) throw new BridgeError('CONFIG', 'Give a path or configure workspaceRoot');
-  const target = normalize(path ?? join(deps.root!, name)).replace(/[\\/]+$/, '');
+  if (!path && !options.root) throw new BridgeError('CONFIG', 'Give a path or configure workspaceRoot');
+  const target = normalize(path ?? join(options.root!, name)).replace(/(?<!^[A-Za-z]:)[\\/]+$/, '');
   if (!isAbsolute(target)) throw new BridgeError('INPUT', 'Workspace path must be absolute');
   let directoryCreated = false;
   if (existsSync(target)) { if (!statSync(target).isDirectory()) throw new BridgeError('CONFLICT', 'Workspace path exists and is not a directory'); }
   else { mkdirSync(target, { recursive: true }); directoryCreated = true; }
-  const registered = async () => {
-    const found = (await deps.native.listProjects()).filter(project => project.projectKind === 'local' && key(project.path) === key(target));
-    if (found.length > 1) throw new BridgeError('PROVENANCE', 'Several native projects use this directory');
-    return found[0];
-  };
-  const existing = await registered();
-  if (existing) return { projectId: existing.projectId, label: existing.label, path: existing.path, directoryCreated, projectCreated: false };
-  await deps.ui.call('workspace-create', { name, path: target }, AbortSignal.timeout(deps.timeoutMs + 60000));
-  const deadline = Date.now() + 60000;
-  for (;;) {
-    const project = await registered();
-    if (project) return { projectId: project.projectId, label: project.label, path: project.path, directoryCreated, projectCreated: true };
-    if (Date.now() >= deadline) throw new BridgeError('TIMEOUT', 'The project dialog finished but no native project lists this directory; check the app before retrying');
-    await delay(deps.pollMs);
-  }
+  const project = await (options.create ?? createProject)(options, name, target, keyFor(target));
+  return { ...project, path: target, directoryCreated };
 }
