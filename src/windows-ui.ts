@@ -5,7 +5,7 @@ import type { BridgeConfig } from './config.ts';
 import { BridgeError, ERROR_CODES, controlledProcessEnv, type ErrorCode } from './errors.ts';
 
 export interface WindowsUiSnapshot { title: string; text: string; ordinaryComposer: boolean; pid: number; conversationId: string | null }
-export interface UiResult { inputMode?: 'drafted' | 'typed'; treeReadable?: boolean; ok: boolean; code?: string; stage?: string; errorType?: string; line?: number; snapshot?: WindowsUiSnapshot; body?: string; conversationId?: string | null; completionVerified?: boolean; identity?: 'uuid' | 'titleOnly'; project?: string | null }
+export interface UiResult { inputMode?: 'drafted' | 'typed'; treeReadable?: boolean; ok: boolean; code?: string; stage?: string; errorType?: string; line?: number; snapshot?: WindowsUiSnapshot; body?: string; conversationId?: string | null; completionVerified?: boolean; identity?: 'uuid' | 'titleOnly'; project?: string | null; submission?: 'attempted' | 'sent' | null; diagnostics?: Record<string, unknown> | null }
 const UI_REPORT_GRACE_MS = 5000;
 
 /** Fixed UIA operations on the existing ChatGPT window (windows-native-worker.ps1). */
@@ -63,7 +63,7 @@ export class WindowsNativeUi {
         if(!output.includes('\n'))return;
         try {
           const result=JSON.parse(output) as UiResult;
-          if(!result.ok)throw new BridgeError(ERROR_CODES.includes(result.code ?? '')?result.code as ErrorCode:'EXECUTION',`Native UI operation failed at ${result.stage}${result.treeReadable === false ? ' (UIA tree was unreadable)' : ''} (${result.errorType}, line ${result.line})${result.code === 'FOCUS_REQUIRED' ? '; bring the ChatGPT window to the front with the target chat open, or write the prompt as a draft' : ''}`);
+          if(!result.ok)throw new BridgeError(ERROR_CODES.includes(result.code ?? '')?result.code as ErrorCode:'EXECUTION',`Native UI operation failed at ${result.stage}${result.treeReadable === false ? ' (UIA tree was unreadable)' : ''} (${result.errorType}, line ${result.line})${result.code === 'FOCUS_REQUIRED' ? '; Windows refused activation or the foreground/composer focus changed; no further input was sent' : ''}`, { stage: result.stage, ...(result.submission ? { submission: result.submission } : {}), ...(result.diagnostics ? { diagnostics: result.diagnostics } : {}) });
           finish(undefined,result);
         }catch(error){finish(error instanceof BridgeError?error:new BridgeError('IO','Windows UI worker returned an unreadable result'));}
       };

@@ -25,7 +25,7 @@ while ($null -ne ($inputText=[Console]::In.ReadLine())) {
  if($inputText.Length -gt 300000){throw 'IO'}
  $inputData=$inputText | ConvertFrom-Json
  Fields $inputData @('requestJson','timeoutMs','maxFrameBytes','maxCandidates','expectedProcessId','expectedProcessStartedAt')
- foreach($spec in @(@('timeoutMs',1,60000),@('maxFrameBytes',4096,4194304),@('maxCandidates',1,32))){$value=$inputData.($spec[0]);if($value -isnot [int] -or $value -lt $spec[1] -or $value -gt $spec[2]){throw 'IO'}}
+ foreach($spec in @(@('timeoutMs',1,60000),@('maxFrameBytes',4096,4194304),@('maxCandidates',1,128))){$value=$inputData.($spec[0]);if($value -isnot [int] -or $value -lt $spec[1] -or $value -gt $spec[2]){throw 'IO'}}
  $script:deadline=[DateTime]::UtcNow.AddMilliseconds($inputData.timeoutMs)
  if($inputData.requestJson -isnot [string] -or ($null -ne $inputData.expectedProcessId -and ($inputData.expectedProcessId -isnot [int] -or $inputData.expectedProcessId -lt 1))){throw 'IO'}
  if(($null -eq $inputData.expectedProcessId) -ne ($null -eq $inputData.expectedProcessStartedAt)){throw 'IO'}
@@ -46,7 +46,7 @@ while ($null -ne ($inputText=[Console]::In.ReadLine())) {
   if($params.namespace -ne 'codex_app' -or $params.callerSource -ne 'codex' -or $params.threadId -notmatch $uuid -or $params.callId -cnotmatch ('^'+$prefix+'[a-f0-9-]{36}$') -or $params.turnId -cnotmatch ('^'+$prefix+'[a-f0-9-]{36}$')){throw 'IO'}
   $a=$params.arguments
   $text={param($value,[int]$max) $value -is [string] -and $value.Trim().Length -gt 0 -and $value.Length -le $max -and $value -notmatch '[\x00-\x08\x0b\x0c\x0e-\x1f]'}
-  if($params.tool -eq 'list_threads'){Fields $a @('limit');if($a.limit -isnot [int] -or $a.limit -notin @(1,30)){throw 'IO'}}
+  if($params.tool -eq 'list_threads'){Fields $a @('limit');if($a.limit -isnot [int] -or $a.limit -lt 1 -or $a.limit -gt 50){throw 'IO'}}
   elseif($params.tool -eq 'read_thread'){
    Fields $a @('threadId','turnLimit','includeOutputs','maxOutputCharsPerItem')
    if($a.threadId -isnot [string] -or $a.threadId -notmatch $uuid -or $a.turnLimit -isnot [int] -or $a.turnLimit -ne 1 -or $a.includeOutputs -isnot [bool] -or $a.maxOutputCharsPerItem -isnot [int] -or -not (($a.includeOutputs -ceq $false -and $a.maxOutputCharsPerItem -eq 0) -or ($a.includeOutputs -ceq $true -and $a.maxOutputCharsPerItem -eq 20000))){throw 'IO'}
@@ -71,9 +71,14 @@ public static class AcbNativeReadonly {
  $foreground=[AcbNativeReadonly]::GetForegroundWindow()
  $session=(Get-Process -Id $PID).SessionId
  $sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+ # Once verified, address the same pipe and peer directly. Rechecking all open
+ # per-chat pipes on every poll needlessly exhausts the request budget. The
+ # connected handle's PID and process start time are still checked below.
+ if($null -ne $hostIdentity){$selected=$hostIdentity}else{
  $script:stage='pipe-discovery'
  $names=@([System.IO.Directory]::GetFiles('\\.\pipe\') | ForEach-Object{[System.IO.Path]::GetFileName($_)} | Where-Object{$_ -match '^codex-browser-use-[a-f0-9-]+$'})
- if($names.Count -eq 0 -or $names.Count -gt $inputData.maxCandidates){throw 'OWNER'}
+ if($names.Count -eq 0){throw 'OWNER'}
+ if($names.Count -gt $inputData.maxCandidates){$script:stage='pipe-discovery-budget';throw 'IO'}
  $script:stage='host-verification'
  $verified=@()
  foreach($name in $names){
@@ -97,6 +102,8 @@ public static class AcbNativeReadonly {
  $processIds=@($verified | ForEach-Object{$_.processId} | Sort-Object -Unique)
  if($processIds.Count -ne 1 -or ($null -ne $inputData.expectedProcessId -and $processIds[0] -ne $inputData.expectedProcessId)){throw 'OWNER'}
  $selected=$verified[0]
+ }
+ if($null -ne $inputData.expectedProcessId -and $selected.processId -ne $inputData.expectedProcessId){throw 'OWNER'}
  if($null -ne $hostIdentity -and ($hostIdentity.processId -ne $selected.processId -or $hostIdentity.startedAt -ne $selected.startedAt)){throw 'OWNER'}
  $hostIdentity=$selected
  if($null -ne $inputData.expectedProcessStartedAt -and $selected.startedAt -ne $inputData.expectedProcessStartedAt){throw 'OWNER'}

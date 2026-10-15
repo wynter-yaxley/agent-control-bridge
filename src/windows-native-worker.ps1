@@ -25,16 +25,21 @@ public static class AcbInput {
  [StructLayout(LayoutKind.Sequential)] struct INPUT {public uint type;public UNION u;}
  [DllImport("user32.dll",SetLastError=true)] static extern uint SendInput(uint count,INPUT[] inputs,int size);
  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+ [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr window);
+ [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr window);
+ [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr window,int command);
  static INPUT Key(ushort vk,ushort scan,uint flags) {var input=new INPUT();input.type=1;input.u.ki.wVk=vk;input.u.ki.wScan=scan;input.u.ki.dwFlags=flags;return input;}
  static bool Send(System.Collections.Generic.List<INPUT> list) {var items=list.ToArray();return SendInput((uint)items.Length,items,Marshal.SizeOf(typeof(INPUT)))==items.Length;}
  // Unicode packets; a newline is Shift+Enter so the composer does not submit.
- public static bool Type(string text) {
-  var list=new System.Collections.Generic.List<INPUT>();
+ public static bool Type(string text,IntPtr window) {
   foreach (char c in text) {
+   if (GetForegroundWindow()!=window) return false;
+   var list=new System.Collections.Generic.List<INPUT>();
    if (c=='\n') {list.Add(Key(0x10,0,0));list.Add(Key(0x0D,0,0));list.Add(Key(0x0D,0,2));list.Add(Key(0x10,0,2));}
    else {list.Add(Key(0,c,4));list.Add(Key(0,c,6));}
+   if (!Send(list)) return false;
   }
-  return Send(list);
+  return true;
  }
  // Ctrl+A, Delete: removes only text this worker typed into a field that was empty.
  public static bool Clear() {var list=new System.Collections.Generic.List<INPUT>{Key(0x11,0,0),Key(0x41,0,0),Key(0x41,0,2),Key(0x11,0,2),Key(0x2E,0,0),Key(0x2E,0,2)};return Send(list);}
@@ -48,6 +53,15 @@ function Respond($result) {$result.timings=@{initMs=$initMs;actionMs=$actionCloc
 $script:stage='input'
 $script:identity=$null
 $script:typed=$null
+$script:typedText=''
+$script:composer=$null
+$script:composerKey=$null
+$script:composeTitle=$null
+$script:focusLost=$false
+$script:foregroundChecked=$false
+$script:submission=$null
+$script:diagnostics=$null
+$script:gptProven=$false
 $script:treeReadable=$true
 $script:inputMode=$null
 $script:landing=$false
@@ -107,34 +121,59 @@ try {
  function ConversationId {
   $doc=Document
   $pattern=$null
-  if (-not $doc.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern,[ref]$pattern)) {return $null}
+  if (-not $doc -or -not $doc.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern,[ref]$pattern)) {return $null}
   # Public accessibility URI only; generic app://index.html contains no identity.
   $uri=[Uri]$pattern.Current.Value
   if ($uri.AbsolutePath -match '^/c/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})$') {return $Matches[1]}
   return $null
  }
- # Bounded reverse walk for the ordinary composer: it sits after every message in
- # document order, so visit last children first and stop after 400 nodes or the
- # deadline instead of a FindFirst over the whole conversation.
+ function ComposerUsable($edit) {
+  if (-not $edit) {return $false}
+  try {
+   $c=$edit.Current
+   return ($c.ControlType.ProgrammaticName -eq 'ControlType.Edit' -and $c.Name -in @('询问 ChatGPT','使用 ChatGPT Work','Ask ChatGPT','Message ChatGPT') -and $c.IsEnabled -and -not $c.IsOffscreen -and $c.IsKeyboardFocusable -and -not $c.BoundingRectangle.IsEmpty)
+  } catch [System.Windows.Automation.ElementNotAvailableException] {return $false}
+ }
+ # Filter hidden/disabled edits before choosing. Keep the same RuntimeId during an
+ # input transaction; a replacement must be independently rebound by CurrentComposer.
  function FindComposer($doc,$walker=[System.Windows.Automation.TreeWalker]::ControlViewWalker) {
-  # The blank new-chat page has no thread and its composer sits mid-document: search forward.
-  if ($script:landing) {foreach ($name in @('使用 ChatGPT Work','询问 ChatGPT')) {$hit=Find $doc 'Edit' $name;if ($hit) {return $hit}};return $null}
+  if (-not $doc) {return $null}
+  if ($script:landing) {
+   $edits=$doc.FindAll([System.Windows.Automation.TreeScope]::Descendants,[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Edit))
+   $live=@($edits | Where-Object {ComposerUsable $_})
+   if ($live.Count -gt 1) {$script:stage='chat-compose-ambiguous';throw 'STATE'}
+   if ($live.Count -eq 1) {return $live[0]};return $null
+  }
   $stack=[System.Collections.Generic.Stack[object]]::new();$visited=0
+  $found=$null
   $last=$walker.GetLastChild($doc);if ($null -ne $last) {$stack.Push($last)}
   while ($stack.Count -gt 0 -and $visited -lt 400) {
    if ([DateTime]::UtcNow -ge $deadline) {throw 'TIMEOUT'}
    $node=$stack.Pop();$visited++
-   # A blank new chat names its composer by the placeholder "使用 ChatGPT Work".
-   if ($node.Current.ControlType.ProgrammaticName -eq 'ControlType.Edit' -and $node.Current.Name -in @('询问 ChatGPT','使用 ChatGPT Work')) {return $node}
+   if (ComposerUsable $node) {
+    if ($found) {$script:stage='chat-compose-ambiguous';throw 'STATE'}
+    $found=$node
+    # A bound, live editor is the only editor this transaction may reuse.
+    if ($script:composerKey -and (ElementKey $node) -eq $script:composerKey) {return $node}
+   }
+   # Once the composer is found, do not descend into the (potentially huge) transcript.
+   if ($found -and $node.Current.ControlType.ProgrammaticName -ne 'ControlType.Edit') {continue}
    $previous=$walker.GetPreviousSibling($node);if ($null -ne $previous) {$stack.Push($previous)}
    $child=$walker.GetLastChild($node);if ($null -ne $child) {$stack.Push($child)}
   }
-  return $null
+  return $found
  }
  function Normalize([string]$text) {return ($text -replace "`r`n","`n" -replace [char]0xA0,' ').Trim()}
  # The empty composer reports its placeholder (its Name, e.g. "询问 ChatGPT" plus a newline) as value.
  function ComposerText($edit) {
-  $value=Normalize (Value $edit);$name=Normalize $edit.Current.Name
+  $pattern=$null
+  # Chromium's contenteditable is multiline. TextPattern reads its actual text;
+  # ValuePattern on some builds prepends the accessible placeholder.
+  if ($edit.TryGetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern,[ref]$pattern)) {
+   $script:textSource='TextPattern'
+   $value=Normalize $pattern.DocumentRange.GetText(65537)
+  } else {$script:textSource='ValuePattern';$value=Normalize (Value $edit)}
+  $name=Normalize $edit.Current.Name
   if (-not $name) {return $value}
   if ($value -eq $name) {return ''}
   if ($value.StartsWith("$name`n")) {return $value.Substring($name.Length+1).Trim()}
@@ -143,13 +182,49 @@ try {
  # Bounded poll: returns $null after $ms (never longer than the request budget).
  function Within([int]$ms,$predicate) {
   $until=[DateTime]::UtcNow.AddMilliseconds([Math]::Min($ms,[int]$request.timeoutMs))
+  if ($deadline -and $deadline -lt $until) {$until=$deadline}
   do {$value=& $predicate;if ($value) {return $value};Start-Sleep -Milliseconds ([Math]::Min(500,[int]$request.pollMs))} while ([DateTime]::UtcNow -lt $until)
   return $null
  }
  function Focused($edit) {
   $focused=[System.Windows.Automation.AutomationElement]::FocusedElement;$walker=[System.Windows.Automation.TreeWalker]::ControlViewWalker
-  for ($i=0;$i -lt 4 -and $null -ne $focused;$i++) {if ([System.Windows.Automation.Automation]::Compare($focused,$edit)) {return $true};$focused=$walker.GetParent($focused)}
+  for ($i=0;$i -lt 8 -and $null -ne $focused;$i++) {if ((ElementKey $focused) -eq (ElementKey $edit)) {return $true};$focused=$walker.GetParent($focused)}
   return $false
+ }
+ function AssertForeground {
+  if ($script:focusLost -or [AcbInput]::GetForegroundWindow() -ne $script:handle) {$script:focusLost=$true;throw 'FOCUS_REQUIRED'}
+ }
+ function EnsureForeground {
+  if ($script:foregroundChecked) {AssertForeground;return}
+  $script:stage='input-foreground'
+  if ([AcbInput]::GetForegroundWindow() -ne $script:handle) {
+   if ($request.foregroundInput -ne $true) {throw 'FOCUS_REQUIRED'}
+   if (-not $script:gptProven) {throw 'OWNER'}
+   $script:stage='input-activate'
+   if ([AcbInput]::IsIconic($script:handle)) {[void][AcbInput]::ShowWindowAsync($script:handle,9)}
+   # Windows may refuse. No simulated Alt key, focus-lock changes or retry loop.
+   [void][AcbInput]::SetForegroundWindow($script:handle)
+   if (-not (Within 2000 {if ([AcbInput]::GetForegroundWindow() -eq $script:handle) {$true}})) {throw 'FOCUS_REQUIRED'}
+  }
+  $script:foregroundChecked=$true
+  AssertForeground
+ }
+ function CurrentComposer([string]$expected) {
+  AssertForeground
+  $doc=Document
+  if (-not $doc -or $doc.Current.Name -ne $script:composeTitle) {$script:stage='conversation-identity';throw 'PROVENANCE'}
+  $current=FindComposer $doc
+  if (-not $current) {return $null}
+  if ((ElementKey $current) -ne $script:composerKey) {
+   # A UIA refresh can replace the edit. Never select a different field merely
+   # because it has the same name: it must be the sole visible, focused edit,
+   # on the same page, containing exactly our previously verified text.
+   if (-not (Focused $current)) {$script:focusLost=$true;throw 'FOCUS_REQUIRED'}
+   if ((ComposerText $current) -ne (Normalize $expected)) {$script:stage='chat-compose-replaced';throw 'STATE'}
+   $script:composerKey=ElementKey $current
+  }
+  $script:composer=$current
+  return $current
  }
  # Types into $edit with foreground SendInput, only when the request carries the user's
  # authorization. The ChatGPT window must be in front and $edit focused before every chunk.
@@ -157,33 +232,38 @@ try {
   $script:stage='input-authorize'
   if ($request.foregroundInput -ne $true) {throw 'AUTH'}
   if (-not [AcbFolderControls]::Interactive()) {throw 'OWNER'}
-  $handle=$script:handle
-  # The user keeps ChatGPT in front; this worker never takes the foreground itself.
-  $script:stage='input-foreground';[Console]::Error.WriteLine("ACB_UI_STAGE=$script:stage")
-  if ([AcbInput]::GetForegroundWindow() -ne $handle) {throw 'FOCUS_REQUIRED'}
+  EnsureForeground
   $script:stage='input-focus'
   $edit.SetFocus()
-  if (-not (Within 3000 {if (Focused $edit) {$true}})) {throw 'FOCUS_REQUIRED'}
+  if (-not (Within 3000 {AssertForeground;$now=CurrentComposer '';if ($now -and (Focused $now)) {$true}})) {throw 'FOCUS_REQUIRED'}
   $script:stage='input-type';[Console]::Error.WriteLine("ACB_UI_STAGE=$script:stage")
   $script:typed=$edit
-  for ($offset=0;$offset -lt $text.Length;$offset+=64) {
+  for ($offset=0;$offset -lt $text.Length;) {
    # The user moved the window or focus: stop rather than type elsewhere.
-   if ([AcbInput]::GetForegroundWindow() -ne $handle -or -not (Focused $edit)) {throw 'CONFLICT'}
-   if (-not [AcbInput]::Type($text.Substring($offset,[Math]::Min(64,$text.Length-$offset)))) {throw 'IO'}
-   Start-Sleep -Milliseconds 30
+   $edit=CurrentComposer $script:typedText
+   if (-not $edit -or -not (Focused $edit)) {$script:focusLost=$true;throw 'FOCUS_REQUIRED'}
+   $count=[Math]::Min(8,$text.Length-$offset)
+   # Do not split a surrogate pair across chunks.
+   if ($offset+$count -lt $text.Length -and [char]::IsHighSurrogate($text[$offset+$count-1])) {$count--}
+   $chunk=$text.Substring($offset,$count)
+   if (-not [AcbInput]::Type($chunk,$script:handle)) {AssertForeground;throw 'IO'}
+   $script:typedText+=$chunk;$script:typed=$edit;$offset+=$count
+   Start-Sleep -Milliseconds 10
   }
  }
  # After a failure, remove only what this worker typed (the field was empty before).
  function ClearTyped {
   if ($null -eq $script:typed) {return}
-  try {if ([AcbInput]::GetForegroundWindow() -eq $script:handle -and (Focused $script:typed)) {[void][AcbInput]::Clear()}} catch {}
+  try {if (-not $script:focusLost) {$edit=CurrentComposer $script:typedText;if ($edit -and (Focused $edit) -and (ComposerText $edit) -eq (Normalize $script:typedText)) {[void][AcbInput]::Clear()}}} catch {}
   $script:typed=$null
  }
  # Writes $prompt into an empty ordinary composer and requires it to read back within ~10 s.
  function Compose([string]$prompt) {
   $script:stage='chat-compose-find';[Console]::Error.WriteLine("ACB_UI_STAGE=$script:stage")
   $edit=Within 10000 {FindComposer (Document)}
-  if (-not $edit) {throw 'PROVENANCE'}
+  if (-not $edit) {throw 'STATE'}
+  $script:composer=$edit;$script:composerKey=ElementKey $edit;$script:composeTitle=(Document).Current.Name
+  $beforeKey=$script:composerKey
   $draft=ComposerText $edit
   # drafted: the user already wrote exactly this prompt; nothing is typed.
   if ($draft -eq $prompt) {$script:inputMode='drafted';return}
@@ -191,14 +271,28 @@ try {
   $script:inputMode='typed'
   TypeInto $edit $prompt
   $script:stage='chat-compose-verify';[Console]::Error.WriteLine("ACB_UI_STAGE=$script:stage")
-  $written=Within 10000 {$current=FindComposer (Document);if ($current -and (ComposerText $current) -eq $prompt) {$current}}
-  if (-not $written) {$after=FindComposer (Document);$script:stage=if (-not $after -or -not (ComposerText $after)) {'chat-compose-verify-empty'} else {'chat-compose-verify-different'};throw 'STATE'}
-  $script:typed=$null
+  $written=Within 10000 {$current=CurrentComposer $prompt;if ($current -and -not (Focused $current)) {$script:focusLost=$true;throw 'FOCUS_REQUIRED'};if ($current -and (ComposerText $current) -eq $prompt) {$current}}
+  if (-not $written) {
+   $after=CurrentComposer $prompt;$actual=if ($after) {ComposerText $after} else {''}
+   $script:diagnostics=@{beforeRuntimeId=$beforeKey;afterRuntimeId=$(if ($after) {ElementKey $after} else {$null});expectedLength=$prompt.Length;actualLength=$actual.Length;textSource=$script:textSource;visible=($null -ne $after);focused=($after -and (Focused $after))}
+   $script:stage=if (-not $actual) {'chat-compose-verify-empty'} else {'chat-compose-verify-different'};throw 'STATE'
+  }
  }
- function Buttons([string]$name,[switch]$offscreen) {
+ function VerifyComposed([string]$prompt) {
+  $edit=CurrentComposer $prompt
+  if (-not $edit -or (ComposerText $edit) -ne $prompt) {$script:stage='chat-compose-before-send';throw 'STATE'}
+  if ($script:inputMode -eq 'typed' -and -not (Focused $edit)) {$script:focusLost=$true;throw 'FOCUS_REQUIRED'}
+ }
+ function Buttons([string]$name,[switch]$offscreen,$scope=$script:root) {
   $condition=[System.Windows.Automation.AndCondition]::new([System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Button),[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::NameProperty,$name))
   $pattern=$null
-  return @($script:root.FindAll([System.Windows.Automation.TreeScope]::Descendants,$condition) | Where-Object {($offscreen -or -not $_.Current.IsOffscreen) -and $_.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern,[ref]$pattern)})
+  return @($scope.FindAll([System.Windows.Automation.TreeScope]::Descendants,$condition) | Where-Object {$_.Current.IsEnabled -and ($offscreen -or -not $_.Current.IsOffscreen) -and $_.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern,[ref]$pattern)})
+ }
+ function Sidebar {
+  $groups=$script:root.FindAll([System.Windows.Automation.TreeScope]::Descendants,[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Group))
+  $nav=@($groups | Where-Object {$_.Current.Name -in @('首页','Home','导航','Navigation') -and -not $_.Current.IsOffscreen -and (WindowMode $_) -eq 'ChatGPT'})
+  if ($nav.Count -ne 1) {$script:stage='gpt-sidebar';throw 'STATE'}
+  return $nav[0]
  }
  function Prefixed($scope,[string]$prefix) {
   return @($scope.FindAll([System.Windows.Automation.TreeScope]::Descendants,[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Button)) | Where-Object {$_.Current.Name.StartsWith($prefix)})
@@ -222,7 +316,6 @@ try {
   $kinds=@($wins | ForEach-Object {[pscustomobject]@{Window=$_;Kind=(WindowKind $_)}})
   $gpt=@($kinds | Where-Object {$_.Kind -eq 'ChatGPT'})
   if ($gpt.Count -eq 1) {return $gpt[0].Window}
-  if (-not $strict -and $gpt.Count -eq 0 -and $kinds.Count -eq 1 -and -not $kinds[0].Kind) {return $kinds[0].Window}
   throw 'OWNER'
  }
  # A named chat is used in the one window showing that title, never in a Codex window.
@@ -230,14 +323,14 @@ try {
   if ($request.name -and $request.operation -ne 'chat-open-title') {
    $titled=@($all | Where-Object {$doc=Find $_ 'Document' '';$doc -and $doc.Current.Name -eq $request.name})
    if ($titled.Count -gt 1) {throw 'PROVENANCE'}
-   if ($titled.Count -eq 1) {$kind=WindowKind $titled[0];if ($kind -and $kind -ne 'ChatGPT') {throw 'OWNER'};return $titled[0]}
+   if ($titled.Count -eq 1) {$kind=WindowKind $titled[0];if ($kind -ne 'ChatGPT') {throw 'OWNER'};return $titled[0]}
   }
   return PickGptWindow $all -strict:($request.operation -eq 'gpt-create')
  }
  # The blank GPT new-chat page: GPT mode (-strict: the switch must be shown) and no message yet.
  function GptLanding([switch]$strict) {
   $mode=WindowMode $script:root
-  if (($strict -and $mode -ne 'ChatGPT') -or ($mode -and $mode -ne 'ChatGPT')) {return $false}
+  if (($mode -and $mode -ne 'ChatGPT') -or (-not $script:gptProven)) {return $false}
   $doc=Document
   return ($doc -and $null -ne (FindComposer $doc) -and -not (Find $doc 'Text' '你说：') -and -not (Find $doc 'Text' '您说：') -and -not (Find $doc 'Text' 'ChatGPT 说：'))
  }
@@ -330,6 +423,8 @@ try {
  $script:stage='chatgpt-window'
  $script:root=PickWindow
  $script:handle=[IntPtr]$script:root.Current.NativeWindowHandle
+ $script:gptProven=((WindowKind $script:root) -eq 'ChatGPT')
+ if ($script:handle -eq [IntPtr]::Zero -or -not $script:gptProven) {throw 'OWNER'}
  if ($request.operation -eq 'snapshot') {
   $script:stage='current-gpt-view'
   $snapshot=Snapshot
@@ -341,12 +436,14 @@ try {
  $mutex=[Threading.Mutex]::new($false,'ACB_Desktop_Write_Lock')
  $locked=$mutex.WaitOne(0)
  if (-not $locked) {throw 'CONFLICT'}
+ if ($request.operation -in @('chat-send','gpt-create','chat-open-title')) {EnsureForeground}
  if ($request.operation -eq 'chat-open-title') {
   # Fallback navigation: only a sidebar chat entry whose title is unique is opened.
   # Entries scrolled out of the sidebar view count too, so uniqueness covers them all.
   $script:stage='open-title'
   $entries=Buttons $request.name -offscreen
   if ($entries.Count -ne 1) {throw 'PROVENANCE'}
+  AssertForeground
   Invoke $entries[0] -offscreen
   if (-not (Within 10000 {$doc=Document;if ($doc -and $doc.Current.Name -eq $request.name) {$true}})) {throw 'TIMEOUT'}
   Respond @{ok=$true;conversationId=(ConversationId)};return
@@ -355,24 +452,27 @@ try {
   # $script:root is the single window known to be ChatGPT (PickWindow -strict); its own
   # visible "新聊天" button is used, never the Codex window's.
   $script:stage='gpt-new-chat';[Console]::Error.WriteLine("ACB_UI_STAGE=$script:stage")
-  $new=Buttons '新聊天'
+  if ($request.foregroundInput -ne $true) {throw 'AUTH'}
+  $new=Buttons '新聊天' -scope (Sidebar)
   if ($new.Count -ne 1) {throw 'PROVENANCE'}
-  Invoke $new[0]
+  AssertForeground;Invoke $new[0]
   # Only an ordinary ChatGPT chat is used; the mode is read, never switched by guess.
   $script:stage='gpt-mode'
-  if ((Within 10000 {WindowMode $script:root}) -ne 'ChatGPT') {throw 'STATE'}
+  if ((WindowMode $script:root) -in @('Codex')) {throw 'OWNER'}
   $script:stage='gpt-blank'
   $script:landing=$true
-  if (-not (Within 10000 {GptLanding -strict})) {throw 'PROVENANCE'}
-  if ($request.project) {ChooseProject $request.project;$script:stage='gpt-blank';if (-not (Within 10000 {GptLanding -strict})) {throw 'PROVENANCE'}}
+  if (-not (Within 10000 {AssertForeground;GptLanding -strict})) {throw 'STATE'}
+  if ((ComposerText (FindComposer (Document)))) {throw 'CONFLICT'}
+  if ($request.project) {ChooseProject $request.project;$script:stage='gpt-blank';if (-not (Within 10000 {AssertForeground;GptLanding -strict})) {throw 'STATE'}}
   try {Compose (Normalize $request.prompt)} catch {ClearTyped;throw}
   # Still the blank GPT page of this window right before the identity marker is sent.
   $script:stage='gpt-send-button'
   if (-not (GptLanding)) {ClearTyped;throw 'PROVENANCE'}
   $send=Within 10000 {Find (Document) 'Button' '发送'}
   if (-not $send) {ClearTyped;throw 'TIMEOUT'}
-  Invoke $send
-  Respond @{ok=$true;conversationId=(ConversationId);project=$request.project};return
+  VerifyComposed (Normalize $request.prompt)
+  $script:submission='attempted';Invoke $send;$script:submission='sent';$script:typed=$null
+  Respond @{ok=$true;conversationId=(ConversationId);project=$request.project;submission=$script:submission};return
  }
  $script:stage='chat-open'
  OpenChat $request.name
@@ -387,7 +487,8 @@ try {
    $send=Within 10000 {Find (Document) 'Button' '发送'}
    if (-not $send) {ClearTyped;throw 'TIMEOUT'}
    AssertConversation $request.conversationId
-   Invoke $send
+   VerifyComposed (Normalize $request.prompt)
+   $script:submission='attempted';Invoke $send;$script:submission='sent';$script:typed=$null
    Respond @{ok=$true;conversationId=(ConversationId);identity=$script:identity;inputMode=$script:inputMode};return
  }
  if ($request.operation -eq 'chat-read-reply') {
@@ -405,9 +506,12 @@ try {
    Respond @{ok=$true;body=$body;conversationId=(ConversationId);completionVerified=$true;identity=$script:identity};return
  }
 } catch {
+ $failureStage=$script:stage
+ if ($null -ne $script:typed) {ClearTyped}
+ $script:stage=$failureStage
  $code=$_.Exception.Message
  if ($code -notin @('INPUT','OWNER','IO','TIMEOUT','CONFLICT','PROVENANCE','STATE','AUTH','FOCUS_REQUIRED')) {$code='EXECUTION'}
- Respond @{ok=$false;code=$code;stage=$script:stage;treeReadable=$script:treeReadable;errorType=$_.Exception.GetType().Name;line=$_.InvocationInfo.ScriptLineNumber;privateDiagnosticsOmitted=$true}
+ Respond @{ok=$false;code=$code;stage=$script:stage;treeReadable=$script:treeReadable;errorType=$_.Exception.GetType().Name;line=$_.InvocationInfo.ScriptLineNumber;diagnostics=$script:diagnostics;submission=$script:submission;privateDiagnosticsOmitted=$true}
 } finally {
  if ($locked) {$mutex.ReleaseMutex()}
  if ($mutex) {$mutex.Dispose()}

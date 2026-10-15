@@ -29,8 +29,9 @@ You coordinate; the desktop apps do the work. Use the ACB tools for every ChatGP
 
 ## Foreground and the user's keyboard
 
-- `acb_gpt_send` and `acb_gpt_create` type into the ChatGPT window. Before calling them, tell the user to bring ChatGPT to the front and not to type until you report back. Never try to switch windows yourself.
-- On `FOCUS_REQUIRED`, ask the user to bring ChatGPT to the front, then call once more.
+- `--allow-foreground-input` authorizes ACB to restore a minimized, verified ChatGPT window and try to activate it once before typing. Tell the user that ChatGPT may come to the front and that switching away stops input. No manual switching is required for each prompt. Without this authorization, ACB never activates or types; an identical draft can only be submitted while ChatGPT is already in front.
+- ACB verifies the actual Windows foreground handle and composer focus. On `FOCUS_REQUIRED` (Windows refused activation, or the user switched window/focus), stop. Do not loop or try to take focus back. Partial text may remain in the composer and is not submitted.
+- GPT creation uses only the verified ChatGPT window's left-sidebar New chat button. Success requires the exact initialization marker's ID, completion, title readback and agreement with the app page. If an error has `status: "partial"`, report `conversationId`, `requestedTitle`, `title` and `stage`; read that conversation before further action. Do not call create again or resend an initialization marker, even if its title is still New chat.
 - Codex tools and the list/find tools run in the background and do not disturb the user.
 
 ## When a tool fails
@@ -41,8 +42,9 @@ Read the `code`, act once, and stop if it fails again:
 |---|---|---|
 | `TIMEOUT` | The reply is not finished | Later call again with the **same** prompt: it returns the reply and is not resent. Never reword and resend. |
 | `CONFLICT` | The conversation is busy, or the user has a draft | Wait, or ask the user. |
-| `PROVENANCE` | The target cannot be proven (same title, not in the sidebar, project not confirmed) | Ask the user to open that chat in ChatGPT or choose a unique title. Do not guess. |
-| `FOCUS_REQUIRED`, `AUTH` | ChatGPT not in front, or typing not authorized | Tell the user. |
+| `PROVENANCE` | Conversation identity, title uniqueness, persistence or project cannot be confirmed | Report the known ID and any partial completion. Do not guess or create a replacement. The native inventory has a host limit of 50 non-pinned chats and no pagination; sidebar sorting can keep a new chat outside it. |
+| `STATE` | Blank-page recognition or exact composer text verification failed | Report the stage and diagnostics; do not resend. |
+| `FOCUS_REQUIRED`, `AUTH` | Activation/focus failed, or foreground input is not authorized | Stop and tell the user; never repeatedly activate the window. |
 | `OWNER`, `DEPENDENCY`, `CONFIG`, `IO` | An app is not running or not found | Call `acb_status` once and pass its `fix` to the user. |
 | `EXECUTION` with `approvalsDeclined` | Codex needed an approval | Tell the user to approve in the Codex app; the bridge never approves. |
 

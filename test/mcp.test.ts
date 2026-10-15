@@ -8,7 +8,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 test('mcp: the server starts with no configuration and declares its tools and instructions', async () => {
   const client = new Client({ name: 'acb-test', version: '1' });
   await client.connect(new StdioClientTransport({ command: process.execPath, args: [fileURLToPath(new URL('../src/mcp.ts', import.meta.url))],
-    env: { PATH: '', ACB_CODEX: '', ACB_CONFIG: '' }, stderr: 'pipe' }));
+    env: { PATH: '', LOCALAPPDATA: '', ACB_CODEX: '', ACB_CONFIG: '' }, stderr: 'pipe' }));
   try {
     const tools = (await client.listTools()).tools;
     assert.deepEqual(tools.map(tool => tool.name).sort(), ['acb_codex_create', 'acb_codex_find', 'acb_codex_send', 'acb_gpt_create', 'acb_gpt_open', 'acb_gpt_send', 'acb_projects', 'acb_status', 'acb_threads', 'acb_workspace_create']);

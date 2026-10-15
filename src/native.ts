@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { BridgeError, controlledProcessEnv } from './errors.ts';
 
-/** Native IPC reads of the signed Codex desktop host: list_threads and read_thread only. */
+/** Native IPC against the signed, same-user Codex desktop host. */
 type JsonObject = Record<string, unknown>;
 export interface NativeChatPage {
   thread: { id: string; kind: string; title: string; status: { type: string } };
@@ -132,9 +132,14 @@ export class NativeClient {
     catch (error) { if (tool && WRITES.includes(tool as WriteTool)) return { text: String(object(text[0]).text).slice(0, 2000) }; if (error instanceof BridgeError) throw error; throw new BridgeError('IO', 'Native tool response JSON is invalid'); }
   }
   async listThreads(): Promise<NativeThread[]> {
-    const result = await this.call('list_threads', { limit: 30 });
-    return [...(Array.isArray(result.pinnedThreads) ? result.pinnedThreads : []), ...(Array.isArray(result.threads) ? result.threads : [])].map(object)
+    // The desktop catalog supports at most 50 non-pinned rows and has no cursor.
+    // Results follow the user's sidebar sorting; a newly created chat is not
+    // necessarily first. Callers must inspect every row, or read an exposed ID.
+    const result = await this.call('list_threads', { limit: 50 });
+    if (result.nextCursor) throw new BridgeError('IO', 'Native inventory requires pagination that this host does not support');
+    const rows = [...(Array.isArray(result.pinnedThreads) ? result.pinnedThreads : []), ...(Array.isArray(result.threads) ? result.threads : [])].map(object)
       .map(row => ({ id: String(row.id), kind: String(row.kind), title: String(row.title ?? ''), projectId: typeof row.projectId === 'string' ? row.projectId : null, cwd: typeof row.cwd === 'string' ? row.cwd : null }));
+    return [...new Map(rows.map(row => [row.id, row])).values()];
   }
   async catalog(): Promise<Record<string, JsonObject>> {
     const tools = (await this.call(null, {})).tools;

@@ -40,12 +40,12 @@ function W([string]$id,$kind) {[pscustomobject]@{Id=$id;Kind=$kind;Buttons=@('�
  soleUnknown=${attempt("(PickGptWindow @(W 'x' $null)).Id")}
  soleUnknownStrict=${attempt("(PickGptWindow @(W 'x' $null) -strict).Id")}
 } | ConvertTo-Json -Compress`);
-  assert.deepEqual(result, { both: 'gpt', codexOnly: 'ERR:OWNER', codexAndUnknown: 'ERR:OWNER', twoGpt: 'ERR:OWNER', soleUnknown: 'x', soleUnknownStrict: 'ERR:OWNER' });
+  assert.deepEqual(result, { both: 'gpt', codexOnly: 'ERR:OWNER', codexAndUnknown: 'ERR:OWNER', twoGpt: 'ERR:OWNER', soleUnknown: 'ERR:OWNER', soleUnknownStrict: 'ERR:OWNER' });
 });
 
 test('window: the identity marker is typed and sent only on a blank GPT new-chat page', { skip: !available }, () => {
   const result = pwsh(`${fn('GptLanding')}
-$script:root=$null
+$script:root=$null;$script:gptProven=$true
 function WindowMode($w) {$script:mode}
 function Document {[pscustomobject]@{}}
 function FindComposer($d) {if ($script:composer) {'edit'} else {$null}}
@@ -60,7 +60,9 @@ function Case($mode,$composer,$messages,[switch]$strict) {$script:mode=$mode;$sc
  hasReply=(Case 'ChatGPT' $true @('ChatGPT 说：'))
  noComposer=(Case 'ChatGPT' $false @() -strict)
 } | ConvertTo-Json -Compress`);
-  assert.deepEqual(result, { gpt: true, codex: false, noSwitchStrict: false, noSwitchBeforeSend: true, hasMessage: false, hasReply: false, noComposer: false });
+  // The mode switch may disappear after sidebar navigation; the window was
+  // already proven to be ChatGPT before navigation, so this is still a blank page.
+  assert.deepEqual(result, { gpt: true, codex: false, noSwitchStrict: true, noSwitchBeforeSend: true, hasMessage: false, hasReply: false, noComposer: false });
 });
 
 test('project: only the menu item that appeared is chosen, and success needs the button to read the project back', { skip: !available }, () => {
@@ -89,4 +91,50 @@ function Case([string]$current,$items,[bool]$selects) {
   assert.deepEqual([result.onlySidebar.outcome, result.onlySidebar.chosen], ['ERR:PROVENANCE', '']);
   assert.deepEqual([result.twoInMenu.outcome, result.twoInMenu.chosen], ['ERR:PROVENANCE', '']);
   assert.deepEqual([result.already.outcome, result.already.expanded], ['ok', 0]);
+});
+
+test('foreground: authorization gates restore/activation; denial and a later user switch never retry activation', { skip: !available }, () => {
+  const result = pwsh(`Add-Type -TypeDefinition @'
+using System;
+public static class AcbInput {
+ public static IntPtr Foreground=new IntPtr(2); public static bool Allow=false; public static int Attempts=0, Restores=0;
+ public static IntPtr GetForegroundWindow(){return Foreground;}
+ public static bool SetForegroundWindow(IntPtr w){Attempts++;if(Allow)Foreground=w;return Allow;}
+ public static bool IsIconic(IntPtr w){return true;}
+ public static bool ShowWindowAsync(IntPtr w,int c){Restores++;return true;}
+}
+'@
+${fn('Within')}${fn('AssertForeground')}${fn('EnsureForeground')}
+$request=[pscustomobject]@{timeoutMs=20;pollMs=1;foregroundInput=$false}
+$script:handle=[IntPtr]1;$script:gptProven=$true;$script:focusLost=$false;$script:foregroundChecked=$false
+$unauthorized=${attempt("EnsureForeground;'ok'")};$before=[AcbInput]::Attempts
+$request.foregroundInput=$true
+$denied=${attempt("EnsureForeground;'ok'")};$deniedCount=[AcbInput]::Attempts
+[AcbInput]::Allow=$true
+$activated=${attempt("EnsureForeground;'ok'")}
+$again=${attempt("EnsureForeground;'ok'")};$successCount=[AcbInput]::Attempts
+[AcbInput]::Foreground=[IntPtr]2
+$switched=${attempt("EnsureForeground;'ok'")}
+@{unauthorized=$unauthorized;before=$before;denied=$denied;deniedCount=$deniedCount;activated=$activated;again=$again;successCount=$successCount;switched=$switched;finalCount=[AcbInput]::Attempts} | ConvertTo-Json -Compress`);
+  assert.deepEqual(result, { unauthorized: 'ERR:FOCUS_REQUIRED', before: 0, denied: 'ERR:FOCUS_REQUIRED', deniedCount: 1, activated: 'ok', again: 'ok', successCount: 2, switched: 'ERR:FOCUS_REQUIRED', finalCount: 2 });
+});
+
+test('composer binding: a refreshed RuntimeId needs the same page, focus and exact prior text', { skip: !available }, () => {
+  const result = pwsh(`${fn('CurrentComposer')}
+function AssertForeground {}
+function Document {[pscustomobject]@{Current=@{Name=$script:title}}}
+function FindComposer($doc) {$script:edit}
+function ElementKey($edit) {$edit.Key}
+function Focused($edit) {$script:focused}
+function ComposerText($edit) {$edit.Text}
+function Normalize($t) {$t.Trim()}
+function Case($title,$focused,$text) {
+ $script:composeTitle='target';$script:composerKey='old';$script:title=$title;$script:focused=$focused;$script:edit=@{Key='new';Text=$text}
+ @{outcome=${attempt("[void](CurrentComposer 'our prefix');'ok'")};key=$script:composerKey}
+}
+@{refreshed=(Case 'target' $true 'our prefix');different=(Case 'target' $true 'another draft');blurred=(Case 'target' $false 'our prefix');otherPage=(Case 'other' $true 'our prefix')} | ConvertTo-Json -Compress`);
+  assert.deepEqual(result.refreshed, { outcome: 'ok', key: 'new' });
+  assert.deepEqual(result.different, { outcome: 'ERR:STATE', key: 'old' });
+  assert.deepEqual(result.blurred, { outcome: 'ERR:FOCUS_REQUIRED', key: 'old' });
+  assert.deepEqual(result.otherPage, { outcome: 'ERR:PROVENANCE', key: 'old' });
 });
