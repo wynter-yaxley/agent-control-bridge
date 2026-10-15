@@ -40,3 +40,19 @@ test('UIA composer lookup: a missing composer or an expired deadline stops withi
   assert.equal(missing.found, null); assert.equal(missing.error, null); assert.ok(missing.calls <= 1 + 2 * 400, String(missing.calls));
   assert.equal(findComposer(thread, '[DateTime]::UtcNow.AddMinutes(-1)').error, 'TIMEOUT');
 });
+
+const helpers = ['Normalize', 'ComposerText', 'Within'].map(name => new RegExp(`\\n function ${name}\\([\\s\\S]*?\\n(?= function )`).exec(source)![0]).join('');
+test('UIA composer text: the placeholder reads as empty; a write that never reads back stops within its bound', { skip: !available }, () => {
+  const script = `${helpers}
+function Value($e) {$e.V}
+$request=[pscustomobject]@{timeoutMs=300000;pollMs=100}
+$edit=@{Current=@{Name='询问 ChatGPT'}}
+$cases=@(\"询问 ChatGPT\`n\",'询问 ChatGPT',\"询问 ChatGPT\`n[TEST] prompt\",\"[TEST] prompt\`r\`n\",'') | ForEach-Object {$edit.V=$_;ComposerText $edit}
+$clock=[Diagnostics.Stopwatch]::StartNew();$miss=Within 1500 {$null}
+@{texts=$cases;miss=$miss;ms=$clock.ElapsedMilliseconds} | ConvertTo-Json -Compress`;
+  const result = spawnSync(shell, ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], { encoding: 'utf8', windowsHide: true, timeout: 60000 });
+  assert.equal(result.status, 0, result.stderr);
+  const parsed = JSON.parse(result.stdout);
+  assert.deepEqual(parsed.texts, ['', '', '[TEST] prompt', '[TEST] prompt', '']);
+  assert.equal(parsed.miss, null); assert.ok(parsed.ms >= 1400 && parsed.ms < 5000, String(parsed.ms));
+});

@@ -65,12 +65,6 @@ try {
   ([System.Windows.Automation.InvokePattern]$pattern).Invoke()
  }
  function Value($element) {return ([System.Windows.Automation.ValuePattern]$element.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)).Current.Value.Trim()}
- function SetValue($scope,[string]$name,[string]$id,[string]$text) {
-  if (-not [AcbFolderControls]::Interactive()) {throw 'OWNER'}
-  $edit=Wait {Find $scope 'Edit' $name $id}
-  ([System.Windows.Automation.ValuePattern]$edit.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)).SetValue($text)
-  [void](Wait { $current=Find $scope 'Edit' $name $id; if ($current -and (Value $current) -eq $text) {$current} })
- }
  function Document {return Find $script:root 'Document' ''}
  function ConversationId {
   $doc=Document
@@ -94,6 +88,21 @@ try {
    $previous=$walker.GetPreviousSibling($node);if ($null -ne $previous) {$stack.Push($previous)}
    $child=$walker.GetLastChild($node);if ($null -ne $child) {$stack.Push($child)}
   }
+  return $null
+ }
+ function Normalize([string]$text) {return ($text -replace "`r`n","`n" -replace [char]0xA0,' ').Trim()}
+ # The empty composer reports its placeholder (its Name, e.g. "询问 ChatGPT" plus a newline) as value.
+ function ComposerText($edit) {
+  $value=Normalize (Value $edit);$name=Normalize $edit.Current.Name
+  if (-not $name) {return $value}
+  if ($value -eq $name) {return ''}
+  if ($value.StartsWith("$name`n")) {return $value.Substring($name.Length+1).Trim()}
+  return $value
+ }
+ # Bounded poll: returns $null after $ms (never longer than the request budget).
+ function Within([int]$ms,$predicate) {
+  $until=[DateTime]::UtcNow.AddMilliseconds([Math]::Min($ms,[int]$request.timeoutMs))
+  do {$value=& $predicate;if ($value) {return $value};Start-Sleep -Milliseconds ([Math]::Min(500,[int]$request.pollMs))} while ([DateTime]::UtcNow -lt $until)
   return $null
  }
  function AssertConversation([string]$id) {
@@ -160,14 +169,22 @@ try {
  OpenChat $request.name
  if ($request.operation -eq 'chat-send') {
    $script:stage='chat-compose-find';[Console]::Error.WriteLine("ACB_UI_STAGE=$script:stage")
-   $composer='询问 ChatGPT'
-   $edit=Wait {Find (Document) 'Edit' $composer}
-   $draft=Value $edit
-   if ($draft -and $draft -ne $edit.Current.Name -and $draft -ne $request.prompt) {throw 'CONFLICT'}
+   $prompt=Normalize $request.prompt
+   $edit=Within 10000 {FindComposer (Document)}
+   if (-not $edit) {throw 'PROVENANCE'}
+   $draft=ComposerText $edit
+   if ($draft -and $draft -ne $prompt) {throw 'CONFLICT'}
    $script:stage='chat-compose-set';[Console]::Error.WriteLine("ACB_UI_STAGE=$script:stage")
    AssertConversation $request.conversationId
    if ((Document).Current.Name -ne $request.name) {throw 'PROVENANCE'}
-   if ($draft -ne $request.prompt) {SetValue (Document) $composer '' $request.prompt}
+   if ($draft -ne $prompt) {
+    if (-not [AcbFolderControls]::Interactive()) {throw 'OWNER'}
+    ([System.Windows.Automation.ValuePattern]$edit.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)).SetValue($request.prompt)
+    # The write must read back within ~10 s; otherwise stop instead of waiting for the whole budget.
+    $script:stage='chat-compose-verify';[Console]::Error.WriteLine("ACB_UI_STAGE=$script:stage")
+    $written=Within 10000 {$current=FindComposer (Document);if ($current -and (ComposerText $current) -eq $prompt) {$current}}
+    if (-not $written) {$after=FindComposer (Document);$script:stage=if (-not $after -or -not (ComposerText $after)) {'chat-compose-verify-empty'} else {'chat-compose-verify-different'};throw 'STATE'}
+   }
    $script:stage='chat-send-button';[Console]::Error.WriteLine("ACB_UI_STAGE=$script:stage")
    $send=Wait {Find (Document) 'Button' '发送'}
    AssertConversation $request.conversationId
