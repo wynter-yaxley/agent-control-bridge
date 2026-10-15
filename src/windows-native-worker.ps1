@@ -192,7 +192,11 @@ try {
   return $false
  }
  function AssertForeground {
-  if ($script:focusLost -or [AcbInput]::GetForegroundWindow() -ne $script:handle) {$script:focusLost=$true;throw 'FOCUS_REQUIRED'}
+  $foreground=[AcbInput]::GetForegroundWindow()
+  if ($script:focusLost -or $foreground -ne $script:handle) {
+   if (-not $script:diagnostics) {$script:diagnostics=@{targetHandle=$script:handle.ToInt64();foregroundHandle=$foreground.ToInt64();typedLength=$script:typedText.Length}}
+   $script:focusLost=$true;throw 'FOCUS_REQUIRED'
+  }
  }
  function EnsureForeground {
   if ($script:foregroundChecked) {AssertForeground;return}

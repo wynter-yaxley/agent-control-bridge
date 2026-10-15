@@ -115,8 +115,8 @@ $activated=${attempt("EnsureForeground;'ok'")}
 $again=${attempt("EnsureForeground;'ok'")};$successCount=[AcbInput]::Attempts
 [AcbInput]::Foreground=[IntPtr]2
 $switched=${attempt("EnsureForeground;'ok'")}
-@{unauthorized=$unauthorized;before=$before;denied=$denied;deniedCount=$deniedCount;activated=$activated;again=$again;successCount=$successCount;switched=$switched;finalCount=[AcbInput]::Attempts} | ConvertTo-Json -Compress`);
-  assert.deepEqual(result, { unauthorized: 'ERR:FOCUS_REQUIRED', before: 0, denied: 'ERR:FOCUS_REQUIRED', deniedCount: 1, activated: 'ok', again: 'ok', successCount: 2, switched: 'ERR:FOCUS_REQUIRED', finalCount: 2 });
+@{unauthorized=$unauthorized;before=$before;denied=$denied;deniedCount=$deniedCount;activated=$activated;again=$again;successCount=$successCount;switched=$switched;finalCount=[AcbInput]::Attempts;loss=$script:diagnostics} | ConvertTo-Json -Compress`);
+  assert.deepEqual(result, { unauthorized: 'ERR:FOCUS_REQUIRED', before: 0, denied: 'ERR:FOCUS_REQUIRED', deniedCount: 1, activated: 'ok', again: 'ok', successCount: 2, switched: 'ERR:FOCUS_REQUIRED', finalCount: 2, loss: { targetHandle: 1, foregroundHandle: 2, typedLength: 0 } });
 });
 
 test('composer binding: a refreshed RuntimeId needs the same page, focus and exact prior text', { skip: !available }, () => {
