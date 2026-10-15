@@ -1,38 +1,14 @@
-# Merge only this block into the active Hermes profile after deployment review.
-# The variables are non-secret paths. Use Node >=24.19.0 in that environment.
-# This configuration connects MCP; it does not install a writable desktop host.
-# This deployable fallback is dist/mcp.js --read-only with an existing ledger.
-# Write integration requires a protected host approval callback, not these paths.
+# Merge into the Hermes profile. Paths are placeholders, not secrets.
 mcp_servers:
   acb:
     command: "${ACB_NODE_EXECUTABLE}"
-    args: ["${ACB_MCP_ENTRY}", "--config", "${ACB_CONFIG_PATH}", "--read-only"]
+    args: ["${ACB_MCP_ENTRY}", "--config", "${ACB_CONFIG_PATH}"]
     enabled: true
-    protocol: legacy
-    # Longest read: CDP + UIA fallback (2 * background.timeoutMs),
-    # then nativeInterface.timeoutMs, plus 30 seconds client margin.
-    # config.example.json: 2 * 120 + 30 + 30 = 300 seconds.
-    # Recalculate if those operation budgets change. Ordinary ledger reads are
-    # immediate; durable engineering uses requestId + the separate worker.
-    timeout: 300
+    # One send waits up to timeoutMs (300 s) for the reply, plus a margin.
+    timeout: 400
     connect_timeout: 30
     supports_parallel_tool_calls: false
     tools:
-      include:
-        - acb_capabilities
-        - acb_project_get
-        - acb_request_get
-        - acb_execution_result
-        - acb_notifications_status
-        - acb_codex_target_check
-        - acb_native_target_check
-        - acb_gpt_read
+      include: [acb_threads, acb_gpt_send, acb_codex_send]
       resources: false
       prompts: false
-# Independent reviewer uses a separate protected caller identity/connection.
-# Never expose acb_review_submit on the Hermes executor/controller connection.
-# General MCP clients use the same stdio contract; Hermes is not required.
-# Writable deployment uses a protected runWindowsHost embedding and one separate
-# --worker runtime. Client timeout/disconnection must not rerun engineering.
-# --write alone does not install GUI approval, Codex delegation or a reviewer.
-# Optional read diagnostics: acb_codex_target_check, acb_native_target_check, acb_gpt_read.

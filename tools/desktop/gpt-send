@@ -1,5 +1,0 @@
-#!/usr/bin/env python3
-import sys
-from gpt_send_cdp import main
-from desktop_common import entry
-if __name__ == "__main__": sys.exit(entry(main))

@@ -1,2 +1,0 @@
-import type { OrdinaryChatCapabilities } from '../../src/ordinary-chat.ts';
-export const hostCapabilities: OrdinaryChatCapabilities = { source: 'application-host', ordinaryChat: true, background: true, exactConversation: true, completeMessages: true, actualGenerationParameters: true, createOrdinaryChat: true, createWorkspace: true, models: ['fixture-model'], reasoningEfforts: ['fixture-effort'] };

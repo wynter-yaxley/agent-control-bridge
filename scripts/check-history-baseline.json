@@ -1,4 +1,0 @@
-[
-  { "blob": "e012411fb11aad6eec5cb9e5b5656a4c9df295d7", "path": "src/hermes.ts", "kind": "localUserPath", "reason": "Initial import 75db1e4 on main: deployer account home path, no credential. Published history is not rewritten; file removed from the current tree." },
-  { "blob": "20f1a416bb5d52999cc8687d858008fc9d0210a7", "path": "src/pi.ts", "kind": "localUserPath", "reason": "Initial import 75db1e4 on main: deployer account home path, no credential. Published history is not rewritten; file removed from the current tree." }
-]

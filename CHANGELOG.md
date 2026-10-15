@@ -2,7 +2,13 @@
 
 Versions follow Semantic Versioning. Development delivery remains pending independent acceptance; formal Release requires an accepted tag and evidence.
 
-## Unreleased
+## 0.3.0 (Unreleased)
+
+- Reduce the bridge to its core: forward a prompt from Hermes to an existing ChatGPT conversation (UIA send + Native IPC completion + UIA reply) or an existing Codex thread (codex app-server) and return the reply. Three MCP tools: acb_threads, acb_gpt_send, acb_codex_send.
+- Removed: SQLite ledger and migrations, caller policy and roles (controller/executor/reviewer), approvals, tasks and background worker, notifications/Feishu, workspace/GPT/Codex creation and recovery, CDP/Python desktop tools, release/history scans and their tests. The previous version stays on branch codex/github-sync-20261012.
+- Kept protections: target title read natively and checked before the composer is touched, UUID check when the page exposes one, no resend of a prompt that is already the latest turn, busy/draft refusal, one send at a time, Codex approvals declined, signed same-user Native IPC peer.
+
+## 0.2.0
 
 - READY projects can add Codex conversations without changing the original request fingerprint: acb_project_attach_codex now also attaches to READY projects, and new acb_project_create_codex formally creates one per call with its own reviewer approval. Both require sole controller access, a mapping that matches the verified resources, an unclaimed ID (no other project, operation or GPT) and native readback of kind, projectId, cwd and workspace name; at most 4 per project. A formal creation records its pending index before the native call; a lost receipt keeps the project READY with stages.codexPending and the next call only reads the original receipt. Repeated attaches are idempotent; every addition is audited.
 - Formal native Codex creation through create_thread: installed by the composition entry with desktop.enabled on a controller connection. It reads the catalog first and calls only if the schema accepts exactly title, prompt and a project target; the pipe worker allows create_thread only with an acb-create- call ID, a UUID projectId and the fixed Codex identity prompt. The prompt ACB_CODEX_INIT_<operationId>_<index> is the durable receipt: a lost reply or crash is recovered from the unique Codex member of the workspace/directory carrying it (also for codex.extra), never by title, never resent. A creation refused before any effect (reviewer rejection or timeout, incompatible schema, rejected parameters) moves the bundle to codex.attach instead of leaving it uncertain, and on a READY project releases the pending index. Unverified on a live desktop.

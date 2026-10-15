@@ -1,67 +1,27 @@
 {
   "name": "agent-control-bridge",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "license": "MIT",
   "bin": {
-    "agent-control-bridge": "dist/cli.js",
-    "agent-control-bridge-mcp": "dist/mcp.js",
-    "agent-control-bridge-codex-check": "dist/codex-interface.js",
-    "agent-control-bridge-native-check": "dist/native-interface.js",
-    "agent-control-bridge-windows": "dist/windows-host.js"
-  },
-  "exports": {
-    ".": "./dist/host-api.js",
-    "./codex-app-server": "./dist/codex-app-server.js",
-    "./native-readonly": "./dist/native-readonly.js",
-    "./background": "./dist/background.js",
-    "./hermes-gateway": "./dist/hermes-gateway.js",
-    "./notification-delivery": "./dist/notification-delivery.js",
-    "./windows-host": "./dist/windows-host.js"
+    "agent-control-bridge-mcp": "dist/mcp.js"
   },
   "files": [
     "dist",
-    "!dist/native-desktop-*",
-    "tools/desktop/*.py",
-    "tools/desktop/tests/*.py",
-    "tools/hermes/mcp_probe.py",
-    "tools/desktop/gpt-read",
-    "tools/desktop/gpt-send",
-    "tools/desktop/codex-send",
-    "tools/desktop/codex-status",
-    "tools/desktop/codex-continue",
-    "tools/desktop/gpt-rename",
-    "tools/desktop/route-execution-guard",
-    "tools/desktop/requirements.txt",
     "config.example.json",
-    "config/caller-policy.example.json",
     "config/hermes-mcp.example.yaml",
-    "assets",
     "README.md",
     "README_EN.md",
     "LICENSE",
-    "THIRD_PARTY_NOTICES.md",
-    "docs/PROJECT_RULES.md",
-    "docs/ACCEPTANCE_TEMPLATE.md"
+    "THIRD_PARTY_NOTICES.md"
   ],
   "type": "module",
-  "description": "A local task-control and state-management bridge for Hermes, ChatGPT and Codex",
+  "description": "Forward prompts from Hermes to existing ChatGPT and Codex desktop conversations and return their replies",
   "scripts": {
-    "start": "node dist/cli.js",
-    "cli": "node src/cli.ts",
-    "mcp": "node src/mcp.ts",
-    "feishu:check": "node scripts/feishu-check.mjs",
-    "codex:check": "node scripts/codex-check.mjs",
-    "codex:target-check": "node src/codex-interface.ts",
-    "native:check": "node src/native-interface.ts",
-    "test": "node scripts/test.mjs",
-    "test:e2e": "node --test test/e2e.test.ts test/workflow.test.ts",
-    "test:desktop": "python -B -m unittest discover -s tools/desktop/tests -v",
     "build": "node scripts/build.mjs",
     "typecheck": "tsc -p tsconfig.test.json",
-    "check": "node scripts/check.mjs",
-    "demo": "node src/cli.ts demo",
-    "test:install": "node scripts/clean-install.mjs"
+    "test": "node --test \"test/*.test.ts\"",
+    "mcp": "node src/mcp.ts"
   },
   "devDependencies": {
     "@types/node": "24.10.0",
