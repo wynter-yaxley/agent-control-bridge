@@ -132,9 +132,49 @@ function Case($title,$focused,$text) {
  $script:composeTitle='target';$script:composerKey='old';$script:title=$title;$script:focused=$focused;$script:edit=@{Key='new';Text=$text}
  @{outcome=${attempt("[void](CurrentComposer 'our prefix');'ok'")};key=$script:composerKey}
 }
-@{refreshed=(Case 'target' $true 'our prefix');different=(Case 'target' $true 'another draft');blurred=(Case 'target' $false 'our prefix');otherPage=(Case 'other' $true 'our prefix')} | ConvertTo-Json -Compress`);
+@{refreshed=(Case 'target' $true 'our prefix');different=(Case 'target' $true 'another draft');caseDiff=(Case 'target' $true 'OUR PREFIX');blurred=(Case 'target' $false 'our prefix');otherPage=(Case 'other' $true 'our prefix')} | ConvertTo-Json -Compress`);
   assert.deepEqual(result.refreshed, { outcome: 'ok', key: 'new' });
   assert.deepEqual(result.different, { outcome: 'ERR:STATE', key: 'old' });
+  assert.deepEqual(result.caseDiff, { outcome: 'ERR:STATE', key: 'old' });
   assert.deepEqual(result.blurred, { outcome: 'ERR:FOCUS_REQUIRED', key: 'old' });
   assert.deepEqual(result.otherPage, { outcome: 'ERR:PROVENANCE', key: 'old' });
+});
+
+test('multiline input: preserves blank lines through guarded ValuePattern prefixes and stops on focus loss', { skip: !available }, () => {
+  const result = pwsh(`Add-Type -AssemblyName UIAutomationClient
+Add-Type -TypeDefinition @'
+using System;
+public static class AcbFolderControls {public static bool Interactive(){return true;}}
+public static class AcbInput {
+ public static IntPtr Foreground=new IntPtr(1); public static int Keys=0;
+ public static IntPtr GetForegroundWindow(){return Foreground;}
+ public static bool Type(string text,IntPtr window){Keys++;return true;}
+}
+'@
+${fn('Normalize')}${fn('Within')}${fn('AssertForeground')}${fn('TypeInto')}
+function EnsureForeground {AssertForeground}
+function Focused($edit) {$true}
+function ComposerText($edit) {Normalize $edit.V}
+function CurrentComposer($expected) {AssertForeground;return $script:edit}
+$script:edit=[pscustomobject]@{V=''}
+Add-Member -InputObject $script:edit -MemberType ScriptMethod -Name SetFocus -Value {}
+Add-Member -InputObject $script:edit -MemberType ScriptMethod -Name TryGetCurrentPattern -Value {param($p,$out) $out.Value=$script:pattern;return $true}
+$script:pattern=[pscustomobject]@{Current=@{IsReadOnly=$false}}
+Add-Member -InputObject $script:pattern -MemberType ScriptMethod -Name SetValue -Value {param($v) $script:edit.V=$v;$script:writes.Add($v);if($script:switch){[AcbInput]::Foreground=[IntPtr]2}}
+function Case($text,$switch,$authorized) {
+ $request=[pscustomobject]@{foregroundInput=$authorized;timeoutMs=2000;pollMs=1}
+ $script:handle=[IntPtr]1;$script:focusLost=$false;$script:typedText='';$script:edit.V='';$script:switch=$switch
+ [AcbInput]::Foreground=[IntPtr]1;[AcbInput]::Keys=0
+ $script:writes=[System.Collections.Generic.List[string]]::new()
+ $outcome=${attempt("TypeInto $script:edit $text;'ok'")}
+ @{outcome=$outcome;value=$script:edit.V;writes=@($script:writes.ToArray());keys=[AcbInput]::Keys}
+}
+$text="ACB first\`n\`nsecond paragraph\`n\`nlast"
+@{text=$text;complete=(Case $text $false $true);switched=(Case $text $true $true);unauthorized=(Case $text $false $false);single=(Case 'plain text' $false $true)} | ConvertTo-Json -Compress -Depth 5`);
+  assert.equal(result.complete.outcome, 'ok'); assert.equal(result.complete.value, result.text);
+  assert.equal(result.complete.keys, 0); assert.ok(result.complete.writes.length > 1);
+  assert.ok(result.complete.writes.every((prefix: string) => result.text.startsWith(prefix)));
+  assert.equal(result.switched.outcome, 'ERR:FOCUS_REQUIRED'); assert.equal(result.switched.writes.length, 1); assert.equal(result.switched.keys, 0);
+  assert.equal(result.unauthorized.outcome, 'ERR:AUTH'); assert.equal(result.unauthorized.writes.length, 0);
+  assert.equal(result.single.outcome, 'ok'); assert.equal(result.single.writes.length, 0); assert.ok(result.single.keys > 0);
 });

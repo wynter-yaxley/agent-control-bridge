@@ -38,7 +38,7 @@ if (project) {
   if (inProject.project?.name !== project) { log('FAIL 4b-gpt-project', 'project not confirmed'); process.exit(1); }
 } else log('SKIP 4b-gpt-project', 'no --gpt-project given');
 await call('5-gpt-open', 'acb_gpt_open', { conversationId: gpt.conversationId });
-const gptReply = await call('6-gpt-send', 'acb_gpt_send', { conversationId: gpt.conversationId, prompt: `这是 Agent Control Bridge 验收测试 ${stamp}。请只回复：ACB_GPT_OK` });
+const gptReply = await call('6-gpt-send', 'acb_gpt_send', { conversationId: gpt.conversationId, prompt: `这是 Agent Control Bridge 验收测试 ${stamp}。\n\n此消息包含空行，用于验证多行 Prompt 的精确输入与回读。\n\n请只回复：ACB_GPT_OK` });
 if (gptReply.reply.trim() !== 'ACB_GPT_OK') { log('FAIL 6-gpt-reply', 'reply differs from the requested exact token'); await client.close(); process.exit(1); }
 await call('7-codex-send', 'acb_codex_send', { threadId: codex.threadId, prompt: `这是 Agent Control Bridge 验收测试 ${stamp}。请只回复：ACB_CODEX_OK，不执行命令、不修改文件。` });
 // Relay: the GPT reply is forwarded to the Codex conversation.

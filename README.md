@@ -127,16 +127,18 @@ Copy-Item -Recurse -Force "D:\agent-control-bridge\skills\agent-control-bridge" 
 
 ## 6. 前台操作与后台操作
 
-| 操作 | 方式 | 需要 ChatGPT 在前台 | 键盘输入（SendInput） | 影响用户当前操作 |
+| 操作 | 方式 | 需要 ChatGPT 在前台 | 文本输入 | 影响用户当前操作 |
 |---|---|---|---|---|
 | `acb_codex_*`、`acb_workspace_create` | Codex App Server（独立后台进程） | 否 | 否 | 否 |
 | `acb_threads`、`acb_projects`、`acb_status` | Native IPC 只读查询 | 否 | 否 | 否 |
 | `acb_gpt_send` 读取回复 | 桌面清单 + UIA 只读 | 否 | 否 | 否 |
 | `acb_gpt_open` | UIA 点击侧栏入口 | 是（已授权时自动尝试激活） | 否 | 切换当前对话，已授权时可能切前台 |
-| `acb_gpt_send` 发送 | UIA 定位 + SendInput 键入 | 是（已授权时自动尝试激活） | 是（持续核对前台窗口和焦点） | 激活窗口，输入期间占用键盘 |
+| `acb_gpt_send` 发送 | UIA 定位 + 核验输入 | 是（已授权时自动尝试激活） | 单行 SendInput；多行 UIA ValuePattern（持续核对前台和焦点） | 激活窗口，输入期间占用键盘 |
 | `acb_gpt_create` | 左侧导航栏「新聊天」+ SendInput 键入 | 是（已授权时自动尝试激活） | 是 | 激活窗口，输入期间占用键盘 |
 
 `--allow-foreground-input` 明确授权 ACB 恢复最小化的、身份已确认的 ChatGPT 窗口，并在输入前尝试激活一次；未授权时不激活、不键入。ACB 不移动鼠标、不使用剪贴板。各种情况下的行为：
+
+ChatGPT 编辑器会合并连续的 Shift+Enter 换行；多行文本因此使用已核验 composer 支持的 UIA ValuePattern 逐段写入，仅替换本次已确认的输入前缀，每段精确回读，保留空行。单行仍用 SendInput；两种方式都需要授权并持续核对前台与焦点。
 
 - **ChatGPT 不在前台**：已授权时自动尝试激活，确认 Windows 实际前台句柄一致才输入。Windows 拒绝激活或未授权时返回 `FOCUS_REQUIRED`，不向其他窗口输入，不通过修改系统设置或模拟快捷键强抢焦点。
 - **输入中途切换窗口或焦点**：立即停止并返回 `FOCUS_REQUIRED`，不反复切回。已经输入的部分可能留在 ChatGPT 输入框里，请删除或保留；ACB 不会把它发出去。

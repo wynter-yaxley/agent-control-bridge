@@ -220,13 +220,13 @@ try {
    # because it has the same name: it must be the sole visible, focused edit,
    # on the same page, containing exactly our previously verified text.
    if (-not (Focused $current)) {$script:focusLost=$true;throw 'FOCUS_REQUIRED'}
-   if ((ComposerText $current) -ne (Normalize $expected)) {$script:stage='chat-compose-replaced';throw 'STATE'}
+   if ((ComposerText $current) -cne (Normalize $expected)) {$script:stage='chat-compose-replaced';throw 'STATE'}
    $script:composerKey=ElementKey $current
   }
   $script:composer=$current
   return $current
  }
- # Types into $edit with foreground SendInput, only when the request carries the user's
+ # Writes to $edit with guarded UIA/SendInput, only when the request carries the user's
  # authorization. The ChatGPT window must be in front and $edit focused before every chunk.
  function TypeInto($edit,[string]$text) {
   $script:stage='input-authorize'
@@ -238,6 +238,11 @@ try {
   if (-not (Within 3000 {AssertForeground;$now=CurrentComposer '';if ($now -and (Focused $now)) {$true}})) {throw 'FOCUS_REQUIRED'}
   $script:stage='input-type';[Console]::Error.WriteLine("ACB_UI_STAGE=$script:stage")
   $script:typed=$edit
+  # This Chromium editor collapses consecutive Shift+Enter breaks. For multiline
+  # text, use its supported ValuePattern on our own verified prefix, never keyboard
+  # newline events. Read the exact prefix back after every write; no whitespace
+  # equivalence is used for the final prompt comparison.
+  $multiline=$text.Contains("`n")
   for ($offset=0;$offset -lt $text.Length;) {
    # The user moved the window or focus: stop rather than type elsewhere.
    $edit=CurrentComposer $script:typedText
@@ -246,15 +251,24 @@ try {
    # Do not split a surrogate pair across chunks.
    if ($offset+$count -lt $text.Length -and [char]::IsHighSurrogate($text[$offset+$count-1])) {$count--}
    $chunk=$text.Substring($offset,$count)
-   if (-not [AcbInput]::Type($chunk,$script:handle)) {AssertForeground;throw 'IO'}
+   if ($multiline) {
+    if ((ComposerText $edit) -cne (Normalize $script:typedText)) {throw 'CONFLICT'}
+    $pattern=$null
+    if (-not $edit.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern,[ref]$pattern) -or $pattern.Current.IsReadOnly) {$script:stage='input-multiline-pattern';throw 'STATE'}
+    $pattern.SetValue($script:typedText+$chunk)
+   } elseif (-not [AcbInput]::Type($chunk,$script:handle)) {AssertForeground;throw 'IO'}
    $script:typedText+=$chunk;$script:typed=$edit;$offset+=$count
+   if ($multiline) {
+    $verified=Within 1000 {$now=CurrentComposer $script:typedText;if ($now -and -not (Focused $now)) {$script:focusLost=$true;throw 'FOCUS_REQUIRED'};if ($now -and (ComposerText $now) -ceq (Normalize $script:typedText)) {$true}}
+    if (-not $verified) {$script:stage='input-multiline-verify';throw 'STATE'}
+   }
    Start-Sleep -Milliseconds 10
   }
  }
  # After a failure, remove only what this worker typed (the field was empty before).
  function ClearTyped {
   if ($null -eq $script:typed) {return}
-  try {if (-not $script:focusLost) {$edit=CurrentComposer $script:typedText;if ($edit -and (Focused $edit) -and (ComposerText $edit) -eq (Normalize $script:typedText)) {[void][AcbInput]::Clear()}}} catch {}
+  try {if (-not $script:focusLost) {$edit=CurrentComposer $script:typedText;if ($edit -and (Focused $edit) -and (ComposerText $edit) -ceq (Normalize $script:typedText)) {[void][AcbInput]::Clear()}}} catch {}
   $script:typed=$null
  }
  # Writes $prompt into an empty ordinary composer and requires it to read back within ~10 s.
@@ -266,12 +280,12 @@ try {
   $beforeKey=$script:composerKey
   $draft=ComposerText $edit
   # drafted: the user already wrote exactly this prompt; nothing is typed.
-  if ($draft -eq $prompt) {$script:inputMode='drafted';return}
+  if ($draft -ceq $prompt) {$script:inputMode='drafted';return}
   if ($draft) {throw 'CONFLICT'}
   $script:inputMode='typed'
   TypeInto $edit $prompt
   $script:stage='chat-compose-verify';[Console]::Error.WriteLine("ACB_UI_STAGE=$script:stage")
-  $written=Within 10000 {$current=CurrentComposer $prompt;if ($current -and -not (Focused $current)) {$script:focusLost=$true;throw 'FOCUS_REQUIRED'};if ($current -and (ComposerText $current) -eq $prompt) {$current}}
+  $written=Within 10000 {$current=CurrentComposer $prompt;if ($current -and -not (Focused $current)) {$script:focusLost=$true;throw 'FOCUS_REQUIRED'};if ($current -and (ComposerText $current) -ceq $prompt) {$current}}
   if (-not $written) {
    $after=CurrentComposer $prompt;$actual=if ($after) {ComposerText $after} else {''}
    $script:diagnostics=@{beforeRuntimeId=$beforeKey;afterRuntimeId=$(if ($after) {ElementKey $after} else {$null});expectedLength=$prompt.Length;actualLength=$actual.Length;textSource=$script:textSource;visible=($null -ne $after);focused=($after -and (Focused $after))}
@@ -280,7 +294,7 @@ try {
  }
  function VerifyComposed([string]$prompt) {
   $edit=CurrentComposer $prompt
-  if (-not $edit -or (ComposerText $edit) -ne $prompt) {$script:stage='chat-compose-before-send';throw 'STATE'}
+  if (-not $edit -or (ComposerText $edit) -cne $prompt) {$script:stage='chat-compose-before-send';throw 'STATE'}
   if ($script:inputMode -eq 'typed' -and -not (Focused $edit)) {$script:focusLost=$true;throw 'FOCUS_REQUIRED'}
  }
  function Buttons([string]$name,[switch]$offscreen,$scope=$script:root) {

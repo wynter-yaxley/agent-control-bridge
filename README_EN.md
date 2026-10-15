@@ -63,6 +63,8 @@ Errors are `{"ok":false,"code","message"}`. A repeated prompt is never resent: a
 
 Codex and inventory tools run in the background. `--allow-foreground-input` explicitly authorizes ACB to restore a minimized, verified ChatGPT window and try to activate it once before GPT navigation/typing. It checks the actual Windows foreground handle and composer focus. If Windows refuses or the user changes windows/focus during input, ACB stops with `FOCUS_REQUIRED`, never repeatedly takes focus, and never submits the partial text. Without authorization it never activates or types; an identical draft can only be submitted while ChatGPT is already in front. No mouse, clipboard or focus-lock workaround is used. A Codex or unidentified window is refused. The user still approves Codex commands, creates ChatGPT projects, moves existing chats into projects and opens chats missing from the sidebar.
 
+Single-line input uses SendInput. The editor collapses consecutive Shift+Enter breaks, so multiline input uses the verified composer's supported UIA ValuePattern in chunks, replacing only the exact prefix written by this operation and checking its text, foreground and focus after every write. Blank lines must read back exactly before submission.
+
 ## Limits
 
 ChatGPT projects cannot be created and existing chats cannot be moved into one (the project list is invisible to UIA); a new chat can start in an existing project. ChatGPT exposes no conversation UUID in the window, so identity is "unique title + desktop inventory" (`uiIdentity: "titleOnly"`).
