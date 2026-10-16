@@ -27,7 +27,7 @@ export function createServer(config: BridgeConfig): McpServer {
     const pending = queue.then(operation);
     queue = pending.catch(() => undefined);
     return pending.then(value => ({ content: [{ type: 'text' as const, text: JSON.stringify(value) }] }),
-      error => { const failure = asBridgeError(error); return { content: [{ type: 'text' as const, text: JSON.stringify({ ok: false, code: failure.code, message: failure.message }) }], isError: true }; });
+      error => { const failure = asBridgeError(error); return { content: [{ type: 'text' as const, text: JSON.stringify({ ok: false, code: failure.code, message: failure.message, ...failure.details }) }], isError: true }; });
   };
   const id = z.string().min(1).max(200), prompt = z.string().min(1).max(65536), title = z.string().min(1).max(200);
   const gpt = async (): Promise<GptDeps> => ({ native: await native(), ui, timeoutMs: config.timeoutMs, pollMs: Math.max(config.uiPollMs, 1000) });
@@ -46,11 +46,11 @@ export function createServer(config: BridgeConfig): McpServer {
     args => run(() => searchCodex(codexOptions(config), args.searchTerm)));
   server.registerTool('acb_codex_send', { description: 'Send a prompt to a Codex conversation by ID and return its final reply. Background, no window. Archived conversations are unarchived once; approvals are never granted by the bridge. If it times out, call again with the same prompt to read the reply (it is not resent).', inputSchema: z.object({ threadId: id, prompt }).strict() },
     args => run(() => sendCodex(codexOptions(config), args.threadId, args.prompt)));
-  server.registerTool('acb_gpt_create', { description: 'Create a new ordinary ChatGPT conversation with a unique title and return its exact ID, optionally inside an existing ChatGPT project (by name, read back before sending). Foreground: types into the ChatGPT window, which must be in front; needs --allow-foreground-input.', inputSchema: z.object({ title, project: z.string().min(1).max(200).optional() }).strict() },
+  server.registerTool('acb_gpt_create', { description: 'Create a ChatGPT conversation from the left sidebar, identify its one-time marker, and verify its title and persistence before returning its ID. With --allow-foreground-input, restores/activates the verified ChatGPT window once; stops if focus changes. A partial error includes the known ID: do not create again or resend the marker.', inputSchema: z.object({ title, project: z.string().min(1).max(200).optional() }).strict() },
     async args => run(async () => createGpt(await gpt(), args.title, args.project)));
   server.registerTool('acb_gpt_open', { description: 'Show a ChatGPT conversation by ID in the desktop app (current view or its single sidebar entry) and confirm it is the one shown. Uses the ChatGPT window (UIA click), no typing.', inputSchema: z.object({ conversationId: id }).strict() },
     args => run(async () => { const deps = await gpt(), page = await deps.native.readThread(args.conversationId); return { conversationId: args.conversationId, title: page.thread.title, navigation: await openGpt(deps, args.conversationId, page.thread.title) }; }));
-  server.registerTool('acb_gpt_send', { description: 'Send a prompt to a ChatGPT conversation by ID and return its reply. Foreground: types into the ChatGPT window, which must be in front (an identical draft already in the composer is sent as is). A prompt that is already the latest turn is not resent.', inputSchema: z.object({ conversationId: id, prompt }).strict() },
+  server.registerTool('acb_gpt_send', { description: 'Send a prompt to a ChatGPT conversation by ID and return its reply. With --allow-foreground-input, restores/activates the verified ChatGPT window once, verifies actual foreground and composer focus, and stops if the user switches away. Without authorization, only an identical existing draft can be sent while ChatGPT is in front. An already-latest prompt is not resent.', inputSchema: z.object({ conversationId: id, prompt }).strict() },
     args => run(async () => sendGpt(await gpt(), args.conversationId, args.prompt)));
   return server;
 }

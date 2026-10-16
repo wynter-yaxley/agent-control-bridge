@@ -4,6 +4,7 @@ Versions follow Semantic Versioning. Desktop behavior is verified manually on Wi
 
 ## 0.4.0 (Unreleased)
 
+- Housekeeping: the unused native tool catalog (`tools/list`) is removed from the client and the pipe worker's request allowlist; both configuration examples live in `config/`.
 - Installable MCP tool: `npm install` builds it, `npm run check` (or `--check`) runs a read-only self-check and prints the Hermes `mcp add` and skill commands for the machine. No configuration is required: `codex.exe` is discovered from the Codex desktop app (or PATH) and the desktop context thread from the most recent Codex conversation; options, `ACB_*` variables and an optional JSON file still override.
 - Hermes skill `skills/agent-control-bridge` with the working rules (roles, reuse, short reports, failure handling, approval for non-core work).
 - One Codex App Server process is reused across calls (closed after 10 idle minutes or on failure) and a `turn/completed` notification ends a reply wait without waiting for the next poll.

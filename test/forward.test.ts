@@ -3,15 +3,18 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { PassThrough, Writable } from 'node:stream';
 import type { spawn } from 'node:child_process';
+import { setTimeout as delay } from 'node:timers/promises';
 import { createGpt, sendGpt } from '../src/gpt.ts';
 import { createCodex, sendCodex } from '../src/codex.ts';
 import { createWorkspace } from '../src/workspace.ts';
+import { BridgeError } from '../src/errors.ts';
 import type { NativeChatPage, NativeThread } from '../src/native.ts';
 
 const prompt = '[TEST] reply with OK';
 const page = (status: string, turns: NativeChatPage['turns'], kind = 'chatgpt'): NativeChatPage => ({ thread: { id: 'gpt-id', kind, title: '测试消息', status: { type: status } }, turns });
 const answered = (id: string, text = prompt): NativeChatPage['turns'][number] => ({ id, status: 'completed', error: null, items: [{ type: 'userMessage', id: `u-${id}`, content: [{ type: 'text', text }] }, { type: 'agentMessage', id: `a-${id}`, text: '[native]' }] });
 const row = (id: string, title: string) => ({ id, kind: 'chatgpt', title, projectId: null, cwd: null });
+const idleChat = (id: string, title: string, turns: NativeChatPage['turns']): NativeChatPage => ({ thread: { id, kind: 'chatgpt', title, status: { type: 'idle' } }, turns });
 
 function gpt(pages: NativeChatPage[], inventory = [row('gpt-id', '测试消息')]) {
   const calls: string[] = [];
@@ -51,9 +54,9 @@ test('gpt: a new chat is identified by its own marker turn, never by title, then
   const inventory = [row('old-id', 'old')];
   let marker = '', titled = '';
   const { deps } = gpt([]);
-  Object.assign(deps.native, { listThreads: async () => inventory, setThreadTitle: async (_id: string, _source: string, title: string) => { titled = title; },
-    readThread: async (id: string) => ({ thread: { id, kind: 'chatgpt', title: titled || '新聊天', status: { type: 'idle' } }, turns: id === 'new-id' ? [answered('t', marker)] : [answered('t', 'unrelated')] }) });
-  deps.ui.call = (async (operation: string, fields: { prompt?: string }) => { if (operation === 'gpt-create') { marker = fields.prompt!; inventory.push(row('decoy', '新聊天'), row('new-id', '新聊天')); } return { ok: true }; }) as typeof deps.ui.call;
+  Object.assign(deps.native, { listThreads: async () => inventory, setThreadTitle: async (_id: string, _source: string, title: string) => { titled = title; inventory.find(t => t.id === 'new-id')!.title = title; },
+    readThread: async (id: string) => idleChat(id, titled || '新聊天', id === 'new-id' ? [answered('t', marker)] : [answered('t', 'unrelated')]) });
+  deps.ui.call = (async (operation: string, fields: { prompt?: string }) => { if (operation === 'gpt-create') { marker = fields.prompt!; inventory.push(row('decoy', '新聊天'), row('new-id', '新聊天')); } return { ok: true, snapshot: { title: titled, text: '', ordinaryComposer: true, pid: 1, conversationId: null } }; }) as typeof deps.ui.call;
   assert.deepEqual(await createGpt(deps, 'ACB 测试'), { conversationId: 'new-id', title: 'ACB 测试' });
   assert.match(marker, /ACB_INIT_[a-f0-9-]{36}$/);
   await assert.rejects(createGpt(deps, 'old'), { code: 'CONFLICT' });
@@ -64,11 +67,11 @@ test('gpt: a chat started in a project counts only when the app read the project
     const inventory: NativeThread[] = [row('old-id', 'old')];
     let marker = '', titled = '', renamed = false, sentProject: string | undefined;
     const { deps } = gpt([]);
-    Object.assign(deps.native, { listThreads: async () => inventory, setThreadTitle: async (_id: string, _source: string, title: string) => { titled = title; renamed = true; },
+    Object.assign(deps.native, { listThreads: async () => inventory, setThreadTitle: async (_id: string, _source: string, title: string) => { titled = title; renamed = true; inventory.find(t => t.id === 'new-id')!.title = title; },
       listProjects: async () => [{ projectId: 'p-1', projectKind: 'chatgpt', label, path: '', hostId: '' }],
-      readThread: async (id: string) => ({ thread: { id, kind: 'chatgpt', title: titled || '新聊天', status: { type: 'idle' } }, turns: id === 'new-id' ? [answered('t', marker)] : [] }) });
+      readThread: async (id: string) => idleChat(id, titled || '新聊天', id === 'new-id' ? [answered('t', marker)] : []) });
     deps.ui.call = (async (operation: string, fields: { prompt?: string; project?: string }) => {
-      if (operation !== 'gpt-create') return { ok: true };
+      if (operation !== 'gpt-create') return { ok: true, snapshot: { title: titled, text: '', ordinaryComposer: true, pid: 1, conversationId: null } };
       if (fail) throw Object.assign(new Error(fail), { code: fail });
       marker = fields.prompt!; sentProject = fields.project; inventory.push({ ...row('new-id', '新聊天'), projectId });
       return { ok: true, project: echo };
@@ -84,6 +87,115 @@ test('gpt: a chat started in a project counts only when the app read the project
     await assert.rejects(createGpt(blocked.deps, 'ACB 项目对话', 'ACB项目'), { code });
     assert.equal(blocked.renamed(), renamed);
   }
+});
+
+test('gpt: create reports partial completion and its ID when title or persistence verification fails, without repeating the marker', async () => {
+  for (const fail of ['native-title', 'ui-title', 'rename-error', 'missing-marker', 'unknown-submit']) {
+    let marker = '', title = 'New chat', creates = 0, writes = 0;
+    const inventory: NativeThread[] = [];
+    const deps = { timeoutMs: 25, pollMs: 1,
+      native: {
+        listThreads: async () => inventory,
+        readThread: async (id: string) => idleChat(id, title, [answered('init', fail === 'missing-marker' ? 'other' : marker)]),
+        setThreadTitle: async (_id: string, _source: string, value: string) => { writes++; if (fail === 'rename-error') throw new BridgeError('IO', 'rename failed'); if (fail !== 'native-title') { title = value; inventory[0].title = value; } },
+      },
+      ui: { call: async (operation: string, fields: { prompt?: string }) => {
+        if (operation === 'gpt-create') { creates++; marker = fields.prompt!; inventory.push(row('created-id', title)); if (fail === 'unknown-submit') throw new BridgeError('IO', 'send result unknown', { submission: 'attempted' }); return { ok: true, conversationId: 'created-id' }; }
+        return { ok: true, snapshot: { title: fail === 'ui-title' ? 'New chat' : title, text: '', ordinaryComposer: true, pid: 1, conversationId: null } };
+      } },
+    };
+    await assert.rejects(createGpt(deps, 'wanted'), (error: BridgeError) => {
+      assert.equal(error.details?.status, 'partial', fail);
+      assert.equal(error.details?.conversationId, fail === 'unknown-submit' ? null : 'created-id', fail);
+      assert.match(error.message, /do not create again or resend/);
+      return true;
+    });
+    assert.equal(creates, 1, fail); assert.ok(writes <= 1, fail);
+  }
+});
+
+test('gpt: the chat verified after creation accepts the second prompt and returns its completed reply', async () => {
+  const inventory: NativeThread[] = [];
+  let text = '', title = 'New chat', turnId = 'init', sends = 0, creates = 0;
+  const deps = { timeoutMs: 1000, pollMs: 1,
+    native: { listThreads: async () => inventory,
+      setThreadTitle: async (_id: string, _source: string, value: string) => { title = value; inventory[0].title = value; },
+      readThread: async (id: string) => idleChat(id, title, [answered(turnId, text)]) },
+    ui: { call: async (operation: string, fields: { prompt?: string }) => {
+      if (operation === 'gpt-create') { creates++; text = fields.prompt!; inventory.push(row('new-id', title)); }
+      if (operation === 'chat-send') { sends++; text = fields.prompt!; turnId = 'second'; }
+      return { ok: true, snapshot: { title, text: '', ordinaryComposer: true, pid: 1, conversationId: null }, inputMode: 'typed' as const, identity: 'titleOnly' as const, completionVerified: true, body: 'SECOND_OK' };
+    } },
+  };
+  const created = await createGpt(deps, 'new title');
+  const reply = await sendGpt(deps, created.conversationId, 'second prompt');
+  assert.equal(reply.reply, 'SECOND_OK'); assert.equal(reply.turnId, 'second');
+  assert.equal(creates, 1); assert.equal(sends, 1);
+});
+
+test('gpt: a page UUID alone is not persistence: the inventory must list the same ID with the new title', async () => {
+  for (const inventoryState of ['missing', 'stale']) {
+    let marker = '', title = 'New chat', renames = 0, creates = 0;
+    const deps = { timeoutMs: 40, pollMs: 1,
+      native: {
+        // The rename reaches the ID read, but the sidebar inventory never reflects it.
+        listThreads: async () => inventoryState === 'stale' && marker ? [row('new-id', 'New chat')] : [],
+        readThread: async (id: string) => idleChat(id, title, [answered('init', marker)]),
+        setThreadTitle: async (_id: string, _source: string, value: string) => { title = value; renames++; },
+      },
+      ui: { call: async (operation: string, fields: { prompt?: string }) => {
+        if (operation === 'gpt-create') { creates++; marker = fields.prompt!; return { ok: true, conversationId: 'new-id' }; }
+        // The page exposes the exact UUID and the new title.
+        return { ok: true, snapshot: { title, text: '', ordinaryComposer: true, pid: 1, conversationId: 'new-id' } };
+      } },
+    };
+    await assert.rejects(createGpt(deps, 'wanted'), (error: BridgeError) => {
+      assert.equal(error.code, 'PROVENANCE', inventoryState);
+      assert.deepEqual([error.details?.status, error.details?.conversationId, error.details?.stage, error.details?.identityVerified], ['partial', 'new-id', 'persistence', true], inventoryState);
+      assert.equal((error.details?.verification as { inventoryTitle: unknown }).inventoryTitle, inventoryState === 'stale' ? 'New chat' : null, inventoryState);
+      return true;
+    });
+    assert.equal(creates, 1, inventoryState); assert.equal(renames, 1, inventoryState);
+  }
+});
+
+test('gpt: once the create budget is spent, the title is not written; the result is partial', async () => {
+  let marker = '', renames = 0, creates = 0, slow = true;
+  const deps = { timeoutMs: 20, pollMs: 1,
+    native: {
+      listThreads: async () => marker ? [row('new-id', 'New chat')] : [],
+      // The identity read that confirms the marker finishes only after the budget.
+      readThread: async (id: string) => { if (marker && slow) { slow = false; await delay(60); } return idleChat(id, 'New chat', [answered('init', marker)]); },
+      setThreadTitle: async () => { renames++; },
+    },
+    ui: { call: async (operation: string, fields: { prompt?: string }) => {
+      if (operation === 'gpt-create') { creates++; marker = fields.prompt!; return { ok: true, conversationId: null }; }
+      return { ok: true, snapshot: { title: 'New chat', text: '', ordinaryComposer: true, pid: 1, conversationId: null } };
+    } },
+  };
+  await assert.rejects(createGpt(deps, 'late title'), (error: BridgeError) => {
+    assert.equal(error.code, 'TIMEOUT');
+    assert.deepEqual([error.details?.status, error.details?.conversationId, error.details?.stage, error.details?.identityVerified], ['partial', 'new-id', 'title', true]);
+    return true;
+  });
+  assert.equal(renames, 0); assert.equal(creates, 1);
+});
+
+test('gpt: a stale sidebar inventory after rename must converge before create succeeds', async () => {
+  let marker = '', title = 'New chat', readsAfterRename = 0, renames = 0, creates = 0;
+  const deps = { timeoutMs: 500, pollMs: 1,
+    native: {
+      listThreads: async () => marker ? [row('new-id', renames && ++readsAfterRename >= 4 ? title : 'New chat')] : [],
+      readThread: async (id: string) => idleChat(id, title, [answered('init', marker)]),
+      setThreadTitle: async (_id: string, _source: string, value: string) => { title = value; renames++; },
+    },
+    ui: { call: async (operation: string, fields: { prompt?: string }) => {
+      if (operation === 'gpt-create') { creates++; marker = fields.prompt!; }
+      return { ok: true, snapshot: { title, text: '', ordinaryComposer: true, pid: 1, conversationId: null } };
+    } },
+  };
+  assert.deepEqual(await createGpt(deps, 'settled title'), { conversationId: 'new-id', title: 'settled title' });
+  assert.ok(readsAfterRename >= 5); assert.equal(renames, 1); assert.equal(creates, 1);
 });
 
 /** A scripted codex app-server answering JSON-RPC lines. */

@@ -14,7 +14,7 @@ export interface BridgeConfig {
   codexSource: string | null;
   /** Default parent directory for new workspaces. */
   workspaceRoot: string;
-  /** The user's authorization for foreground SendInput typing into ChatGPT. */
+  /** The user's authorization to restore/activate verified ChatGPT and type with SendInput. */
   foregroundInput: boolean;
   /** Forward UIA stage lines to stderr (ACB_DEBUG=1). */
   debug: boolean;
@@ -71,6 +71,6 @@ export function loadConfig(path?: string, overrides: { carrierThreadId?: string;
     foregroundInput: overrides.foregroundInput === true || raw.foregroundInput === true || env.ACB_ALLOW_FOREGROUND_INPUT === '1',
     debug: overrides.debug === true || env.ACB_DEBUG === '1',
     nativeInterface: { timeoutMs: int(native.timeoutMs, 30000, 1, 60000, 'nativeInterface.timeoutMs'), maxFrameBytes: int(native.maxFrameBytes, 2097152, 4096, 4194304, 'nativeInterface.maxFrameBytes'),
-      maxCandidates: int(native.maxCandidates, 32, 1, 32, 'nativeInterface.maxCandidates') },
+      maxCandidates: int(native.maxCandidates, 128, 1, 128, 'nativeInterface.maxCandidates') },
   };
 }

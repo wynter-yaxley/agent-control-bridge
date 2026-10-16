@@ -53,7 +53,7 @@ Copy-Item -Recurse -Force "D:\agent-control-bridge\skills\agent-control-bridge" 
 完成后新开一个 Hermes 会话（或执行 `/reload-mcp`），即可使用 `mcp_acb_*` 工具。
 
 - 服务名请保持为 `acb`，工具名会是 `mcp_acb_acb_gpt_send` 这样的形式。
-- `--allow-foreground-input` 表示授权 ACB 向 ChatGPT 窗口键入文字（见第 6 节）。不加这个参数时，只有当输入框里已有完全相同的草稿，GPT 消息才会被发出。
+- `--allow-foreground-input` 表示授权 ACB 自动恢复/激活已核验的 ChatGPT 窗口并键入文字（见第 6 节）。不加这个参数时，不激活、不键入；只有 ChatGPT 已在前台且输入框里已有完全相同的草稿时，才会发送。
 - 也可以手动把 [config/hermes-mcp.example.yaml](config/hermes-mcp.example.yaml) 合并进 Hermes 的 `config.yaml`。
 
 ### Hermes 工作规范（Skill）
@@ -68,7 +68,7 @@ Copy-Item -Recurse -Force "D:\agent-control-bridge\skills\agent-control-bridge" 
 
 ### 配置（全部可选）
 
-不需要配置文件。如需调整，按以下优先级生效：命令行参数 → 环境变量 → 配置文件（`--config <file>` 或 `ACB_CONFIG`，示例见 [config.example.json](config.example.json)）→ 自动发现与默认值。
+不需要配置文件。如需调整，按以下优先级生效：命令行参数 → 环境变量 → 配置文件（`--config <file>` 或 `ACB_CONFIG`，示例见 [config/config.example.json](config/config.example.json)）→ 自动发现与默认值。
 
 | 配置项 | 命令行 / 环境变量 | 默认值 |
 |---|---|---|
@@ -127,36 +127,43 @@ Copy-Item -Recurse -Force "D:\agent-control-bridge\skills\agent-control-bridge" 
 
 ## 6. 前台操作与后台操作
 
-| 操作 | 方式 | 需要 ChatGPT 在前台 | 键盘输入（SendInput） | 影响用户当前操作 |
+| 操作 | 方式 | 需要 ChatGPT 在前台 | 文本输入 | 影响用户当前操作 |
 |---|---|---|---|---|
 | `acb_codex_*`、`acb_workspace_create` | Codex App Server（独立后台进程） | 否 | 否 | 否 |
 | `acb_threads`、`acb_projects`、`acb_status` | Native IPC 只读查询 | 否 | 否 | 否 |
 | `acb_gpt_send` 读取回复 | 桌面清单 + UIA 只读 | 否 | 否 | 否 |
-| `acb_gpt_open` | UIA 点击侧栏入口 | 否 | 否 | 会切换 ChatGPT 当前显示的对话 |
-| `acb_gpt_send` 发送 | UIA 定位 + SendInput 键入 | **是** | **是**（每段输入前核对前台窗口和焦点） | 输入期间占用键盘 |
-| `acb_gpt_create` | UIA 点击「新聊天」+ SendInput 键入 | **是** | **是** | 输入期间占用键盘 |
+| `acb_gpt_open` | UIA 点击侧栏入口 | 是（已授权时自动尝试激活） | 否 | 切换当前对话，已授权时可能切前台 |
+| `acb_gpt_send` 发送 | UIA 定位 + 核验输入 | 是（已授权时自动尝试激活） | 单行 SendInput；多行 UIA ValuePattern（持续核对前台和焦点） | 激活窗口，输入期间占用键盘 |
+| `acb_gpt_create` | 左侧导航栏「新聊天」+ SendInput 键入 | 是（已授权时自动尝试激活） | 是 | 激活窗口，输入期间占用键盘 |
 
-ACB **不会**抢占前台、移动鼠标或使用剪贴板。各种情况下的行为：
+`--allow-foreground-input` 明确授权 ACB 恢复最小化的、身份已确认的 ChatGPT 窗口，并在输入前尝试激活一次。ACB 等待恢复完成，再向该窗口内唯一可用的输入框发出一次 UIA 焦点请求；焦点请求不写入或清除草稿，仍须核对 Windows 实际前台句柄。未授权时不激活、不键入。ACB 不移动鼠标、不使用剪贴板。各种情况下的行为：
 
-- **ChatGPT 不在前台**：返回 `FOCUS_REQUIRED`，什么都不输入。
-- **输入中途切换窗口或焦点**：立即停止并返回 `CONFLICT`。已经输入的部分会留在 ChatGPT 输入框里，请删除或保留；ACB 不会再把它发出去。
+ChatGPT 编辑器会合并连续的 Shift+Enter 换行；多行文本因此使用已核验 composer 支持的 UIA ValuePattern 逐段写入，仅替换本次已确认的输入前缀，每段精确回读，保留空行。单行仍用 SendInput；两种方式都需要授权并持续核对前台与焦点。
+
+- **ChatGPT 不在前台**：已授权时自动尝试激活，确认 Windows 实际前台句柄一致才输入。Windows 拒绝激活或未授权时返回 `FOCUS_REQUIRED`，不向其他窗口输入，不通过修改系统设置或模拟快捷键强抢焦点。
+- **输入中途切换窗口或焦点**：立即停止并返回 `FOCUS_REQUIRED`，不反复切回。已经输入的部分可能留在 ChatGPT 输入框里，请删除或保留；ACB 不会把它发出去。
+- **失焦诊断**：`diagnostics.focusReason` 区分 `activationDenied`（Windows 拒绝激活）、`foregroundChanged`（前台窗口改变）、`composerFocusLost`（输入框失焦）和 `foregroundNotAuthorized`（未授权切前台）。同时返回 `targetHandle`、`foregroundHandle` 和本次已完成写入的前缀长度 `typedLength`（UTF-16）；不包含正文。写入、提交和失败清理前都会再次检查前台，失焦后不清理草稿。
+- **激活诊断**：发生激活尝试时，失焦错误还包含 `diagnostics.activation`：方式 `method`、恢复请求是否受理 `restoreAccepted`、UIA 请求是否完成 `requestCompleted`，以及异常时的 `hresult`（按实际步骤返回）。请求完成不代表窗口已成为前台。
 - **关闭 ChatGPT**：GPT 工具返回 `OWNER` 或 `IO`，Codex 工具不受影响。下次调用时会自动重新启动相应的辅助进程。
 - **关闭 Codex 桌面应用**：`acb_threads` 和 GPT 工具无法读取对话清单，返回 `OWNER` 或 `IO`；Codex App Server 工具照常可用。
 - **同时开着 ChatGPT 和 Codex 窗口**：只使用能确认是 ChatGPT 的那一个窗口；无法确认时拒绝操作。
-- **仍需用户手动配合**：把 ChatGPT 放到前台；在 Codex 中批准命令或文件操作（ACB 不代替审批）；创建 ChatGPT 项目、把已有对话移入项目；打开不在侧栏中的旧对话。
+- **仍需用户手动配合**：Windows 拒绝激活时手动处理；在 Codex 中批准命令或文件操作（ACB 不代替审批）；创建 ChatGPT 项目、把已有对话移入项目；打开不在侧栏中的旧对话。
 
 ## 7. 当前限制与故障处理
 
 - **ChatGPT 原生项目**：ACB 不能新建项目，也不能把已有对话移入项目（「移至项目」里的项目列表 UIA 读不到），需要在 ChatGPT 中手动完成。新建对话时可以用 `project` 参数直接建在已有项目中。
 - **超时**：Codex 的长任务可能超过 240 秒，此时返回 `TIMEOUT`。稍后用**同一个 Prompt** 再调用一次即可拿到回复，不会重复发送。
 - **身份确认**：ChatGPT 页面不显示对话 UUID，返回 `uiIdentity: "titleOnly"`，表示是靠「标题唯一 + 桌面清单」确认的目标对话。
+- **清单范围**：native host 最多返回 50 条非置顶对话，置顶对话另计；接口没有分页参数，顺序受侧栏排序设置影响。不会把缺失的对话冒充已确认目标；页面暴露 UUID 时仍须按 ID 读取核验。
+- **新建**：只点击左侧导航栏的「新聊天」，确认空白页面后发送一次初始化标记，取得真实 ID，等待初始化完成再改标题；native 按 ID 读取、清单中同一 ID 的标题和页面定位连续两次一致才成功；页面显示了正确的 UUID 也不能代替清单确认。侧栏清单可能延迟约一分钟更新，会在原始创建超时预算内等待一致；预算耗尽后不再写入标题。失败会以 `status: "partial"` 返回已知 `conversationId`（未知则为 null）、实际 `title`、`requestedTitle`、`identityVerified`、失败 `stage` 及必要的标题核对结果。先检查已建对话，禁止重复创建或重复发送初始化标记。
 
 | 错误码 | 含义 | 处理 |
 |---|---|---|
 | `TIMEOUT` | 回复还没完成 | 稍后用同一 Prompt 再调用 |
-| `CONFLICT` | 对话正忙、已有草稿，或输入被打断 | 等待，或清理输入框 |
+| `CONFLICT` | 对话正忙、已有草稿 | 等待，或清理输入框 |
 | `PROVENANCE` | 无法确认目标（标题重名、不在侧栏、项目未回读确认） | 在 ChatGPT 中打开该对话，或换一个唯一标题 |
-| `FOCUS_REQUIRED` / `AUTH` | ChatGPT 不在前台 / 未授权键入 | 把 ChatGPT 放到前台 / 加上 `--allow-foreground-input` |
+| `STATE` | 空白页面识别或 composer 精确回读校验失败 | 按 stage 和必要诊断定位，不重发 |
+| `FOCUS_REQUIRED` / `AUTH` | Windows 拒绝激活、输入失焦 / 未授权键入 | 停止，处理焦点问题 / 明确授权 `--allow-foreground-input`；不循环激活 |
 | `OWNER` / `DEPENDENCY` / `IO` | 应用未运行或连接中断 | 运行 `acb_status` 或 `npm run check`，按其中的 `fix` 处理 |
 | `CONFIG` | 找不到 Codex，或还没有任何 Codex 对话 | 安装并打开一次 Codex，或用 `--codex` 指定路径 |
 | `EXECUTION` 且 `approvalsDeclined > 0` | Codex 需要审批 | 在 Codex 应用中批准，或调整该对话的审批策略 |
@@ -170,6 +177,8 @@ npm test             # 只用 Mock，不触碰真实对话
 npm run smoke -- --name ACB-smoke --path C:\temp\acb-smoke   # Windows 实机冒烟：会真实发送消息
 ```
 
+- smoke 失败后可用 `--gpt-conversation <已知 ID> --codex-thread <已知 ID>` 续测已有隔离会话，不重复创建或发送初始化标记。未指定 `--gpt-project` 时的项目测试跳过不属于本轮五项修复的验收结论。
+- 目录：`src/` MCP Server 与两个 PowerShell worker；`test/` Mock 回归测试；`scripts/` 构建与实机冒烟；`config/` 配置与 Hermes 注册示例；`skills/` Hermes Skill；`docs/images/` 图示。
 - 源码在 `src/`，构建产物在 `dist/`（不入库）。两个 PowerShell 辅助脚本必须保存为带 BOM 的 UTF-8，否则 Windows PowerShell 5.1 会读错中文控件名；`npm run build` 会检查这一点。
 - 开发规则见 [AGENTS.md](AGENTS.md) 和 [CONTRIBUTING.md](CONTRIBUTING.md)，变更记录见 [CHANGELOG.md](CHANGELOG.md)。
 - 许可证：[MIT](LICENSE)；依赖许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

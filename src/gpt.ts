@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import { BridgeError } from './errors.ts';
+import { BridgeError, asBridgeError } from './errors.ts';
 import type { NativeChatPage, NativeProject, NativeThread } from './native.ts';
 import type { UiResult } from './windows-ui.ts';
 
@@ -33,7 +33,9 @@ async function until<T>(read: () => Promise<T | undefined>, ms: number, pollMs: 
  * its natively read title is unique in the native inventory (or the page shows its UUID);
  * a closed chat is opened by its single sidebar entry. Anything ambiguous fails. */
 export async function openGpt(deps: GptDeps, id: string, title: string): Promise<Navigation> {
-  const inventory = await deps.native.listThreads(), same = inventory.filter(thread => thread.title === title);
+  const current = (await deps.ui.call('snapshot', { name: '' }, signal(deps))).snapshot;
+  if (current?.title === title && current.ordinaryComposer && current.conversationId === id) return 'current';
+  const inventory = await deps.native.listThreads(), same = inventory.filter(thread => thread.kind === 'chatgpt' && thread.title === title);
   if (same.some(thread => thread.id !== id)) throw new BridgeError('PROVENANCE', 'Another conversation has the same title; the target cannot be located reliably');
   // A target outside the recent inventory cannot be proven unique by title.
   const unique = same.length === 1;
@@ -42,9 +44,8 @@ export async function openGpt(deps: GptDeps, id: string, title: string): Promise
     return view?.title === title && (view.conversationId ? view.conversationId === id : true) && view.ordinaryComposer ? true : undefined;
   };
   // An already open chat counts only by UUID or by a title proven unique.
-  const current = (await deps.ui.call('snapshot', { name: '' }, signal(deps))).snapshot;
   if (current?.title === title && current.ordinaryComposer && (current.conversationId === id || (!current.conversationId && unique))) return 'current';
-  if (!unique) throw new BridgeError('PROVENANCE', 'Target is not in the recent native inventory, so its title cannot be proven unique; open it in the ChatGPT app first');
+  if (!unique) throw new BridgeError('PROVENANCE', 'Target is not in the native inventory (host limit: 50, sidebar sort order, no pagination); its title cannot be proven unique');
   await deps.ui.call('chat-open-title', { name: title }, signal(deps));
   if (await until(showing, 10000, 500)) return 'sidebar';
   throw new BridgeError('PROVENANCE', 'Target conversation could not be opened reliably; open it in the ChatGPT app first');
@@ -89,29 +90,84 @@ export async function sendGpt(deps: GptDeps, conversationId: string, text: strin
  * UUID in the native inventory, then names it natively. Titles must be unique so later
  * location stays unambiguous. With `project`, the chat is started in that existing
  * ChatGPT project; the UI must read the project back before anything is sent. */
+const oneLine = (value: unknown, field: string) => {
+  if (typeof value !== 'string' || !value.trim() || value.length > 200 || /[\r\n]/.test(value)) throw new BridgeError('INPUT', `${field} must be one line of 1..200 characters`);
+};
+
 export async function createGpt(deps: GptDeps, title: string, project?: string): Promise<{ conversationId: string; title: string; project?: { name: string; confirmedBy: 'ui' | 'ui+native'; projectId: string | null } }> {
-  if (typeof title !== 'string' || !title.trim() || title.length > 200 || /[\r\n]/.test(title)) throw new BridgeError('INPUT', 'Title must be one line of 1..200 characters');
-  if (project !== undefined && (typeof project !== 'string' || !project.trim() || project.length > 200 || /[\r\n]/.test(project))) throw new BridgeError('INPUT', 'Project must be one line of 1..200 characters');
+  oneLine(title, 'Title');
+  if (project !== undefined) oneLine(project, 'Project');
+  const deadline = Date.now() + deps.timeoutMs;
+  const budget = (cap: number) => Math.max(0, Math.min(cap, deadline - Date.now()));
   const inventory = await deps.native.listThreads();
   if (inventory.some(thread => thread.title === title)) throw new BridgeError('CONFLICT', 'A conversation with this title already exists; choose a unique title');
   const baseline = new Set(inventory.map(thread => thread.id));
   const prompt = `这是 Agent Control Bridge 新建对话的身份标记，不执行任务。请只回复：ACB_INIT_${randomUUID()}`;
-  const sent = await deps.ui.call('gpt-create', project ? { name: '', prompt, project } : { name: '', prompt }, signal(deps));
-  if (project && sent.project !== project) throw new BridgeError('PROVENANCE', 'The project selection was not confirmed by the app');
-  const row = await until(async () => {
-    for (const thread of await deps.native.listThreads()) {
-      if (baseline.has(thread.id) || thread.kind !== 'chatgpt') continue;
-      if (asks((await deps.native.readThread(thread.id)).turns[0], prompt)) return thread;
-    }
-    return undefined;
-  }, 120000, deps.pollMs);
-  const id = row?.id;
-  if (!id) throw new BridgeError('TIMEOUT', 'The new chat was sent but did not appear in the native inventory; check the app before creating another');
-  await deps.native.setThreadTitle(id, 'chatgpt', title);
-  if (!await until(async () => (await deps.native.readThread(id)).thread.title === title || undefined, 15000, deps.pollMs)) throw new BridgeError('STATE', `Chat ${id} was created but could not be renamed`);
-  if (!project) return { conversationId: id, title };
-  // The UI read the project back; a native project ID, when exposed, must name the same project.
-  const native = row.projectId ? (await deps.native.listProjects?.())?.find(item => item.projectId === row.projectId) : undefined;
-  if (native && native.label !== project) throw new BridgeError('PROVENANCE', `Chat ${id} was created in another project (${native.label})`);
-  return { conversationId: id, title, project: { name: project, confirmedBy: native ? 'ui+native' : 'ui', projectId: row.projectId } };
+  let id: string | null = null, actualTitle: string | null = null, stage = 'initialization', submitted = false, identityVerified = false;
+  let verification: Record<string, unknown> | undefined;
+  try {
+    const sent = await deps.ui.call('gpt-create', project ? { name: '', prompt, project } : { name: '', prompt }, signal(deps));
+    submitted = true;
+    id = sent.conversationId ?? null;
+    if (project && sent.project !== project) throw new BridgeError('PROVENANCE', 'The project selection was not confirmed by the app');
+    stage = 'identity';
+    const row = await until(async () => {
+      const rows = await deps.native.listThreads();
+      // A public UI UUID can be read directly even when manual sorting keeps it
+      // outside the host's bounded list. It is still verified by the exact marker.
+      const candidates = [...new Set([...(id ? [id] : []), ...rows.filter(t => !baseline.has(t.id) && t.kind === 'chatgpt').map(t => t.id)])];
+      for (const candidate of candidates) {
+        const page = await deps.native.readThread(candidate);
+        if (page.thread.id !== candidate || page.thread.kind !== 'chatgpt' || !asks(page.turns[0], prompt)) continue;
+        id = candidate; actualTitle = page.thread.title; identityVerified = true;
+        if (baseline.has(candidate)) throw new BridgeError('PROVENANCE', 'The initialization marker reached a pre-existing conversation');
+        if (page.turns[0].error || ['failed', 'interrupted'].includes(page.turns[0].status)) throw new BridgeError('EXECUTION', 'The initialization turn failed');
+        // Wait until auto-titling and the initial turn finish before renaming.
+        if (!done(page, page.turns[0])) return undefined;
+        return rows.find(t => t.id === candidate) ?? { id: candidate, kind: 'chatgpt', title: page.thread.title, projectId: null, cwd: null };
+      }
+      return undefined;
+    }, budget(120000), deps.pollMs);
+    if (!row || !id) throw new BridgeError('TIMEOUT', 'The marker was submitted but its completed conversation could not be confirmed in the native inventory');
+    const createdId = id;
+    stage = 'title';
+    // No new write once the create budget is spent.
+    if (Date.now() >= deadline) throw new BridgeError('TIMEOUT', 'The create budget ran out before the title could be written');
+    await deps.native.setThreadTitle(createdId, 'chatgpt', title);
+    // A successful write is not persistence. The ID read, the inventory entry of the
+    // same ID and the actual ChatGPT page must all show the new title, twice in a row.
+    // The host's sidebar inventory can lag an ID-addressed title write by about a
+    // minute, so this waits within the original create budget instead of treating a
+    // stale inventory as persisted (or bypassing it).
+    let stable = 0;
+    const confirmed = await until(async () => {
+      const page = await deps.native.readThread(createdId);
+      actualTitle = page.thread.title;
+      if (page.thread.id !== createdId || page.thread.kind !== 'chatgpt' || !asks(page.turns[0], prompt)) throw new BridgeError('PROVENANCE', 'The created conversation identity changed');
+      const rows = await deps.native.listThreads();
+      if (rows.some(t => t.kind === 'chatgpt' && t.title === title && t.id !== createdId)) throw new BridgeError('PROVENANCE', 'The requested title is no longer unique');
+      const view = (await deps.ui.call('snapshot', { name: '' }, signal(deps))).snapshot;
+
+      const nativeTitle = page.thread.title === title;
+      // A page UUID only proves which page is shown, not that the title persisted.
+      const inventoryTitle = rows.find(t => t.id === createdId)?.title ?? null;
+      const located = view?.ordinaryComposer && view.title === title && (!view.conversationId || view.conversationId === createdId);
+      stage = nativeTitle ? 'persistence' : 'title';
+      verification = { nativeTitle: page.thread.title, inventoryTitle, uiTitle: view?.title ?? null, ordinaryComposer: view?.ordinaryComposer ?? false };
+
+      const agreed = nativeTitle && inventoryTitle === title && done(page, page.turns[0]) && located;
+      stable = agreed ? stable + 1 : 0;
+      return stable >= 2 ? true : undefined;
+    }, budget(120000), deps.pollMs);
+    if (!confirmed) throw new BridgeError(stage === 'title' ? 'STATE' : 'PROVENANCE', 'The created chat title, persisted identity and ChatGPT page did not agree');
+    if (!project) return { conversationId: createdId, title };
+    const native = row.projectId ? (await deps.native.listProjects?.())?.find(item => item.projectId === row.projectId) : undefined;
+    if (native && native.label !== project) throw new BridgeError('PROVENANCE', `Chat ${createdId} was created in another project (${native.label})`);
+    return { conversationId: createdId, title, project: { name: project, confirmedBy: native ? 'ui+native' : 'ui', projectId: row.projectId } };
+  } catch (error) {
+    const failure = asBridgeError(error);
+    if (!submitted && !failure.details?.submission) throw error;
+    throw new BridgeError(failure.code, `${failure.message}; creation is partially complete: read the known conversation, do not create again or resend the initialization marker`,
+      { ...failure.details, status: 'partial', conversationId: id, title: actualTitle, requestedTitle: title, identityVerified, submission: failure.details?.submission ?? 'sent', stage, ...(verification ? { verification } : {}) });
+  }
 }

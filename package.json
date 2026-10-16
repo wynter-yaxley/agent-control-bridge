@@ -13,8 +13,7 @@
   "files": [
     "dist",
     "skills",
-    "config.example.json",
-    "config/hermes-mcp.example.yaml",
+    "config",
     "README.md",
     "README_EN.md",
     "LICENSE",
