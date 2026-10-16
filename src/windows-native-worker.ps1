@@ -242,15 +242,22 @@ try {
    $foreground=[AcbInput]::GetForegroundWindow()
    if ($foreground -ne $initialForeground -and $foreground -ne $script:handle) {StopForFocus 'foregroundChanged'}
    if ($foreground -ne $script:handle) {
-    # One focus request to the verified UIA window, never a second activation path.
+    # The top-level Chromium window may not be keyboard-focusable. Use only its
+    # unique visible composer; focusing it does not write or clear its draft.
     # UIA SetFocus is provider-dependent; only the actual foreground handle proves success.
-    $script:activation.method='uiaSetFocus'
-    try {$script:root.SetFocus();$script:activation.requestCompleted=$true} catch {
-     $script:activation.requestCompleted=$false
-     $script:activation.hresult=$_.Exception.GetBaseException().HResult
-     $foreground=[AcbInput]::GetForegroundWindow()
-     if ($foreground -ne $initialForeground -and $foreground -ne $script:handle) {StopForFocus 'foregroundChanged'}
-     StopForFocus 'activationDenied'
+    $focusTarget=FindComposer (Document)
+    $foreground=[AcbInput]::GetForegroundWindow()
+    if ($foreground -ne $initialForeground -and $foreground -ne $script:handle) {StopForFocus 'foregroundChanged'}
+    if ($foreground -ne $script:handle) {
+     if (-not $focusTarget) {StopForFocus 'activationDenied'}
+     $script:activation.method='uiaComposerFocus'
+     try {$focusTarget.SetFocus();$script:activation.requestCompleted=$true} catch {
+      $script:activation.requestCompleted=$false
+      $script:activation.hresult=$_.Exception.GetBaseException().HResult
+      $foreground=[AcbInput]::GetForegroundWindow()
+      if ($foreground -ne $initialForeground -and $foreground -ne $script:handle) {StopForFocus 'foregroundChanged'}
+      StopForFocus 'activationDenied'
+     }
     }
    }
    if (-not (Within 2000 {

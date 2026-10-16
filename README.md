@@ -136,7 +136,7 @@ Copy-Item -Recurse -Force "D:\agent-control-bridge\skills\agent-control-bridge" 
 | `acb_gpt_send` 发送 | UIA 定位 + 核验输入 | 是（已授权时自动尝试激活） | 单行 SendInput；多行 UIA ValuePattern（持续核对前台和焦点） | 激活窗口，输入期间占用键盘 |
 | `acb_gpt_create` | 左侧导航栏「新聊天」+ SendInput 键入 | 是（已授权时自动尝试激活） | 是 | 激活窗口，输入期间占用键盘 |
 
-`--allow-foreground-input` 明确授权 ACB 恢复最小化的、身份已确认的 ChatGPT 窗口，并在输入前尝试激活一次。ACB 等待恢复完成，再向该窗口发出一次 UIA 焦点请求，仍须核对 Windows 实际前台句柄；未授权时不激活、不键入。ACB 不移动鼠标、不使用剪贴板。各种情况下的行为：
+`--allow-foreground-input` 明确授权 ACB 恢复最小化的、身份已确认的 ChatGPT 窗口，并在输入前尝试激活一次。ACB 等待恢复完成，再向该窗口内唯一可用的输入框发出一次 UIA 焦点请求；焦点请求不写入或清除草稿，仍须核对 Windows 实际前台句柄。未授权时不激活、不键入。ACB 不移动鼠标、不使用剪贴板。各种情况下的行为：
 
 ChatGPT 编辑器会合并连续的 Shift+Enter 换行；多行文本因此使用已核验 composer 支持的 UIA ValuePattern 逐段写入，仅替换本次已确认的输入前缀，每段精确回读，保留空行。单行仍用 SendInput；两种方式都需要授权并持续核对前台与焦点。
 

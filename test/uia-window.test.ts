@@ -109,10 +109,15 @@ public static class AcbInput {
 ${fn('Within')}${fn('StopForFocus')}${fn('AssertForeground')}${fn('EnsureForeground')}
 $request=[pscustomobject]@{timeoutMs=100;pollMs=1;foregroundInput=$true}
 $script:handle=[IntPtr]1
-$script:root=[pscustomobject]@{}
-$script:root | Add-Member ScriptMethod SetFocus {[AcbInput]::Focus()}
+$script:root=[pscustomobject]@{Current=@{IsKeyboardFocusable=$false}}
+$script:root | Add-Member ScriptMethod SetFocus {throw 'Top-level window is not focusable'}
+$script:focusTarget=[pscustomobject]@{}
+$script:focusTarget | Add-Member ScriptMethod SetFocus {[AcbInput]::Focus()}
+function Document {$script:root}
+function FindComposer($doc) {if($script:switchOnLookup){[AcbInput]::Foreground=[IntPtr]3};return $script:focusTarget}
 function Reset {
  [AcbInput]::Reset();$script:gptProven=$true;$request.foregroundInput=$true
+ $script:switchOnLookup=$false
  $script:focusLost=$false;$script:foregroundChecked=$false;$script:diagnostics=$null;$script:activation=$null;$script:typedText=''
 }
 function Run {@{outcome=${attempt("EnsureForeground;'ok'")};focuses=[AcbInput]::Focuses;restores=[AcbInput]::Restores;loss=$script:diagnostics}}
@@ -142,11 +147,13 @@ Reset
 [AcbInput]::Iconic=$true;[AcbInput]::SwitchOnRestore=$true;$cases.switchedWhileRestoring=Run
 Reset
 [AcbInput]::SwitchOnFocus=$true;$cases.switchedWhileFocusing=Run
+Reset
+$script:switchOnLookup=$true;$cases.switchedWhileFinding=Run
 $cases | ConvertTo-Json -Compress -Depth 5`);
   const loss = (focusReason: string, foregroundHandle = 2, typedLength = 0) => ({ focusReason, targetHandle: 1, foregroundHandle, typedLength });
   assert.deepEqual(result.unauthorized, { outcome: 'ERR:FOCUS_REQUIRED', focuses: 0, restores: 0, loss: loss('foregroundNotAuthorized') });
   assert.deepEqual(result.unknown, { outcome: 'ERR:OWNER', focuses: 0, restores: 0, loss: null });
-  assert.deepEqual(result.denied, { outcome: 'ERR:FOCUS_REQUIRED', focuses: 1, restores: 0, loss: { ...loss('activationDenied'), activation: { method: 'uiaSetFocus', requestCompleted: true } } });
+  assert.deepEqual(result.denied, { outcome: 'ERR:FOCUS_REQUIRED', focuses: 1, restores: 0, loss: { ...loss('activationDenied'), activation: { method: 'uiaComposerFocus', requestCompleted: true } } });
   assert.deepEqual(result.deniedAgain, result.denied);
   assert.equal(result.providerError.outcome, 'ERR:FOCUS_REQUIRED');
   assert.equal(result.providerError.focuses, 1);
@@ -155,7 +162,7 @@ $cases | ConvertTo-Json -Compress -Depth 5`);
   assert.ok(result.providerError.loss.activation.hresult < 0);
   assert.deepEqual(result.activated, { outcome: 'ok', focuses: 1, restores: 0, loss: null });
   assert.deepEqual(result.again, result.activated);
-  assert.deepEqual(result.switched, { outcome: 'ERR:FOCUS_REQUIRED', focuses: 1, restores: 0, loss: { ...loss('foregroundChanged', 2, 10), activation: { method: 'uiaSetFocus', requestCompleted: true } } });
+  assert.deepEqual(result.switched, { outcome: 'ERR:FOCUS_REQUIRED', focuses: 1, restores: 0, loss: { ...loss('foregroundChanged', 2, 10), activation: { method: 'uiaComposerFocus', requestCompleted: true } } });
   assert.deepEqual(result.restored, { outcome: 'ok', focuses: 1, restores: 1, loss: null });
   assert.deepEqual(result.restoreActivated, { outcome: 'ok', focuses: 0, restores: 1, loss: null });
   for (const name of ['restoreDenied', 'restoreTimeout']) {
@@ -164,7 +171,7 @@ $cases | ConvertTo-Json -Compress -Depth 5`);
     assert.equal(result[name].focuses, 0, name);
     assert.equal(result[name].restores, 1, name);
   }
-  for (const name of ['switchedWhileRestoring', 'switchedWhileFocusing']) {
+  for (const name of ['switchedWhileRestoring', 'switchedWhileFocusing', 'switchedWhileFinding']) {
     assert.equal(result[name].outcome, 'ERR:FOCUS_REQUIRED', name);
     assert.equal(result[name].loss.focusReason, 'foregroundChanged', name);
     assert.equal(result[name].loss.foregroundHandle, 3, name);
