@@ -14,6 +14,7 @@ const prompt = '[TEST] reply with OK';
 const page = (status: string, turns: NativeChatPage['turns'], kind = 'chatgpt'): NativeChatPage => ({ thread: { id: 'gpt-id', kind, title: '测试消息', status: { type: status } }, turns });
 const answered = (id: string, text = prompt): NativeChatPage['turns'][number] => ({ id, status: 'completed', error: null, items: [{ type: 'userMessage', id: `u-${id}`, content: [{ type: 'text', text }] }, { type: 'agentMessage', id: `a-${id}`, text: '[native]' }] });
 const row = (id: string, title: string) => ({ id, kind: 'chatgpt', title, projectId: null, cwd: null });
+const idleChat = (id: string, title: string, turns: NativeChatPage['turns']): NativeChatPage => ({ thread: { id, kind: 'chatgpt', title, status: { type: 'idle' } }, turns });
 
 function gpt(pages: NativeChatPage[], inventory = [row('gpt-id', '测试消息')]) {
   const calls: string[] = [];
@@ -54,7 +55,7 @@ test('gpt: a new chat is identified by its own marker turn, never by title, then
   let marker = '', titled = '';
   const { deps } = gpt([]);
   Object.assign(deps.native, { listThreads: async () => inventory, setThreadTitle: async (_id: string, _source: string, title: string) => { titled = title; inventory.find(t => t.id === 'new-id')!.title = title; },
-    readThread: async (id: string) => ({ thread: { id, kind: 'chatgpt', title: titled || '新聊天', status: { type: 'idle' } }, turns: id === 'new-id' ? [answered('t', marker)] : [answered('t', 'unrelated')] }) });
+    readThread: async (id: string) => idleChat(id, titled || '新聊天', id === 'new-id' ? [answered('t', marker)] : [answered('t', 'unrelated')]) });
   deps.ui.call = (async (operation: string, fields: { prompt?: string }) => { if (operation === 'gpt-create') { marker = fields.prompt!; inventory.push(row('decoy', '新聊天'), row('new-id', '新聊天')); } return { ok: true, snapshot: { title: titled, text: '', ordinaryComposer: true, pid: 1, conversationId: null } }; }) as typeof deps.ui.call;
   assert.deepEqual(await createGpt(deps, 'ACB 测试'), { conversationId: 'new-id', title: 'ACB 测试' });
   assert.match(marker, /ACB_INIT_[a-f0-9-]{36}$/);
@@ -68,7 +69,7 @@ test('gpt: a chat started in a project counts only when the app read the project
     const { deps } = gpt([]);
     Object.assign(deps.native, { listThreads: async () => inventory, setThreadTitle: async (_id: string, _source: string, title: string) => { titled = title; renamed = true; inventory.find(t => t.id === 'new-id')!.title = title; },
       listProjects: async () => [{ projectId: 'p-1', projectKind: 'chatgpt', label, path: '', hostId: '' }],
-      readThread: async (id: string) => ({ thread: { id, kind: 'chatgpt', title: titled || '新聊天', status: { type: 'idle' } }, turns: id === 'new-id' ? [answered('t', marker)] : [] }) });
+      readThread: async (id: string) => idleChat(id, titled || '新聊天', id === 'new-id' ? [answered('t', marker)] : []) });
     deps.ui.call = (async (operation: string, fields: { prompt?: string; project?: string }) => {
       if (operation !== 'gpt-create') return { ok: true, snapshot: { title: titled, text: '', ordinaryComposer: true, pid: 1, conversationId: null } };
       if (fail) throw Object.assign(new Error(fail), { code: fail });
@@ -95,7 +96,7 @@ test('gpt: create reports partial completion and its ID when title or persistenc
     const deps = { timeoutMs: 25, pollMs: 1,
       native: {
         listThreads: async () => inventory,
-        readThread: async (id: string) => ({ thread: { id, kind: 'chatgpt', title, status: { type: 'idle' } }, turns: [answered('init', fail === 'missing-marker' ? 'other' : marker)] }),
+        readThread: async (id: string) => idleChat(id, title, [answered('init', fail === 'missing-marker' ? 'other' : marker)]),
         setThreadTitle: async (_id: string, _source: string, value: string) => { writes++; if (fail === 'rename-error') throw new BridgeError('IO', 'rename failed'); if (fail !== 'native-title') { title = value; inventory[0].title = value; } },
       },
       ui: { call: async (operation: string, fields: { prompt?: string }) => {
@@ -119,7 +120,7 @@ test('gpt: the chat verified after creation accepts the second prompt and return
   const deps = { timeoutMs: 1000, pollMs: 1,
     native: { listThreads: async () => inventory,
       setThreadTitle: async (_id: string, _source: string, value: string) => { title = value; inventory[0].title = value; },
-      readThread: async (id: string) => ({ thread: { id, kind: 'chatgpt', title, status: { type: 'idle' } }, turns: [answered(turnId, text)] }) },
+      readThread: async (id: string) => idleChat(id, title, [answered(turnId, text)]) },
     ui: { call: async (operation: string, fields: { prompt?: string }) => {
       if (operation === 'gpt-create') { creates++; text = fields.prompt!; inventory.push(row('new-id', title)); }
       if (operation === 'chat-send') { sends++; text = fields.prompt!; turnId = 'second'; }
@@ -139,7 +140,7 @@ test('gpt: a page UUID alone is not persistence: the inventory must list the sam
       native: {
         // The rename reaches the ID read, but the sidebar inventory never reflects it.
         listThreads: async () => inventoryState === 'stale' && marker ? [row('new-id', 'New chat')] : [],
-        readThread: async (id: string) => ({ thread: { id, kind: 'chatgpt', title, status: { type: 'idle' } }, turns: [answered('init', marker)] }),
+        readThread: async (id: string) => idleChat(id, title, [answered('init', marker)]),
         setThreadTitle: async (_id: string, _source: string, value: string) => { title = value; renames++; },
       },
       ui: { call: async (operation: string, fields: { prompt?: string }) => {
@@ -164,7 +165,7 @@ test('gpt: once the create budget is spent, the title is not written; the result
     native: {
       listThreads: async () => marker ? [row('new-id', 'New chat')] : [],
       // The identity read that confirms the marker finishes only after the budget.
-      readThread: async (id: string) => { if (marker && slow) { slow = false; await delay(60); } return { thread: { id, kind: 'chatgpt', title: 'New chat', status: { type: 'idle' } }, turns: [answered('init', marker)] }; },
+      readThread: async (id: string) => { if (marker && slow) { slow = false; await delay(60); } return idleChat(id, 'New chat', [answered('init', marker)]); },
       setThreadTitle: async () => { renames++; },
     },
     ui: { call: async (operation: string, fields: { prompt?: string }) => {
@@ -185,7 +186,7 @@ test('gpt: a stale sidebar inventory after rename must converge before create su
   const deps = { timeoutMs: 500, pollMs: 1,
     native: {
       listThreads: async () => marker ? [row('new-id', renames && ++readsAfterRename >= 4 ? title : 'New chat')] : [],
-      readThread: async (id: string) => ({ thread: { id, kind: 'chatgpt', title, status: { type: 'idle' } }, turns: [answered('init', marker)] }),
+      readThread: async (id: string) => idleChat(id, title, [answered('init', marker)]),
       setThreadTitle: async (_id: string, _source: string, value: string) => { title = value; renames++; },
     },
     ui: { call: async (operation: string, fields: { prompt?: string }) => {

@@ -90,9 +90,13 @@ export async function sendGpt(deps: GptDeps, conversationId: string, text: strin
  * UUID in the native inventory, then names it natively. Titles must be unique so later
  * location stays unambiguous. With `project`, the chat is started in that existing
  * ChatGPT project; the UI must read the project back before anything is sent. */
+const oneLine = (value: unknown, field: string) => {
+  if (typeof value !== 'string' || !value.trim() || value.length > 200 || /[\r\n]/.test(value)) throw new BridgeError('INPUT', `${field} must be one line of 1..200 characters`);
+};
+
 export async function createGpt(deps: GptDeps, title: string, project?: string): Promise<{ conversationId: string; title: string; project?: { name: string; confirmedBy: 'ui' | 'ui+native'; projectId: string | null } }> {
-  if (typeof title !== 'string' || !title.trim() || title.length > 200 || /[\r\n]/.test(title)) throw new BridgeError('INPUT', 'Title must be one line of 1..200 characters');
-  if (project !== undefined && (typeof project !== 'string' || !project.trim() || project.length > 200 || /[\r\n]/.test(project))) throw new BridgeError('INPUT', 'Project must be one line of 1..200 characters');
+  oneLine(title, 'Title');
+  if (project !== undefined) oneLine(project, 'Project');
   const deadline = Date.now() + deps.timeoutMs;
   const budget = (cap: number) => Math.max(0, Math.min(cap, deadline - Date.now()));
   const inventory = await deps.native.listThreads();
@@ -130,28 +134,30 @@ export async function createGpt(deps: GptDeps, title: string, project?: string):
     // No new write once the create budget is spent.
     if (Date.now() >= deadline) throw new BridgeError('TIMEOUT', 'The create budget ran out before the title could be written');
     await deps.native.setThreadTitle(createdId, 'chatgpt', title);
-    // A successful write is not persistence. Both the ID read and the inventory
-    // must agree with the actual ChatGPT page twice before create reports success.
+    // A successful write is not persistence. The ID read, the inventory entry of the
+    // same ID and the actual ChatGPT page must all show the new title, twice in a row.
+    // The host's sidebar inventory can lag an ID-addressed title write by about a
+    // minute, so this waits within the original create budget instead of treating a
+    // stale inventory as persisted (or bypassing it).
     let stable = 0;
     const confirmed = await until(async () => {
       const page = await deps.native.readThread(createdId);
       actualTitle = page.thread.title;
       if (page.thread.id !== createdId || page.thread.kind !== 'chatgpt' || !asks(page.turns[0], prompt)) throw new BridgeError('PROVENANCE', 'The created conversation identity changed');
-      const rows = await deps.native.listThreads(), matching = rows.filter(t => t.kind === 'chatgpt' && t.title === title);
-      if (matching.some(t => t.id !== createdId)) throw new BridgeError('PROVENANCE', 'The requested title is no longer unique');
+      const rows = await deps.native.listThreads();
+      if (rows.some(t => t.kind === 'chatgpt' && t.title === title && t.id !== createdId)) throw new BridgeError('PROVENANCE', 'The requested title is no longer unique');
       const view = (await deps.ui.call('snapshot', { name: '' }, signal(deps))).snapshot;
+
       const nativeTitle = page.thread.title === title;
-      // The inventory must list this exact ID with the new title; a page UUID only
-      // proves which page is shown, not that the title persisted.
+      // A page UUID only proves which page is shown, not that the title persisted.
       const inventoryTitle = rows.find(t => t.id === createdId)?.title ?? null;
-      stage = !nativeTitle ? 'title' : 'persistence';
       const located = view?.ordinaryComposer && view.title === title && (!view.conversationId || view.conversationId === createdId);
+      stage = nativeTitle ? 'persistence' : 'title';
       verification = { nativeTitle: page.thread.title, inventoryTitle, uiTitle: view?.title ?? null, ordinaryComposer: view?.ordinaryComposer ?? false };
-      stable = nativeTitle && inventoryTitle === title && done(page, page.turns[0]) && located ? stable + 1 : 0;
+
+      const agreed = nativeTitle && inventoryTitle === title && done(page, page.turns[0]) && located;
+      stable = agreed ? stable + 1 : 0;
       return stable >= 2 ? true : undefined;
-    // The host's sidebar inventory can lag an ID-addressed title write by about
-    // a minute. Wait for convergence within the original create budget rather
-    // than treating a 15 s stale inventory as successful persistence (or bypassing it).
     }, budget(120000), deps.pollMs);
     if (!confirmed) throw new BridgeError(stage === 'title' ? 'STATE' : 'PROVENANCE', 'The created chat title, persisted identity and ChatGPT page did not agree');
     if (!project) return { conversationId: createdId, title };
