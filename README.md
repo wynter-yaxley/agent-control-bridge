@@ -68,7 +68,7 @@ Copy-Item -Recurse -Force "D:\agent-control-bridge\skills\agent-control-bridge" 
 
 ### 配置（全部可选）
 
-不需要配置文件。如需调整，按以下优先级生效：命令行参数 → 环境变量 → 配置文件（`--config <file>` 或 `ACB_CONFIG`，示例见 [config.example.json](config.example.json)）→ 自动发现与默认值。
+不需要配置文件。如需调整，按以下优先级生效：命令行参数 → 环境变量 → 配置文件（`--config <file>` 或 `ACB_CONFIG`，示例见 [config/config.example.json](config/config.example.json)）→ 自动发现与默认值。
 
 | 配置项 | 命令行 / 环境变量 | 默认值 |
 |---|---|---|
@@ -178,6 +178,7 @@ npm run smoke -- --name ACB-smoke --path C:\temp\acb-smoke   # Windows 实机冒
 ```
 
 - smoke 失败后可用 `--gpt-conversation <已知 ID> --codex-thread <已知 ID>` 续测已有隔离会话，不重复创建或发送初始化标记。未指定 `--gpt-project` 时的项目测试跳过不属于本轮五项修复的验收结论。
+- 目录：`src/` MCP Server 与两个 PowerShell worker；`test/` Mock 回归测试；`scripts/` 构建与实机冒烟；`config/` 配置与 Hermes 注册示例；`skills/` Hermes Skill；`docs/images/` 图示。
 - 源码在 `src/`，构建产物在 `dist/`（不入库）。两个 PowerShell 辅助脚本必须保存为带 BOM 的 UTF-8，否则 Windows PowerShell 5.1 会读错中文控件名；`npm run build` 会检查这一点。
 - 开发规则见 [AGENTS.md](AGENTS.md) 和 [CONTRIBUTING.md](CONTRIBUTING.md)，变更记录见 [CHANGELOG.md](CHANGELOG.md)。
 - 许可证：[MIT](LICENSE)；依赖许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

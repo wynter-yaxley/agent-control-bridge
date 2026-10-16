@@ -37,7 +37,7 @@ Then start a new Hermes session (or `/reload-mcp`). Keep the server name `acb`. 
 
 The skill [skills/agent-control-bridge/SKILL.md](skills/agent-control-bridge/SKILL.md) carries the working rules: Hermes coordinates, ChatGPT analyses and reviews, Codex builds and tests; reuse conversations; short reports; investigate only the direct cause of a failure; ask before non-core work. Hermes lists skills in every prompt and loads matching ones; check with `hermes skills list` or load it with `/agent-control-bridge`.
 
-Configuration is optional: options, then `ACB_CODEX`, `ACB_CARRIER_THREAD`, `ACB_WORKSPACE_ROOT`, `ACB_ALLOW_FOREGROUND_INPUT=1`, `ACB_DEBUG=1`, `ACB_CONFIG`, then a JSON file ([config.example.json](config.example.json)), then discovery. Defaults: newest desktop `codex.exe`, the most recent Codex conversation as desktop context, `%USERPROFILE%\acb-workspaces`, a 240 s send timeout (below Hermes' 300 s tool timeout), no logs.
+Configuration is optional: options, then `ACB_CODEX`, `ACB_CARRIER_THREAD`, `ACB_WORKSPACE_ROOT`, `ACB_ALLOW_FOREGROUND_INPUT=1`, `ACB_DEBUG=1`, `ACB_CONFIG`, then a JSON file ([config/config.example.json](config/config.example.json)), then discovery. Defaults: newest desktop `codex.exe`, the most recent Codex conversation as desktop context, `%USERPROFILE%\acb-workspaces`, a 240 s send timeout (below Hermes' 300 s tool timeout), no logs.
 
 ## Tools
 

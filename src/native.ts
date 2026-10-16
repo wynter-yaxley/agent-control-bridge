@@ -108,9 +108,9 @@ export class NativeClient {
     identifier(options.carrierThreadId);
     this.options = options; this.worker = options.worker ?? sharedWorker;
   }
-  private async call(tool: ReadTool | WriteTool | null, args: JsonObject): Promise<JsonObject> {
-    const id = randomUUID(), prefix = tool && WRITES.includes(tool as WriteTool) ? 'acb-write-' : 'acb-readonly-';
-    const request = tool === null ? { jsonrpc: '2.0', id, method: 'tools/list', params: { threadStartKind: 'all' } } : { jsonrpc: '2.0', id, method: 'tools/call', params: { arguments: args, callId: `${prefix}${randomUUID()}`, namespace: 'codex_app',
+  private async call(tool: ReadTool | WriteTool, args: JsonObject): Promise<JsonObject> {
+    const write = WRITES.includes(tool as WriteTool), id = randomUUID(), prefix = write ? 'acb-write-' : 'acb-readonly-';
+    const request = { jsonrpc: '2.0', id, method: 'tools/call', params: { arguments: args, callId: `${prefix}${randomUUID()}`, namespace: 'codex_app',
       threadId: this.options.carrierThreadId, tool, turnId: `${prefix}${randomUUID()}`, callerSource: 'codex' } };
     const envelope = await this.worker.request({ requestJson: JSON.stringify(request), timeoutMs: this.options.timeoutMs, maxFrameBytes: this.options.maxFrameBytes,
       maxCandidates: this.options.maxCandidates, expectedProcessId: this.peerPid ?? null, expectedProcessStartedAt: this.peerStartedAt ?? null }, this.options.timeoutMs);
@@ -123,13 +123,12 @@ export class NativeClient {
     if (response.jsonrpc !== '2.0' || response.id !== id) throw new BridgeError('IO', 'Native response identity mismatch');
     if (response.error !== undefined) throw new BridgeError(object(response.error).code === -32602 ? 'IPC_CONFIG' : 'IO', 'Native request was rejected');
     const result = object(response.result);
-    if (tool === null) return result;
     if (result.success !== true || !Array.isArray(result.contentItems)) throw new BridgeError('IO', 'Native tool did not report success');
     const text = result.contentItems.filter(item => object(item).type === 'inputText');
     if (text.length !== 1 || typeof object(text[0]).text !== 'string') throw new BridgeError('IO', 'Native tool response has an unexpected shape');
     // Writes may answer in plain text; reads must be JSON.
     try { return object(JSON.parse(object(text[0]).text as string)); }
-    catch (error) { if (tool && WRITES.includes(tool as WriteTool)) return { text: String(object(text[0]).text).slice(0, 2000) }; if (error instanceof BridgeError) throw error; throw new BridgeError('IO', 'Native tool response JSON is invalid'); }
+    catch (error) { if (write) return { text: String(object(text[0]).text).slice(0, 2000) }; if (error instanceof BridgeError) throw error; throw new BridgeError('IO', 'Native tool response JSON is invalid'); }
   }
   async listThreads(): Promise<NativeThread[]> {
     // The desktop catalog supports at most 50 non-pinned rows and has no cursor.
@@ -140,11 +139,6 @@ export class NativeClient {
     const rows = [...(Array.isArray(result.pinnedThreads) ? result.pinnedThreads : []), ...(Array.isArray(result.threads) ? result.threads : [])].map(object)
       .map(row => ({ id: String(row.id), kind: String(row.kind), title: String(row.title ?? ''), projectId: typeof row.projectId === 'string' ? row.projectId : null, cwd: typeof row.cwd === 'string' ? row.cwd : null }));
     return [...new Map(rows.map(row => [row.id, row])).values()];
-  }
-  async catalog(): Promise<Record<string, JsonObject>> {
-    const tools = (await this.call(null, {})).tools;
-    if (!Array.isArray(tools)) throw new BridgeError('IO', 'Invalid native tool catalog');
-    return Object.fromEntries(tools.map(object).filter(tool => tool.namespace === 'codex_app').map(tool => [String(tool.name), object(tool.inputSchema ?? {})]));
   }
   async listProjects(): Promise<NativeProject[]> {
     const result = await this.call('list_projects', {});

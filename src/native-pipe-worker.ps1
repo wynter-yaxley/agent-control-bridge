@@ -35,9 +35,7 @@ while ($null -ne ($inputText=[Console]::In.ReadLine())) {
  foreach($key in @('jsonrpc','id','method')){if($request.($key) -isnot [string]){throw 'IO'}}
  if($request.jsonrpc -ne '2.0' -or $request.id -notmatch '^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$'){throw 'IO'}
  $params=$request.params
- if($request.method -eq 'tools/list'){
-  Fields $params @('threadStartKind');if($params.threadStartKind -isnot [string] -or $params.threadStartKind -ne 'all'){throw 'IO'}
- }elseif($request.method -eq 'tools/call'){
+ if($request.method -eq 'tools/call'){
   Fields $params @('arguments','callId','namespace','threadId','tool','turnId','callerSource')
   foreach($key in @('namespace','callerSource','threadId','callId','turnId','tool')){if($params.($key) -isnot [string]){throw 'IO'}}
   # Reads use acb-readonly-, the one ID-addressed write (set_thread_title) acb-write-; anything else is refused.
