@@ -142,6 +142,7 @@ ChatGPT 编辑器会合并连续的 Shift+Enter 换行；多行文本因此使�
 
 - **ChatGPT 不在前台**：已授权时自动尝试激活，确认 Windows 实际前台句柄一致才输入。Windows 拒绝激活或未授权时返回 `FOCUS_REQUIRED`，不向其他窗口输入，不通过修改系统设置或模拟快捷键强抢焦点。
 - **输入中途切换窗口或焦点**：立即停止并返回 `FOCUS_REQUIRED`，不反复切回。已经输入的部分可能留在 ChatGPT 输入框里，请删除或保留；ACB 不会把它发出去。
+- **失焦诊断**：`diagnostics.focusReason` 区分 `activationDenied`（Windows 拒绝激活）、`foregroundChanged`（前台窗口改变）、`composerFocusLost`（输入框失焦）和 `foregroundNotAuthorized`（未授权切前台）。同时返回 `targetHandle`、`foregroundHandle` 和本次已完成写入的前缀长度 `typedLength`（UTF-16）；不包含正文。写入、提交和失败清理前都会再次检查前台，失焦后不清理草稿。
 - **关闭 ChatGPT**：GPT 工具返回 `OWNER` 或 `IO`，Codex 工具不受影响。下次调用时会自动重新启动相应的辅助进程。
 - **关闭 Codex 桌面应用**：`acb_threads` 和 GPT 工具无法读取对话清单，返回 `OWNER` 或 `IO`；Codex App Server 工具照常可用。
 - **同时开着 ChatGPT 和 Codex 窗口**：只使用能确认是 ChatGPT 的那一个窗口；无法确认时拒绝操作。

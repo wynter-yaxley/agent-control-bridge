@@ -31,18 +31,21 @@ public static class AcbInput {
  static INPUT Key(ushort vk,ushort scan,uint flags) {var input=new INPUT();input.type=1;input.u.ki.wVk=vk;input.u.ki.wScan=scan;input.u.ki.dwFlags=flags;return input;}
  static bool Send(System.Collections.Generic.List<INPUT> list) {var items=list.ToArray();return SendInput((uint)items.Length,items,Marshal.SizeOf(typeof(INPUT)))==items.Length;}
  // Unicode packets; a newline is Shift+Enter so the composer does not submit.
+ public static int TypedLength {get;private set;}
  public static bool Type(string text,IntPtr window) {
+  TypedLength=0;
   foreach (char c in text) {
    if (GetForegroundWindow()!=window) return false;
    var list=new System.Collections.Generic.List<INPUT>();
    if (c=='\n') {list.Add(Key(0x10,0,0));list.Add(Key(0x0D,0,0));list.Add(Key(0x0D,0,2));list.Add(Key(0x10,0,2));}
    else {list.Add(Key(0,c,4));list.Add(Key(0,c,6));}
    if (!Send(list)) return false;
+   TypedLength++;
   }
   return true;
  }
  // Ctrl+A, Delete: removes only text this worker typed into a field that was empty.
- public static bool Clear() {var list=new System.Collections.Generic.List<INPUT>{Key(0x11,0,0),Key(0x41,0,0),Key(0x41,0,2),Key(0x11,0,2),Key(0x2E,0,0),Key(0x2E,0,2)};return Send(list);}
+ public static bool Clear(IntPtr window) {var list=new System.Collections.Generic.List<INPUT>{Key(0x11,0,0),Key(0x41,0,0),Key(0x41,0,2),Key(0x11,0,2),Key(0x2E,0,0),Key(0x2E,0,2)};return GetForegroundWindow()==window&&Send(list);}
 }
 '@
 [Console]::Error.WriteLine('ACB_UI_STAGE=worker-loaded')
@@ -103,6 +106,7 @@ try {
   if (-not [AcbFolderControls]::Interactive()) {throw 'OWNER'}
   $pattern=$null
   if ($null -eq $element -or -not $element.Current.IsEnabled -or ($element.Current.IsOffscreen -and -not $offscreen) -or -not $element.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern,[ref]$pattern)) {throw 'STATE'}
+  AssertForeground
   ([System.Windows.Automation.InvokePattern]$pattern).Invoke()
  }
  function Value($element) {return ([System.Windows.Automation.ValuePattern]$element.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)).Current.Value.Trim()}
@@ -191,24 +195,30 @@ try {
   for ($i=0;$i -lt 8 -and $null -ne $focused;$i++) {if ((ElementKey $focused) -eq (ElementKey $edit)) {return $true};$focused=$walker.GetParent($focused)}
   return $false
  }
+ function StopForFocus([string]$reason='composerFocusLost') {
+  $foreground=[AcbInput]::GetForegroundWindow()
+  if ($reason -eq 'composerFocusLost' -and $foreground -ne $script:handle) {$reason='foregroundChanged'}
+  if (-not $script:focusLost) {$script:diagnostics=@{focusReason=$reason;targetHandle=$script:handle.ToInt64();foregroundHandle=$foreground.ToInt64();typedLength=$script:typedText.Length}}
+  $script:focusLost=$true
+  throw 'FOCUS_REQUIRED'
+ }
  function AssertForeground {
   $foreground=[AcbInput]::GetForegroundWindow()
   if ($script:focusLost -or $foreground -ne $script:handle) {
-   if (-not $script:diagnostics) {$script:diagnostics=@{targetHandle=$script:handle.ToInt64();foregroundHandle=$foreground.ToInt64();typedLength=$script:typedText.Length}}
-   $script:focusLost=$true;throw 'FOCUS_REQUIRED'
+   StopForFocus 'foregroundChanged'
   }
  }
  function EnsureForeground {
   if ($script:foregroundChecked) {AssertForeground;return}
   $script:stage='input-foreground'
   if ([AcbInput]::GetForegroundWindow() -ne $script:handle) {
-   if ($request.foregroundInput -ne $true) {throw 'FOCUS_REQUIRED'}
+   if ($request.foregroundInput -ne $true) {StopForFocus 'foregroundNotAuthorized'}
    if (-not $script:gptProven) {throw 'OWNER'}
    $script:stage='input-activate'
    if ([AcbInput]::IsIconic($script:handle)) {[void][AcbInput]::ShowWindowAsync($script:handle,9)}
    # Windows may refuse. No simulated Alt key, focus-lock changes or retry loop.
    [void][AcbInput]::SetForegroundWindow($script:handle)
-   if (-not (Within 2000 {if ([AcbInput]::GetForegroundWindow() -eq $script:handle) {$true}})) {throw 'FOCUS_REQUIRED'}
+   if (-not (Within 2000 {if ([AcbInput]::GetForegroundWindow() -eq $script:handle) {$true}})) {StopForFocus 'activationDenied'}
   }
   $script:foregroundChecked=$true
   AssertForeground
@@ -223,7 +233,7 @@ try {
    # A UIA refresh can replace the edit. Never select a different field merely
    # because it has the same name: it must be the sole visible, focused edit,
    # on the same page, containing exactly our previously verified text.
-   if (-not (Focused $current)) {$script:focusLost=$true;throw 'FOCUS_REQUIRED'}
+   if (-not (Focused $current)) {StopForFocus}
    if ((ComposerText $current) -cne (Normalize $expected)) {$script:stage='chat-compose-replaced';throw 'STATE'}
    $script:composerKey=ElementKey $current
   }
@@ -239,7 +249,7 @@ try {
   EnsureForeground
   $script:stage='input-focus'
   $edit.SetFocus()
-  if (-not (Within 3000 {AssertForeground;$now=CurrentComposer '';if ($now -and (Focused $now)) {$true}})) {throw 'FOCUS_REQUIRED'}
+  if (-not (Within 3000 {AssertForeground;$now=CurrentComposer '';if ($now -and (Focused $now)) {$true}})) {StopForFocus}
   $script:stage='input-type';[Console]::Error.WriteLine("ACB_UI_STAGE=$script:stage")
   $script:typed=$edit
   # This Chromium editor collapses consecutive Shift+Enter breaks. For multiline
@@ -250,7 +260,7 @@ try {
   for ($offset=0;$offset -lt $text.Length;) {
    # The user moved the window or focus: stop rather than type elsewhere.
    $edit=CurrentComposer $script:typedText
-   if (-not $edit -or -not (Focused $edit)) {$script:focusLost=$true;throw 'FOCUS_REQUIRED'}
+   if (-not $edit -or -not (Focused $edit)) {StopForFocus}
    $count=[Math]::Min(8,$text.Length-$offset)
    # Do not split a surrogate pair across chunks.
    if ($offset+$count -lt $text.Length -and [char]::IsHighSurrogate($text[$offset+$count-1])) {$count--}
@@ -259,11 +269,19 @@ try {
     if ((ComposerText $edit) -cne (Normalize $script:typedText)) {throw 'CONFLICT'}
     $pattern=$null
     if (-not $edit.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern,[ref]$pattern) -or $pattern.Current.IsReadOnly) {$script:stage='input-multiline-pattern';throw 'STATE'}
+    AssertForeground
+    if (-not (Focused $edit)) {StopForFocus}
     $pattern.SetValue($script:typedText+$chunk)
-   } elseif (-not [AcbInput]::Type($chunk,$script:handle)) {AssertForeground;throw 'IO'}
+   } elseif (-not [AcbInput]::Type($chunk,$script:handle)) {
+    # A foreground switch can interrupt a single-line chunk after some characters.
+    $script:typedText+=$chunk.Substring(0,[AcbInput]::TypedLength)
+    AssertForeground
+    if (-not (Focused $edit)) {StopForFocus}
+    throw 'IO'
+   }
    $script:typedText+=$chunk;$script:typed=$edit;$offset+=$count
    if ($multiline) {
-    $verified=Within 1000 {$now=CurrentComposer $script:typedText;if ($now -and -not (Focused $now)) {$script:focusLost=$true;throw 'FOCUS_REQUIRED'};if ($now -and (ComposerText $now) -ceq (Normalize $script:typedText)) {$true}}
+    $verified=Within 1000 {$now=CurrentComposer $script:typedText;if ($now -and -not (Focused $now)) {StopForFocus};if ($now -and (ComposerText $now) -ceq (Normalize $script:typedText)) {$true}}
     if (-not $verified) {$script:stage='input-multiline-verify';throw 'STATE'}
    }
    Start-Sleep -Milliseconds 10
@@ -272,7 +290,7 @@ try {
  # After a failure, remove only what this worker typed (the field was empty before).
  function ClearTyped {
   if ($null -eq $script:typed) {return}
-  try {if (-not $script:focusLost) {$edit=CurrentComposer $script:typedText;if ($edit -and (Focused $edit) -and (ComposerText $edit) -ceq (Normalize $script:typedText)) {[void][AcbInput]::Clear()}}} catch {}
+  try {if (-not $script:focusLost) {$edit=CurrentComposer $script:typedText;if ($edit -and (Focused $edit) -and (ComposerText $edit) -ceq (Normalize $script:typedText)) {AssertForeground;if (Focused $edit) {[void][AcbInput]::Clear($script:handle)}}}} catch {}
   $script:typed=$null
  }
  # Writes $prompt into an empty ordinary composer and requires it to read back within ~10 s.
@@ -289,7 +307,7 @@ try {
   $script:inputMode='typed'
   TypeInto $edit $prompt
   $script:stage='chat-compose-verify';[Console]::Error.WriteLine("ACB_UI_STAGE=$script:stage")
-  $written=Within 10000 {$current=CurrentComposer $prompt;if ($current -and -not (Focused $current)) {$script:focusLost=$true;throw 'FOCUS_REQUIRED'};if ($current -and (ComposerText $current) -ceq $prompt) {$current}}
+  $written=Within 10000 {$current=CurrentComposer $prompt;if ($current -and -not (Focused $current)) {StopForFocus};if ($current -and (ComposerText $current) -ceq $prompt) {$current}}
   if (-not $written) {
    $after=CurrentComposer $prompt;$actual=if ($after) {ComposerText $after} else {''}
    $script:diagnostics=@{beforeRuntimeId=$beforeKey;afterRuntimeId=$(if ($after) {ElementKey $after} else {$null});expectedLength=$prompt.Length;actualLength=$actual.Length;textSource=$script:textSource;visible=($null -ne $after);focused=($after -and (Focused $after))}
@@ -299,7 +317,7 @@ try {
  function VerifyComposed([string]$prompt) {
   $edit=CurrentComposer $prompt
   if (-not $edit -or (ComposerText $edit) -cne $prompt) {$script:stage='chat-compose-before-send';throw 'STATE'}
-  if ($script:inputMode -eq 'typed' -and -not (Focused $edit)) {$script:focusLost=$true;throw 'FOCUS_REQUIRED'}
+  if ($script:inputMode -eq 'typed' -and -not (Focused $edit)) {StopForFocus}
  }
  function Buttons([string]$name,[switch]$offscreen,$scope=$script:root) {
   $condition=[System.Windows.Automation.AndCondition]::new([System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Button),[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::NameProperty,$name))
@@ -329,7 +347,7 @@ try {
   return $null
  }
  # Both windows have a "新聊天" button: only the single window known to be ChatGPT is used.
- # A window of unknown kind is accepted only when it is the app's only window (-strict: never).
+ # Unknown windows are refused even when they are the app's only window.
  function PickGptWindow($wins,[switch]$strict) {
   $kinds=@($wins | ForEach-Object {[pscustomobject]@{Window=$_;Kind=(WindowKind $_)}})
   $gpt=@($kinds | Where-Object {$_.Kind -eq 'ChatGPT'})
@@ -345,7 +363,7 @@ try {
   }
   return PickGptWindow $all -strict:($request.operation -eq 'gpt-create')
  }
- # The blank GPT new-chat page: GPT mode (-strict: the switch must be shown) and no message yet.
+ # The blank page of the already verified GPT window; its switch may disappear after navigation.
  function GptLanding([switch]$strict) {
   $mode=WindowMode $script:root
   if (($mode -and $mode -ne 'ChatGPT') -or (-not $script:gptProven)) {return $false}
@@ -357,6 +375,7 @@ try {
   $pattern=$null
   if ($null -eq $element -or -not $element.Current.IsEnabled -or $element.Current.IsOffscreen) {throw 'STATE'}
   if (-not $element.TryGetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern,[ref]$pattern)) {Invoke $element;return}
+  AssertForeground
   # Radix menus may report Collapsed while open; Expand then refuses, which means open.
   try {([System.Windows.Automation.ExpandCollapsePattern]$pattern).Expand()} catch [InvalidOperationException] {}
  }
@@ -365,6 +384,7 @@ try {
   if ($item.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern,[ref]$pattern)) {Invoke $item;return}
   if (-not [AcbFolderControls]::Interactive()) {throw 'OWNER'}
   if ($item.Current.IsOffscreen -or -not $item.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern,[ref]$pattern)) {throw 'STATE'}
+  AssertForeground
   ([System.Windows.Automation.SelectionItemPattern]$pattern).Select()
  }
  function ProjectItems([string]$name) {
