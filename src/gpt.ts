@@ -127,6 +127,8 @@ export async function createGpt(deps: GptDeps, title: string, project?: string):
     if (!row || !id) throw new BridgeError('TIMEOUT', 'The marker was submitted but its completed conversation could not be confirmed in the native inventory');
     const createdId = id;
     stage = 'title';
+    // No new write once the create budget is spent.
+    if (Date.now() >= deadline) throw new BridgeError('TIMEOUT', 'The create budget ran out before the title could be written');
     await deps.native.setThreadTitle(createdId, 'chatgpt', title);
     // A successful write is not persistence. Both the ID read and the inventory
     // must agree with the actual ChatGPT page twice before create reports success.
@@ -139,10 +141,13 @@ export async function createGpt(deps: GptDeps, title: string, project?: string):
       if (matching.some(t => t.id !== createdId)) throw new BridgeError('PROVENANCE', 'The requested title is no longer unique');
       const view = (await deps.ui.call('snapshot', { name: '' }, signal(deps))).snapshot;
       const nativeTitle = page.thread.title === title;
+      // The inventory must list this exact ID with the new title; a page UUID only
+      // proves which page is shown, not that the title persisted.
+      const inventoryTitle = rows.find(t => t.id === createdId)?.title ?? null;
       stage = !nativeTitle ? 'title' : 'persistence';
-      const located = view?.ordinaryComposer && view.title === title && (view.conversationId ? view.conversationId === createdId : matching.length === 1 && matching[0].id === createdId);
-      verification = { nativeTitle: page.thread.title, inventoryTitle: rows.find(t => t.id === createdId)?.title ?? null, uiTitle: view?.title ?? null, ordinaryComposer: view?.ordinaryComposer ?? false };
-      stable = nativeTitle && done(page, page.turns[0]) && located ? stable + 1 : 0;
+      const located = view?.ordinaryComposer && view.title === title && (!view.conversationId || view.conversationId === createdId);
+      verification = { nativeTitle: page.thread.title, inventoryTitle, uiTitle: view?.title ?? null, ordinaryComposer: view?.ordinaryComposer ?? false };
+      stable = nativeTitle && inventoryTitle === title && done(page, page.turns[0]) && located ? stable + 1 : 0;
       return stable >= 2 ? true : undefined;
     // The host's sidebar inventory can lag an ID-addressed title write by about
     // a minute. Wait for convergence within the original create budget rather

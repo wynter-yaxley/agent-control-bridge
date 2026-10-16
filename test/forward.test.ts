@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { PassThrough, Writable } from 'node:stream';
 import type { spawn } from 'node:child_process';
+import { setTimeout as delay } from 'node:timers/promises';
 import { createGpt, sendGpt } from '../src/gpt.ts';
 import { createCodex, sendCodex } from '../src/codex.ts';
 import { createWorkspace } from '../src/workspace.ts';
@@ -129,6 +130,54 @@ test('gpt: the chat verified after creation accepts the second prompt and return
   const reply = await sendGpt(deps, created.conversationId, 'second prompt');
   assert.equal(reply.reply, 'SECOND_OK'); assert.equal(reply.turnId, 'second');
   assert.equal(creates, 1); assert.equal(sends, 1);
+});
+
+test('gpt: a page UUID alone is not persistence: the inventory must list the same ID with the new title', async () => {
+  for (const inventoryState of ['missing', 'stale']) {
+    let marker = '', title = 'New chat', renames = 0, creates = 0;
+    const deps = { timeoutMs: 40, pollMs: 1,
+      native: {
+        // The rename reaches the ID read, but the sidebar inventory never reflects it.
+        listThreads: async () => inventoryState === 'stale' && marker ? [row('new-id', 'New chat')] : [],
+        readThread: async (id: string) => ({ thread: { id, kind: 'chatgpt', title, status: { type: 'idle' } }, turns: [answered('init', marker)] }),
+        setThreadTitle: async (_id: string, _source: string, value: string) => { title = value; renames++; },
+      },
+      ui: { call: async (operation: string, fields: { prompt?: string }) => {
+        if (operation === 'gpt-create') { creates++; marker = fields.prompt!; return { ok: true, conversationId: 'new-id' }; }
+        // The page exposes the exact UUID and the new title.
+        return { ok: true, snapshot: { title, text: '', ordinaryComposer: true, pid: 1, conversationId: 'new-id' } };
+      } },
+    };
+    await assert.rejects(createGpt(deps, 'wanted'), (error: BridgeError) => {
+      assert.equal(error.code, 'PROVENANCE', inventoryState);
+      assert.deepEqual([error.details?.status, error.details?.conversationId, error.details?.stage, error.details?.identityVerified], ['partial', 'new-id', 'persistence', true], inventoryState);
+      assert.equal((error.details?.verification as { inventoryTitle: unknown }).inventoryTitle, inventoryState === 'stale' ? 'New chat' : null, inventoryState);
+      return true;
+    });
+    assert.equal(creates, 1, inventoryState); assert.equal(renames, 1, inventoryState);
+  }
+});
+
+test('gpt: once the create budget is spent, the title is not written; the result is partial', async () => {
+  let marker = '', renames = 0, creates = 0, slow = true;
+  const deps = { timeoutMs: 20, pollMs: 1,
+    native: {
+      listThreads: async () => marker ? [row('new-id', 'New chat')] : [],
+      // The identity read that confirms the marker finishes only after the budget.
+      readThread: async (id: string) => { if (marker && slow) { slow = false; await delay(60); } return { thread: { id, kind: 'chatgpt', title: 'New chat', status: { type: 'idle' } }, turns: [answered('init', marker)] }; },
+      setThreadTitle: async () => { renames++; },
+    },
+    ui: { call: async (operation: string, fields: { prompt?: string }) => {
+      if (operation === 'gpt-create') { creates++; marker = fields.prompt!; return { ok: true, conversationId: null }; }
+      return { ok: true, snapshot: { title: 'New chat', text: '', ordinaryComposer: true, pid: 1, conversationId: null } };
+    } },
+  };
+  await assert.rejects(createGpt(deps, 'late title'), (error: BridgeError) => {
+    assert.equal(error.code, 'TIMEOUT');
+    assert.deepEqual([error.details?.status, error.details?.conversationId, error.details?.stage, error.details?.identityVerified], ['partial', 'new-id', 'title', true]);
+    return true;
+  });
+  assert.equal(renames, 0); assert.equal(creates, 1);
 });
 
 test('gpt: a stale sidebar inventory after rename must converge before create succeeds', async () => {
