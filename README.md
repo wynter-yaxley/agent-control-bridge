@@ -136,13 +136,14 @@ Copy-Item -Recurse -Force "D:\agent-control-bridge\skills\agent-control-bridge" 
 | `acb_gpt_send` 发送 | UIA 定位 + 核验输入 | 是（已授权时自动尝试激活） | 单行 SendInput；多行 UIA ValuePattern（持续核对前台和焦点） | 激活窗口，输入期间占用键盘 |
 | `acb_gpt_create` | 左侧导航栏「新聊天」+ SendInput 键入 | 是（已授权时自动尝试激活） | 是 | 激活窗口，输入期间占用键盘 |
 
-`--allow-foreground-input` 明确授权 ACB 恢复最小化的、身份已确认的 ChatGPT 窗口，并在输入前尝试激活一次；未授权时不激活、不键入。ACB 不移动鼠标、不使用剪贴板。各种情况下的行为：
+`--allow-foreground-input` 明确授权 ACB 恢复最小化的、身份已确认的 ChatGPT 窗口，并在输入前尝试激活一次。ACB 等待恢复完成，再向该窗口发出一次 UIA 焦点请求，仍须核对 Windows 实际前台句柄；未授权时不激活、不键入。ACB 不移动鼠标、不使用剪贴板。各种情况下的行为：
 
 ChatGPT 编辑器会合并连续的 Shift+Enter 换行；多行文本因此使用已核验 composer 支持的 UIA ValuePattern 逐段写入，仅替换本次已确认的输入前缀，每段精确回读，保留空行。单行仍用 SendInput；两种方式都需要授权并持续核对前台与焦点。
 
 - **ChatGPT 不在前台**：已授权时自动尝试激活，确认 Windows 实际前台句柄一致才输入。Windows 拒绝激活或未授权时返回 `FOCUS_REQUIRED`，不向其他窗口输入，不通过修改系统设置或模拟快捷键强抢焦点。
 - **输入中途切换窗口或焦点**：立即停止并返回 `FOCUS_REQUIRED`，不反复切回。已经输入的部分可能留在 ChatGPT 输入框里，请删除或保留；ACB 不会把它发出去。
 - **失焦诊断**：`diagnostics.focusReason` 区分 `activationDenied`（Windows 拒绝激活）、`foregroundChanged`（前台窗口改变）、`composerFocusLost`（输入框失焦）和 `foregroundNotAuthorized`（未授权切前台）。同时返回 `targetHandle`、`foregroundHandle` 和本次已完成写入的前缀长度 `typedLength`（UTF-16）；不包含正文。写入、提交和失败清理前都会再次检查前台，失焦后不清理草稿。
+- **激活诊断**：发生激活尝试时，失焦错误还包含 `diagnostics.activation`：方式 `method`、恢复请求是否受理 `restoreAccepted`、UIA 请求是否完成 `requestCompleted`，以及异常时的 `hresult`（按实际步骤返回）。请求完成不代表窗口已成为前台。
 - **关闭 ChatGPT**：GPT 工具返回 `OWNER` 或 `IO`，Codex 工具不受影响。下次调用时会自动重新启动相应的辅助进程。
 - **关闭 Codex 桌面应用**：`acb_threads` 和 GPT 工具无法读取对话清单，返回 `OWNER` 或 `IO`；Codex App Server 工具照常可用。
 - **同时开着 ChatGPT 和 Codex 窗口**：只使用能确认是 ChatGPT 的那一个窗口；无法确认时拒绝操作。

@@ -61,11 +61,13 @@ Errors are `{"ok":false,"code","message"}`. A repeated prompt is never resent: a
 
 ## Foreground and background
 
-Codex and inventory tools run in the background. `--allow-foreground-input` explicitly authorizes ACB to restore a minimized, verified ChatGPT window and try to activate it once before GPT navigation/typing. It checks the actual Windows foreground handle and composer focus. If Windows refuses or the user changes windows/focus during input, ACB stops with `FOCUS_REQUIRED`, never repeatedly takes focus, and never submits the partial text. Without authorization it never activates or types; an identical draft can only be submitted while ChatGPT is already in front. No mouse, clipboard or focus-lock workaround is used. A Codex or unidentified window is refused. The user still approves Codex commands, creates ChatGPT projects, moves existing chats into projects and opens chats missing from the sidebar.
+Codex and inventory tools run in the background. `--allow-foreground-input` explicitly authorizes ACB to restore a minimized, verified ChatGPT window and try to activate it once before GPT navigation/typing. It waits for restoration to complete, then requests focus once on that verified UIA window. It checks the actual Windows foreground handle and composer focus. If Windows refuses or the user changes windows/focus during input, ACB stops with `FOCUS_REQUIRED`, never repeatedly takes focus, and never submits the partial text. Without authorization it never activates or types; an identical draft can only be submitted while ChatGPT is already in front. No mouse, clipboard or focus-lock workaround is used. A Codex or unidentified window is refused. The user still approves Codex commands, creates ChatGPT projects, moves existing chats into projects and opens chats missing from the sidebar.
 
 Single-line input uses SendInput. The editor collapses consecutive Shift+Enter breaks, so multiline input uses the verified composer's supported UIA ValuePattern in chunks, replacing only the exact prefix written by this operation and checking its text, foreground and focus after every write. Blank lines must read back exactly before submission.
 
 Focus errors include `diagnostics.focusReason`: `activationDenied`, `foregroundChanged`, `composerFocusLost`, or `foregroundNotAuthorized`. They also include the actual `targetHandle`, `foregroundHandle`, and `typedLength` of the completed prefix in UTF-16 units, without prompt text. Foreground checks run immediately before writes, submission and failure cleanup; a focus loss leaves the draft untouched.
+
+After an activation attempt, focus errors also include `diagnostics.activation`: `method`, restore-request acceptance (`restoreAccepted`), UIA request completion (`requestCompleted`), and an exception's `hresult`, as applicable. A completed request does not prove that the window became foreground.
 
 ## Limits
 

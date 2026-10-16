@@ -93,35 +93,83 @@ function Case([string]$current,$items,[bool]$selects) {
   assert.deepEqual([result.already.outcome, result.already.expanded], ['ok', 0]);
 });
 
-test('foreground: authorization gates restore/activation; denial and a later user switch never retry activation', { skip: !available }, () => {
+test('foreground: one verified UIA focus request waits for restore and never retries after denial or focus loss', { skip: !available }, () => {
   const result = pwsh(`Add-Type -TypeDefinition @'
 using System;
 public static class AcbInput {
- public static IntPtr Foreground=new IntPtr(2); public static bool Allow=false; public static int Attempts=0, Restores=0;
+ public static IntPtr Foreground; public static int Focuses, Restores, RestoreChecks;
+ public static bool Allow, Iconic, Pending, RestoreAccepted, RestoreActivates, SwitchOnRestore, SwitchOnFocus, ThrowOnFocus;
+ public static void Reset(){Foreground=new IntPtr(2);Focuses=Restores=0;RestoreChecks=2;Allow=Iconic=Pending=RestoreActivates=SwitchOnRestore=SwitchOnFocus=ThrowOnFocus=false;RestoreAccepted=true;}
  public static IntPtr GetForegroundWindow(){return Foreground;}
- public static bool SetForegroundWindow(IntPtr w){Attempts++;if(Allow)Foreground=w;return Allow;}
- public static bool IsIconic(IntPtr w){return true;}
- public static bool ShowWindowAsync(IntPtr w,int c){Restores++;return true;}
+ public static bool IsIconic(IntPtr w){if(Pending){if(SwitchOnRestore)Foreground=new IntPtr(3);if(RestoreChecks--<=0){Pending=Iconic=false;if(RestoreActivates)Foreground=w;}}return Iconic;}
+ public static bool ShowWindowAsync(IntPtr w,int c){Restores++;Pending=RestoreAccepted;return RestoreAccepted;}
+ public static void Focus(){Focuses++;if(ThrowOnFocus||Iconic)throw new InvalidOperationException("Not focusable");if(SwitchOnFocus)Foreground=new IntPtr(3);else if(Allow)Foreground=new IntPtr(1);}
 }
 '@
 ${fn('Within')}${fn('StopForFocus')}${fn('AssertForeground')}${fn('EnsureForeground')}
-$request=[pscustomobject]@{timeoutMs=20;pollMs=1;foregroundInput=$false}
-$script:handle=[IntPtr]1;$script:gptProven=$true;$script:typedText=''
-function Reset {$script:focusLost=$false;$script:foregroundChecked=$false;$script:diagnostics=$null}
+$request=[pscustomobject]@{timeoutMs=100;pollMs=1;foregroundInput=$true}
+$script:handle=[IntPtr]1
+$script:root=[pscustomobject]@{}
+$script:root | Add-Member ScriptMethod SetFocus {[AcbInput]::Focus()}
+function Reset {
+ [AcbInput]::Reset();$script:gptProven=$true;$request.foregroundInput=$true
+ $script:focusLost=$false;$script:foregroundChecked=$false;$script:diagnostics=$null;$script:activation=$null;$script:typedText=''
+}
+function Run {@{outcome=${attempt("EnsureForeground;'ok'")};focuses=[AcbInput]::Focuses;restores=[AcbInput]::Restores;loss=$script:diagnostics}}
+$cases=@{}
 Reset
-$unauthorized=${attempt("EnsureForeground;'ok'")};$before=[AcbInput]::Attempts;$unauthorizedLoss=$script:diagnostics
-$request.foregroundInput=$true
+$request.foregroundInput=$false;[AcbInput]::Iconic=$true;$cases.unauthorized=Run
 Reset
-$denied=${attempt("EnsureForeground;'ok'")};$deniedCount=[AcbInput]::Attempts;$deniedLoss=$script:diagnostics
-[AcbInput]::Allow=$true
+$script:gptProven=$false;$cases.unknown=Run
 Reset
-$activated=${attempt("EnsureForeground;'ok'")}
-$again=${attempt("EnsureForeground;'ok'")};$successCount=[AcbInput]::Attempts
+$cases.denied=Run;$cases.deniedAgain=Run
+Reset
+[AcbInput]::ThrowOnFocus=$true;$cases.providerError=Run
+Reset
+[AcbInput]::Allow=$true;$cases.activated=Run;$cases.again=Run
 [AcbInput]::Foreground=[IntPtr]2
 $script:typedText='our prefix'
-$switched=${attempt("EnsureForeground;'ok'")}
-@{unauthorized=$unauthorized;unauthorizedLoss=$unauthorizedLoss;before=$before;denied=$denied;deniedLoss=$deniedLoss;deniedCount=$deniedCount;activated=$activated;again=$again;successCount=$successCount;switched=$switched;finalCount=[AcbInput]::Attempts;loss=$script:diagnostics} | ConvertTo-Json -Compress`);
-  assert.deepEqual(result, { unauthorized: 'ERR:FOCUS_REQUIRED', unauthorizedLoss: { focusReason: 'foregroundNotAuthorized', targetHandle: 1, foregroundHandle: 2, typedLength: 0 }, before: 0, denied: 'ERR:FOCUS_REQUIRED', deniedLoss: { focusReason: 'activationDenied', targetHandle: 1, foregroundHandle: 2, typedLength: 0 }, deniedCount: 1, activated: 'ok', again: 'ok', successCount: 2, switched: 'ERR:FOCUS_REQUIRED', finalCount: 2, loss: { focusReason: 'foregroundChanged', targetHandle: 1, foregroundHandle: 2, typedLength: 10 } });
+$cases.switched=Run
+Reset
+[AcbInput]::Iconic=$true;[AcbInput]::Allow=$true;$cases.restored=Run
+Reset
+[AcbInput]::Iconic=$true;[AcbInput]::RestoreActivates=$true;$cases.restoreActivated=Run
+Reset
+[AcbInput]::Iconic=$true;[AcbInput]::RestoreAccepted=$false;$cases.restoreDenied=Run
+Reset
+[AcbInput]::Iconic=$true;[AcbInput]::RestoreChecks=2147483647;$cases.restoreTimeout=Run
+Reset
+[AcbInput]::Iconic=$true;[AcbInput]::SwitchOnRestore=$true;$cases.switchedWhileRestoring=Run
+Reset
+[AcbInput]::SwitchOnFocus=$true;$cases.switchedWhileFocusing=Run
+$cases | ConvertTo-Json -Compress -Depth 5`);
+  const loss = (focusReason: string, foregroundHandle = 2, typedLength = 0) => ({ focusReason, targetHandle: 1, foregroundHandle, typedLength });
+  assert.deepEqual(result.unauthorized, { outcome: 'ERR:FOCUS_REQUIRED', focuses: 0, restores: 0, loss: loss('foregroundNotAuthorized') });
+  assert.deepEqual(result.unknown, { outcome: 'ERR:OWNER', focuses: 0, restores: 0, loss: null });
+  assert.deepEqual(result.denied, { outcome: 'ERR:FOCUS_REQUIRED', focuses: 1, restores: 0, loss: { ...loss('activationDenied'), activation: { method: 'uiaSetFocus', requestCompleted: true } } });
+  assert.deepEqual(result.deniedAgain, result.denied);
+  assert.equal(result.providerError.outcome, 'ERR:FOCUS_REQUIRED');
+  assert.equal(result.providerError.focuses, 1);
+  assert.equal(result.providerError.loss.focusReason, 'activationDenied');
+  assert.equal(result.providerError.loss.activation.requestCompleted, false);
+  assert.ok(result.providerError.loss.activation.hresult < 0);
+  assert.deepEqual(result.activated, { outcome: 'ok', focuses: 1, restores: 0, loss: null });
+  assert.deepEqual(result.again, result.activated);
+  assert.deepEqual(result.switched, { outcome: 'ERR:FOCUS_REQUIRED', focuses: 1, restores: 0, loss: { ...loss('foregroundChanged', 2, 10), activation: { method: 'uiaSetFocus', requestCompleted: true } } });
+  assert.deepEqual(result.restored, { outcome: 'ok', focuses: 1, restores: 1, loss: null });
+  assert.deepEqual(result.restoreActivated, { outcome: 'ok', focuses: 0, restores: 1, loss: null });
+  for (const name of ['restoreDenied', 'restoreTimeout']) {
+    assert.equal(result[name].outcome, 'ERR:FOCUS_REQUIRED', name);
+    assert.equal(result[name].loss.focusReason, 'activationDenied', name);
+    assert.equal(result[name].focuses, 0, name);
+    assert.equal(result[name].restores, 1, name);
+  }
+  for (const name of ['switchedWhileRestoring', 'switchedWhileFocusing']) {
+    assert.equal(result[name].outcome, 'ERR:FOCUS_REQUIRED', name);
+    assert.equal(result[name].loss.focusReason, 'foregroundChanged', name);
+    assert.equal(result[name].loss.foregroundHandle, 3, name);
+    assert.equal(result[name].focuses, name === 'switchedWhileFocusing' ? 1 : 0, name);
+  }
 });
 
 test('composer binding: a refreshed RuntimeId needs the same page, focus and exact prior text', { skip: !available }, () => {

@@ -25,7 +25,6 @@ public static class AcbInput {
  [StructLayout(LayoutKind.Sequential)] struct INPUT {public uint type;public UNION u;}
  [DllImport("user32.dll",SetLastError=true)] static extern uint SendInput(uint count,INPUT[] inputs,int size);
  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
- [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr window);
  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr window);
  [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr window,int command);
  static INPUT Key(ushort vk,ushort scan,uint flags) {var input=new INPUT();input.type=1;input.u.ki.wVk=vk;input.u.ki.wScan=scan;input.u.ki.dwFlags=flags;return input;}
@@ -64,6 +63,7 @@ $script:focusLost=$false
 $script:foregroundChecked=$false
 $script:submission=$null
 $script:diagnostics=$null
+$script:activation=$null
 $script:gptProven=$false
 $script:treeReadable=$true
 $script:inputMode=$null
@@ -208,6 +208,7 @@ try {
     foregroundHandle=$foreground.ToInt64()
     typedLength=$script:typedText.Length
    }
+   if ($script:activation) {$script:diagnostics.activation=$script:activation.Clone()}
   }
   $script:focusLost=$true
   throw 'FOCUS_REQUIRED'
@@ -219,16 +220,44 @@ try {
   }
  }
  function EnsureForeground {
-  if ($script:foregroundChecked) {AssertForeground;return}
+  if ($script:focusLost -or $script:foregroundChecked) {AssertForeground;return}
   $script:stage='input-foreground'
-  if ([AcbInput]::GetForegroundWindow() -ne $script:handle) {
+  $initialForeground=[AcbInput]::GetForegroundWindow()
+  if ($initialForeground -ne $script:handle) {
    if ($request.foregroundInput -ne $true) {StopForFocus 'foregroundNotAuthorized'}
    if (-not $script:gptProven) {throw 'OWNER'}
    $script:stage='input-activate'
-   if ([AcbInput]::IsIconic($script:handle)) {[void][AcbInput]::ShowWindowAsync($script:handle,9)}
-   # Windows may refuse. No simulated Alt key, focus-lock changes or retry loop.
-   [void][AcbInput]::SetForegroundWindow($script:handle)
-   if (-not (Within 2000 {if ([AcbInput]::GetForegroundWindow() -eq $script:handle) {$true}})) {StopForFocus 'activationDenied'}
+   $script:activation=@{method='none'}
+   if ([AcbInput]::IsIconic($script:handle)) {
+    $script:activation.method='restore'
+    $script:activation.restoreAccepted=[AcbInput]::ShowWindowAsync($script:handle,9)
+    if (-not $script:activation.restoreAccepted) {StopForFocus 'activationDenied'}
+    # ShowWindowAsync queues a restore; focusing before it completes can fail.
+    if (-not (Within 2000 {
+     $foreground=[AcbInput]::GetForegroundWindow()
+     if ($foreground -ne $initialForeground -and $foreground -ne $script:handle) {StopForFocus 'foregroundChanged'}
+     if (-not [AcbInput]::IsIconic($script:handle)) {$true}
+    })) {StopForFocus 'activationDenied'}
+   }
+   $foreground=[AcbInput]::GetForegroundWindow()
+   if ($foreground -ne $initialForeground -and $foreground -ne $script:handle) {StopForFocus 'foregroundChanged'}
+   if ($foreground -ne $script:handle) {
+    # One focus request to the verified UIA window, never a second activation path.
+    # UIA SetFocus is provider-dependent; only the actual foreground handle proves success.
+    $script:activation.method='uiaSetFocus'
+    try {$script:root.SetFocus();$script:activation.requestCompleted=$true} catch {
+     $script:activation.requestCompleted=$false
+     $script:activation.hresult=$_.Exception.GetBaseException().HResult
+     $foreground=[AcbInput]::GetForegroundWindow()
+     if ($foreground -ne $initialForeground -and $foreground -ne $script:handle) {StopForFocus 'foregroundChanged'}
+     StopForFocus 'activationDenied'
+    }
+   }
+   if (-not (Within 2000 {
+    $foreground=[AcbInput]::GetForegroundWindow()
+    if ($foreground -eq $script:handle) {return $true}
+    if ($foreground -ne $initialForeground) {StopForFocus 'foregroundChanged'}
+   })) {StopForFocus 'activationDenied'}
   }
   $script:foregroundChecked=$true
   AssertForeground
