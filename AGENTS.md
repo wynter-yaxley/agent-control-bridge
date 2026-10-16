@@ -25,3 +25,9 @@ ACB 是连接 Hermes 与 ChatGPT / Codex 桌面应用的 MCP Server（用法见 
 - 每次修改只运行直接相关的 typecheck、build 和测试。测试只用 Mock 或隔离数据。
 - 桌面实机验证须单独授权、只在隔离环境中运行（`npm run smoke`），并如实报告。没有真实回执的内容标为未验证；不能用提交、推送或模拟测试代替实测。
 - 只维护 README、CHANGELOG、本文件和 Skill 等必要文档，不新增阶段报告。
+
+## CC 开发与 Windows 验收的边界
+
+- Claude Code（CC）只在本仓库目录内修改源码、Mock 测试和必要文档，可运行不触碰真实桌面的测试、类型检查及构建。CC 不运行实机 smoke/Hermes，不操纵真实窗口或对话，不修改仓库外的 Profile、系统设置或凭据。
+- 实机运行由 Windows 验收方执行，按实际提交记录步骤、原始回执和未验证项；旧提交的实机结果不得直接作为新 HEAD 的实机结论。非 Windows 环境跳过的 UIA 测试必须如实列出。
+- 现有开发入口保持稳定：`EnsureForeground` 与 `AcbInput` 负责单次激活及实际前台检查，`StopForFocus` 负责首次失焦诊断，`TypeInto` / `ClearTyped` 负责输入与清理保护。`test/uia-window.test.ts` 通过模拟的 `AcbInput`、`AcbFolderControls` 和 UIA 控件执行真实 PowerShell 函数；CC 可在这些边界补充回归，不另写桌面驱动脚本。

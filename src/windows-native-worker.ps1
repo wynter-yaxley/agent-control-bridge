@@ -197,8 +197,18 @@ try {
  }
  function StopForFocus([string]$reason='composerFocusLost') {
   $foreground=[AcbInput]::GetForegroundWindow()
-  if ($reason -eq 'composerFocusLost' -and $foreground -ne $script:handle) {$reason='foregroundChanged'}
-  if (-not $script:focusLost) {$script:diagnostics=@{focusReason=$reason;targetHandle=$script:handle.ToInt64();foregroundHandle=$foreground.ToInt64();typedLength=$script:typedText.Length}}
+  if ($reason -eq 'composerFocusLost' -and $foreground -ne $script:handle) {
+   $reason='foregroundChanged'
+  }
+  # Keep the first loss and its completed prefix, even if cleanup checks focus again.
+  if (-not $script:focusLost) {
+   $script:diagnostics=@{
+    focusReason=$reason
+    targetHandle=$script:handle.ToInt64()
+    foregroundHandle=$foreground.ToInt64()
+    typedLength=$script:typedText.Length
+   }
+  }
   $script:focusLost=$true
   throw 'FOCUS_REQUIRED'
  }
@@ -244,13 +254,24 @@ try {
  # authorization. The ChatGPT window must be in front and $edit focused before every chunk.
  function TypeInto($edit,[string]$text) {
   $script:stage='input-authorize'
-  if ($request.foregroundInput -ne $true) {throw 'AUTH'}
-  if (-not [AcbFolderControls]::Interactive()) {throw 'OWNER'}
+  if ($request.foregroundInput -ne $true) {
+   throw 'AUTH'
+  }
+  if (-not [AcbFolderControls]::Interactive()) {
+   throw 'OWNER'
+  }
   EnsureForeground
   $script:stage='input-focus'
   $edit.SetFocus()
-  if (-not (Within 3000 {AssertForeground;$now=CurrentComposer '';if ($now -and (Focused $now)) {$true}})) {StopForFocus}
-  $script:stage='input-type';[Console]::Error.WriteLine("ACB_UI_STAGE=$script:stage")
+  if (-not (Within 3000 {
+   AssertForeground
+   $now=CurrentComposer ''
+   if ($now -and (Focused $now)) {$true}
+  })) {
+   StopForFocus
+  }
+  $script:stage='input-type'
+  [Console]::Error.WriteLine("ACB_UI_STAGE=$script:stage")
   $script:typed=$edit
   # This Chromium editor collapses consecutive Shift+Enter breaks. For multiline
   # text, use its supported ValuePattern on our own verified prefix, never keyboard
@@ -260,29 +281,53 @@ try {
   for ($offset=0;$offset -lt $text.Length;) {
    # The user moved the window or focus: stop rather than type elsewhere.
    $edit=CurrentComposer $script:typedText
-   if (-not $edit -or -not (Focused $edit)) {StopForFocus}
+   if (-not $edit -or -not (Focused $edit)) {
+    StopForFocus
+   }
    $count=[Math]::Min(8,$text.Length-$offset)
    # Do not split a surrogate pair across chunks.
-   if ($offset+$count -lt $text.Length -and [char]::IsHighSurrogate($text[$offset+$count-1])) {$count--}
+   if ($offset+$count -lt $text.Length -and [char]::IsHighSurrogate($text[$offset+$count-1])) {
+    $count--
+   }
    $chunk=$text.Substring($offset,$count)
    if ($multiline) {
-    if ((ComposerText $edit) -cne (Normalize $script:typedText)) {throw 'CONFLICT'}
+    if ((ComposerText $edit) -cne (Normalize $script:typedText)) {
+     throw 'CONFLICT'
+    }
     $pattern=$null
-    if (-not $edit.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern,[ref]$pattern) -or $pattern.Current.IsReadOnly) {$script:stage='input-multiline-pattern';throw 'STATE'}
+    if (-not $edit.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern,[ref]$pattern) -or $pattern.Current.IsReadOnly) {
+     $script:stage='input-multiline-pattern'
+     throw 'STATE'
+    }
     AssertForeground
-    if (-not (Focused $edit)) {StopForFocus}
+    if (-not (Focused $edit)) {
+     StopForFocus
+    }
     $pattern.SetValue($script:typedText+$chunk)
    } elseif (-not [AcbInput]::Type($chunk,$script:handle)) {
     # A foreground switch can interrupt a single-line chunk after some characters.
     $script:typedText+=$chunk.Substring(0,[AcbInput]::TypedLength)
     AssertForeground
-    if (-not (Focused $edit)) {StopForFocus}
+    if (-not (Focused $edit)) {
+     StopForFocus
+    }
     throw 'IO'
    }
-   $script:typedText+=$chunk;$script:typed=$edit;$offset+=$count
+   $script:typedText+=$chunk
+   $script:typed=$edit
+   $offset+=$count
    if ($multiline) {
-    $verified=Within 1000 {$now=CurrentComposer $script:typedText;if ($now -and -not (Focused $now)) {StopForFocus};if ($now -and (ComposerText $now) -ceq (Normalize $script:typedText)) {$true}}
-    if (-not $verified) {$script:stage='input-multiline-verify';throw 'STATE'}
+    $verified=Within 1000 {
+     $now=CurrentComposer $script:typedText
+     if ($now -and -not (Focused $now)) {
+      StopForFocus
+     }
+     if ($now -and (ComposerText $now) -ceq (Normalize $script:typedText)) {$true}
+    }
+    if (-not $verified) {
+     $script:stage='input-multiline-verify'
+     throw 'STATE'
+    }
    }
    Start-Sleep -Milliseconds 10
   }
@@ -290,7 +335,19 @@ try {
  # After a failure, remove only what this worker typed (the field was empty before).
  function ClearTyped {
   if ($null -eq $script:typed) {return}
-  try {if (-not $script:focusLost) {$edit=CurrentComposer $script:typedText;if ($edit -and (Focused $edit) -and (ComposerText $edit) -ceq (Normalize $script:typedText)) {AssertForeground;if (Focused $edit) {[void][AcbInput]::Clear($script:handle)}}}} catch {}
+  try {
+   if (-not $script:focusLost) {
+    $edit=CurrentComposer $script:typedText
+    if ($edit -and (Focused $edit) -and (ComposerText $edit) -ceq (Normalize $script:typedText)) {
+     AssertForeground
+     if (Focused $edit) {
+      [void][AcbInput]::Clear($script:handle)
+     }
+    }
+   }
+  } catch {
+   # Cleanup is best effort; preserve the failure that brought us here.
+  }
   $script:typed=$null
  }
  # Writes $prompt into an empty ordinary composer and requires it to read back within ~10 s.
