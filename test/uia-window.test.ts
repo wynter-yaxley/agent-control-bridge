@@ -7,6 +7,7 @@ import { spawnSync } from 'node:child_process';
 // functions against mocks; no desktop is touched.
 const shell = process.platform === 'win32' ? 'powershell.exe' : 'pwsh';
 const available = spawnSync(shell, ['-NoProfile', '-NonInteractive', '-Command', '$PSVersionTable.PSVersion.Major'], { encoding: 'utf8', windowsHide: true }).status === 0;
+const skipWindowsUia = process.platform !== 'win32' ? 'UIAutomationClient requires Windows' : !available;
 const raw = readFileSync(new URL('../src/windows-native-worker.ps1', import.meta.url));
 const source = raw.toString('utf8');
 const fn = (name: string) => new RegExp(`\\n function ${name}[ (][\\s\\S]*?\\n }\\n`).exec(source)![0];
@@ -202,7 +203,7 @@ function Case($title,$focused,$text) {
   assert.deepEqual(result.otherPage, { outcome: 'ERR:PROVENANCE', key: 'old', loss: null });
 });
 
-test('multiline input: preserves blank lines through guarded ValuePattern prefixes and stops on focus loss', { skip: !available }, () => {
+test('multiline input: preserves blank lines through guarded ValuePattern prefixes and stops on focus loss', { skip: skipWindowsUia }, () => {
   const result = pwsh(`Add-Type -AssemblyName UIAutomationClient
 Add-Type -TypeDefinition @'
 using System;
@@ -324,7 +325,7 @@ function Case($mode) {
   assert.equal(result.owned.clears, 1);
 });
 
-test('submit: a foreground change while obtaining the invoke pattern stops before invoking the button', { skip: !available }, () => {
+test('submit: a foreground change while obtaining the invoke pattern stops before invoking the button', { skip: skipWindowsUia }, () => {
   const result = pwsh(`Add-Type -AssemblyName UIAutomationClient
 Add-Type -TypeDefinition 'using System; public static class AcbFolderControls {public static bool Interactive(){return true;}} public static class AcbInput {public static IntPtr Foreground=new IntPtr(1);public static IntPtr GetForegroundWindow(){return Foreground;}}'
 ${fn('StopForFocus')}${fn('AssertForeground')}${fn('Invoke')}

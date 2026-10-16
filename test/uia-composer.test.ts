@@ -6,6 +6,7 @@ import { spawnSync } from 'node:child_process';
 // The real FindComposer runs against a mock UIA tree; no desktop is touched.
 const shell = process.platform === 'win32' ? 'powershell.exe' : 'pwsh';
 const available = spawnSync(shell, ['-NoProfile', '-NonInteractive', '-Command', '$PSVersionTable.PSVersion.Major'], { encoding: 'utf8', windowsHide: true }).status === 0;
+const skipWindowsUia = process.platform !== 'win32' ? 'UIAutomationClient requires Windows' : !available;
 const source = readFileSync(new URL('../src/windows-native-worker.ps1', import.meta.url), 'utf8');
 // A long thread precedes the composer.
 const fn = (name: string) => new RegExp(`\\n function ${name}\\([\\s\\S]*?\\n }\\n`).exec(source)![0];
@@ -42,7 +43,7 @@ test('UIA composer lookup: found from the end of a long thread without walking i
   assert.equal(findComposer(`${thread}; Node 'footer' 'Group' '' 'main'; Node 'composer' 'Edit' '使用 ChatGPT Work' 'footer'`).found, 'composer');
 });
 
-test('UIA composer lookup: the blank page filters hidden edits and finds the mid-document composer', { skip: !available }, () => {
+test('UIA composer lookup: the blank page filters hidden edits and finds the mid-document composer', { skip: skipWindowsUia }, () => {
   const landing = "Node 'doc' 'Document' '' ''; Node 'side' 'Group' '' 'doc'; for ($i=0;$i -lt 500;$i++) {Node \"s$i\" 'Button' '' 'side'}; Node 'main' 'Group' '' 'doc'; Node 'composer' 'Edit' '使用 ChatGPT Work' 'main'; Node 'tail' 'Group' '' 'doc'; for ($i=0;$i -lt 500;$i++) {Node \"t$i\" 'Text' '' 'tail'}";
   // The reverse walk alone stops in the trailing nodes; the landing flag searches forward.
   assert.equal(findComposer(landing).found, null);
@@ -63,7 +64,7 @@ test('UIA composer lookup: a missing composer or an expired deadline stops withi
 });
 
 const helpers = ['Normalize', 'ComposerText', 'Within'].map(name => new RegExp(`\\n function ${name}\\([\\s\\S]*?\\n(?= function )`).exec(source)![0]).join('');
-test('UIA composer text: the placeholder reads as empty; a write that never reads back stops within its bound', { skip: !available }, () => {
+test('UIA composer text: the placeholder reads as empty; a write that never reads back stops within its bound', { skip: skipWindowsUia }, () => {
   const script = `Add-Type -AssemblyName UIAutomationClient
 $ErrorActionPreference='Stop'
 ${helpers}
