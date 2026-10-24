@@ -20,12 +20,14 @@ export interface WaitOptions {
  * is up to a minute ahead of the app's list.
  */
 export interface Live {
-  /** The page shows messages after those known to the app and ACB, so neither knows the newest. */
+  /** The page shows the messages known to the app and ACB, at one place. */
+  placed: boolean;
+  /** It shows messages after them, so neither the app nor ACB knows the newest. */
   ahead: boolean;
-  /** Why the page says not to send the prompt now: ChatGPT is writing, for one. */
-  refuse?: string;
-  /** The page's newest message, which the app does not list yet, is the prompt. */
-  shown: boolean;
+  /** Its newest message is the prompt. */
+  newest: boolean;
+  /** ChatGPT is writing a reply. */
+  busy: boolean;
   /** The finished reply to the prompt, once the page shows it. */
   reply: () => Promise<Turn | undefined>;
 }
@@ -174,15 +176,31 @@ async function decide(app: App, kind: Kind, threadId: string, text: string, opti
     text,
     (chain?.messages ?? []).map((message) => message.prompt),
   );
-  // Unless the page shows newer messages, the newest is ACB's last message, or else the app's newest turn.
-  if (!live?.ahead && newest?.prompt === text) {
-    return { title, alreadySent: true, match: { after, occurrence: occurrence - 1 }, answer: newest.answer };
+  if (live?.ahead && live.newest) return { title, alreadySent: true, match: { after, occurrence }, early: live.reply };
+  // A page that cannot be placed leaves the newest message unknown.
+  const unplaced = () =>
+    new AcbError(
+      'BUSY',
+      'The ChatGPT page cannot be matched to the turns the app lists, so whether this prompt is the newest message is unknown; read the conversation, then send',
+      { threadId },
+    );
+  if (live && !live.placed && live.newest) throw unplaced();
+  if (!live?.ahead) {
+    // The newest message is ACB's last one, or else the app's newest turn.
+    const known: Plan | undefined =
+      newest?.prompt === text
+        ? { title, alreadySent: true, match: { after, occurrence: occurrence - 1 }, answer: newest.answer }
+        : !chain && last && opensWith(last, text)
+          ? { title, alreadySent: true, match: { turnId: last.id } }
+          : undefined;
+    if (known && live && !live.placed) throw unplaced();
+    if (known) return known;
   }
-  if (!live?.ahead && !chain && last && opensWith(last, text)) {
-    return { title, alreadySent: true, match: { turnId: last.id } };
+  if (live?.busy) {
+    throw new AcbError('BUSY', 'ChatGPT is still writing a reply on the page; read the conversation, then send', {
+      threadId,
+    });
   }
-  if (live?.shown) return { title, alreadySent: true, match: { after, occurrence }, early: live.reply };
-  if (live?.refuse) throw new AcbError('BUSY', live.refuse, { threadId });
   if (statusOf(before) !== 'idle') {
     throw new AcbError('BUSY', 'The conversation is still answering; read it, then send when it is idle', {
       threadId,

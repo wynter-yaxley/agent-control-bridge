@@ -3,7 +3,7 @@
 #   {"op":"pipe-owner","path":"\\.\pipe\..."} -> {"ok":true,"isApp":bool}
 #   {"op":"foreground"}                        -> {"ok":true,"window":handle}
 #   {"op":"give-back","window":handle}         -> {"ok":true,"taken":bool,"restored":bool}
-#   {"op":"transcript","title":"..."}          -> {"ok":true,"found":bool,"busy":bool,"nodes":[{"type","name","label"}]}
+#   {"op":"transcript","title":"..."}          -> {"ok":true,"found":bool,"busy":bool,"atEnd":bool,"nodes":[{"type","name","label"}]}
 #     (found only in a window that shows on screen)
 #     (the text between two buttons or role headings comes as one Text, with its line breaks)
 #   {"op":"compose","prompt":"..."}            -> {"ok":true}
@@ -232,6 +232,13 @@ function Transcript($request) {
   if (-not [Acb.Screen]::Shows([IntPtr]$pages[0].Window.Current.NativeWindowHandle)) { return @{ ok = $true; found = $false } }
   $pages = @($pages[0].Document)
   $scope = Find $pages[0] 'Group' $Names.Conversation
+  # The page holds only the messages near what it shows, so its last one is the conversation's
+  # newest only while it is scrolled to the end. A conversation that fits has no ScrollPattern.
+  $atEnd = [bool]$scope
+  $scroll = $null
+  if ($scope -and $scope.TryGetCurrentPattern([Windows.Automation.ScrollPattern]::Pattern, [ref]$scroll)) {
+    $atEnd = -not $scroll.Current.VerticallyScrollable -or $scroll.Current.VerticalScrollPercent -ge 99
+  }
   if (-not $scope) { $scope = $pages[0] }
   $cache = [Windows.Automation.CacheRequest]::new()
   foreach ($property in $Element::NameProperty, $Element::ControlTypeProperty, $Element::ClassNameProperty, $Element::IsControlElementProperty) {
@@ -244,7 +251,7 @@ function Transcript($request) {
   $page = @{ nodes = [Collections.Generic.List[object]]::new(); text = [Text.StringBuilder]::new(); last = $null }
   Visit $page $tree @()
   EndText $page
-  return @{ ok = $true; found = $true; busy = [bool](Find $pages[0] 'Button' $Names.Stop); nodes = $page.nodes }
+  return @{ ok = $true; found = $true; busy = [bool](Find $pages[0] 'Button' $Names.Stop); atEnd = $atEnd; nodes = $page.nodes }
 }
 
 function Visit($page, $element, $path) {

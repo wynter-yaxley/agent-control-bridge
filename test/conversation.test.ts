@@ -228,8 +228,10 @@ test('a turn named by its ID is found further back than the newest three', async
 const page =
   (confirms: boolean) =>
   async (prompt: string): Promise<Live> => ({
+    placed: true,
     ahead: false,
-    shown: false,
+    newest: false,
+    busy: false,
     reply: async () =>
       confirms
         ? {

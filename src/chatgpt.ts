@@ -89,13 +89,12 @@ export async function sendGpt(
  * newest already, and the reply is finished. A page that already showed that cannot tell, so
  * it is not watched.
  *
- * The page also tells what the app does not list yet: the messages it shows after what is
- * known (the newest prompts the app lists, then `unlisted`, the messages ACB sent that the app
- * does not list yet), if it shows what is known exactly once. The prompt is not sent while
- * ChatGPT writes a reply, nor when it is the page's newest message: sent already if that comes
- * after what is known, otherwise of unknown age. Undefined when the page cannot serve: the
- * window does not show the conversation on screen, or another conversation has the same title.
- * The app's list remains the fallback.
+ * The page also tells what the app does not list yet (see Live): whether it shows the known
+ * messages (the newest prompts the app lists, then `unlisted`, the messages ACB sent that the
+ * app does not list yet) at one place and more after them, whether its newest message is
+ * `prompt`, and whether ChatGPT is writing. Undefined when the page cannot serve: the window
+ * does not show the conversation on screen, the page is scrolled up from its end, or another
+ * conversation has the same title. The app's list remains the fallback.
  */
 async function watchPage(
   app: App,
@@ -111,13 +110,14 @@ async function watchPage(
       await show(app, page, conversationId);
       return page.pageState(read.title, SHOW_MS);
     });
-    if (!before) return undefined;
+    if (!before?.atEnd) return undefined;
     const newer = shownAfter(before, [...listedPrompts(read.turns), ...unlisted].slice(-PLACING));
-    const newest = before.prompts.at(-1);
-    const repeated = newest !== undefined && samePrompt(newest, prompt);
-    const shown = repeated && newer !== undefined && newer.length > 0;
-    const expected = shown ? before.prompts : [...before.prompts, prompt];
-    const telling = shown || !showsPrompts(before, expected);
+    const last = before.prompts.at(-1);
+    const newest = last !== undefined && samePrompt(last, prompt);
+    const ahead = newer !== undefined && newer.length > 0;
+    const expected = ahead && newest ? before.prompts : [...before.prompts, prompt];
+    // A page that ends as the reply would already cannot tell it.
+    const telling = (ahead && newest) || !showsPrompts(before, expected);
     const reply = async () => {
       if (!telling) return undefined;
       return page
@@ -133,12 +133,7 @@ async function watchPage(
         })
         .catch(() => undefined);
     };
-    const refuse = before.busy
-      ? 'ChatGPT is still writing a reply on the page; read the conversation, then send when it is done'
-      : repeated && newer === undefined
-        ? 'The page shows this prompt as its newest message, but not how it follows the turns the app lists; read the conversation before sending it again'
-        : undefined;
-    return { ahead: (newer?.length ?? 0) > 0, ...(refuse ? { refuse } : {}), shown, reply };
+    return { placed: newer !== undefined, ahead, newest, busy: before.busy, reply };
   } catch {
     return undefined;
   }

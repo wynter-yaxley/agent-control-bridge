@@ -15,10 +15,15 @@ export interface PageNode {
 }
 
 /** What the ChatGPT page shows of a conversation. */
-export interface PageState {
+export interface PageState extends PageMessages {
   /** ChatGPT is writing a reply. */
   busy: boolean;
-  /** The user messages, oldest first. */
+  /** The page is scrolled to the end, so its last messages are the conversation's newest. */
+  atEnd: boolean;
+}
+
+export interface PageMessages {
+  /** The user messages the page holds, oldest first: the newest few, near what it shows. */
   prompts: string[];
   /** The reply to the last user message, as far as it is shown. */
   reply: string;
@@ -33,7 +38,7 @@ const REQUEST_TIMEOUT_MS = 30_000;
 export const READ_TIMEOUT_MS = 20_000;
 
 /** The user messages on the page and the ChatGPT reply after the last one. */
-export function readPage(nodes: PageNode[], busy: boolean): PageState {
+export function readPage(nodes: PageNode[]): PageMessages {
   const heading = (node: PageNode, names: string[]) =>
     node.type === 'Text' && node.label === true && names.includes(node.name);
   const starts = nodes.flatMap((node, index) => (heading(node, LABELS.you) ? [index] : []));
@@ -47,11 +52,11 @@ export function readPage(nodes: PageNode[], busy: boolean): PageState {
   const assistant = nodes.findIndex(
     (node, index) => you !== undefined && index > you && heading(node, LABELS.assistant),
   );
-  if (assistant < 0) return { busy, prompts, reply: '', complete: false };
+  if (assistant < 0) return { prompts, reply: '', complete: false };
   const rest = nodes.slice(assistant + 1);
   const finished = rest.findIndex((node) => node.type === 'Button' && node.name === LABELS.finished);
   const reply = (finished < 0 ? rest : rest.slice(0, finished)).filter((node) => node.type === 'Text' && !node.label);
-  return { busy, prompts, reply: textOf(reply), complete: finished >= 0 };
+  return { prompts, reply: textOf(reply), complete: finished >= 0 };
 }
 
 function textOf(nodes: PageNode[]): string {
@@ -81,14 +86,17 @@ function endsWith(shown: string[], prompts: string[]): boolean {
  * (five or more, fewer when they are long), so only as many as it holds are compared, but at
  * least two.
  */
-export function showsPrompts(state: PageState, prompts: string[]): boolean {
+export function showsPrompts(state: PageMessages, prompts: string[]): boolean {
   const count = Math.max(Math.min(prompts.length, state.prompts.length), Math.min(2, prompts.length));
   return endsWith(state.prompts, prompts.slice(prompts.length - count));
 }
 
-/** The finished reply on a page whose user messages end with `prompts` (see showsPrompts); null otherwise. */
+/**
+ * The finished reply on a page scrolled to the end whose user messages end with `prompts` (see
+ * showsPrompts); null otherwise.
+ */
 export function replyTo(state: PageState | null, prompts: string[]): string | null {
-  if (!state || state.busy || !state.complete || !state.reply) return null;
+  if (!state?.atEnd || state.busy || !state.complete || !state.reply) return null;
   return showsPrompts(state, prompts) ? state.reply : null;
 }
 
@@ -96,7 +104,7 @@ export function replyTo(state: PageState | null, prompts: string[]): string | nu
  * The messages the page shows after `known`, the newest messages known to be in the
  * conversation; undefined when the page does not show `known` exactly once.
  */
-export function shownAfter(state: PageState, known: string[]): string[] | undefined {
+export function shownAfter(state: PageMessages, known: string[]): string[] | undefined {
   if (!known.length) return undefined;
   const ends: number[] = [];
   for (let end = known.length; end <= state.prompts.length; end++) {
@@ -110,6 +118,7 @@ function missing(state: PageState | null, prompts: string[]): string {
   if (!state) {
     return 'The ChatGPT window does not show the conversation; the app does not update a window that is fully covered, so keep part of it visible';
   }
+  if (!state.atEnd) return 'The ChatGPT page is scrolled up from the newest messages';
   if (showsPrompts({ ...state, prompts: state.prompts.slice(0, -1) }, prompts)) {
     return 'The page shows a newer message than the app lists; the app lists a ChatGPT turn up to a minute after it ends, so read again shortly';
   }
@@ -173,7 +182,8 @@ export class WindowsHelper {
     const until = Date.now() + waitMs;
     for (;;) {
       const page = await this.#request({ op: 'transcript', title });
-      if (page.found) return readPage(page.nodes as PageNode[], page.busy === true);
+      if (page.found)
+        return { busy: page.busy === true, atEnd: page.atEnd === true, ...readPage(page.nodes as PageNode[]) };
       if (Date.now() >= until) return null;
       await delay(300);
     }

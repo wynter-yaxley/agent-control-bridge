@@ -24,8 +24,7 @@ const page: PageNode[] = [
 ];
 
 test('a page holds every prompt and every paragraph of the last reply', () => {
-  assert.deepEqual(readPage(page, false), {
-    busy: false,
+  assert.deepEqual(readPage(page), {
     prompts: ['first question', 'second\nquestion'],
     reply: 'Paragraph one.\nParagraph two.',
     complete: true,
@@ -33,12 +32,12 @@ test('a page holds every prompt and every paragraph of the last reply', () => {
 });
 
 test('a reply without its action buttons is still being written', () => {
-  assert.equal(readPage(page.slice(0, 10), false).complete, false);
-  assert.equal(readPage(page.slice(0, 8), false).reply, '');
+  assert.equal(readPage(page.slice(0, 10)).complete, false);
+  assert.equal(readPage(page.slice(0, 8)).reply, '');
 });
 
 test('a page without messages has no prompts', () => {
-  assert.deepEqual(readPage([text('ChatGPT 可能会出错。')], false).prompts, []);
+  assert.deepEqual(readPage([text('ChatGPT 可能会出错。')]).prompts, []);
 });
 
 test('label text inside a message is content, not a new message', () => {
@@ -49,8 +48,7 @@ test('label text inside a message is content, not a new message', () => {
     text('It means "you said".'),
     button('更多操作'),
   ];
-  assert.deepEqual(readPage(quoted, false), {
-    busy: false,
+  assert.deepEqual(readPage(quoted), {
     prompts: ['What does 你说：mean?'],
     reply: 'It means "you said".',
     complete: true,
@@ -68,8 +66,7 @@ test('message text that equals a role heading is still message text', () => {
     text('end'),
     button('更多操作'),
   ];
-  assert.deepEqual(readPage(page, false), {
-    busy: false,
+  assert.deepEqual(readPage(page), {
     prompts: ['Q'],
     reply: 'Start\n你说：\nQ\nend',
     complete: true,
@@ -85,7 +82,7 @@ test('a prompt matches the page despite the backticks of its inline code, not de
 });
 
 test('the messages after the known ones are found only where the page shows them once', () => {
-  const page = { busy: false, prompts: ['X', 'Q', 'R'], reply: '', complete: false };
+  const page = { prompts: ['X', 'Q', 'R'], reply: '', complete: false };
   assert.deepEqual(shownAfter(page, ['X']), ['Q', 'R']);
   assert.deepEqual(shownAfter(page, ['Q', 'R']), []);
   assert.equal(shownAfter(page, ['Y']), undefined);
@@ -94,7 +91,7 @@ test('the messages after the known ones are found only where the page shows them
 });
 
 test('a page holding only the newest messages is compared on those, but on two at least', () => {
-  const page = { busy: false, prompts: ['C', 'D', 'E'], reply: '', complete: false };
+  const page = { prompts: ['C', 'D', 'E'], reply: '', complete: false };
   assert.ok(showsPrompts(page, ['A', 'B', 'C', 'D', 'E']));
   assert.ok(!showsPrompts(page, ['A', 'B', 'X', 'D', 'E']));
   assert.ok(!showsPrompts({ ...page, prompts: ['E'] }, ['D', 'E']));
@@ -102,10 +99,11 @@ test('a page holding only the newest messages is compared on those, but on two a
 });
 
 test('a reply is taken only from a finished page ending with the expected prompts', () => {
-  const state = { busy: false, prompts: ['Earlier', 'Question'], reply: 'Done.', complete: true };
+  const state = { busy: false, atEnd: true, prompts: ['Earlier', 'Question'], reply: 'Done.', complete: true };
   assert.equal(replyTo(state, ['Earlier', 'Question']), 'Done.');
   assert.equal(replyTo(state, ['Question']), 'Done.');
   assert.equal(replyTo(state, ['Other', 'Question']), null);
   assert.equal(replyTo({ ...state, busy: true }, ['Question']), null);
   assert.equal(replyTo({ ...state, complete: false }, ['Question']), null);
+  assert.equal(replyTo({ ...state, atEnd: false }, ['Question']), null, 'scrolled up to older messages');
 });

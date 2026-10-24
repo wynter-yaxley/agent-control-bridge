@@ -211,6 +211,7 @@ test('a page is not read when the prompts repeat, as an older state of it would 
 /** A finished page showing `prompts`. */
 const showing = (prompts: string[], reply = 'Earlier reply'): PageState => ({
   busy: false,
+  atEnd: true,
   prompts,
   reply,
   complete: true,
@@ -271,7 +272,7 @@ test('a busy page refuses a new prompt even when it cannot be matched to the app
   const app = new FakeApp();
   app.add({ id: GPT, kind: 'chatgpt', title: 'Chat', turns: [userTurn('t1', 'X', PAGE_REPLY)] });
   const page = fakePage(app);
-  page.view = () => ({ busy: true, prompts: ['X', 'Q', 'X', 'R'], reply: '', complete: false });
+  page.view = () => ({ ...showing(['X', 'Q', 'X', 'R'], ''), busy: true, complete: false });
   await assert.rejects(sendGpt(app, page, GPT, 'R', { ...fast, wait: true }), code('BUSY'));
   page.view = () => showing(['X', 'Q', 'X', 'R'], 'reply to R');
   await assert.rejects(sendGpt(app, page, GPT, 'R', { ...fast, wait: true }), code('BUSY'));
@@ -313,7 +314,7 @@ test('a page busy with a message the app does not list yet refuses a new one', a
   const app = new FakeApp();
   app.add({ id: GPT, kind: 'chatgpt', title: 'Chat', turns: [userTurn('t1', 'Earlier', PAGE_REPLY)] });
   const page = fakePage(app);
-  page.view = () => ({ busy: true, prompts: ['Earlier', 'Typed in the app'], reply: '', complete: false });
+  page.view = () => ({ ...showing(['Earlier', 'Typed in the app'], ''), busy: true, complete: false });
   await assert.rejects(sendGpt(app, page, GPT, 'Question', { ...fast, wait: true }), code('BUSY'));
   assert.deepEqual(app.sent, []);
 });
@@ -322,7 +323,7 @@ test('a page two messages ahead of the app still tells that ChatGPT is busy, or 
   const app = new FakeApp();
   app.add({ id: GPT, kind: 'chatgpt', title: 'Chat', turns: [userTurn('t1', 'X', PAGE_REPLY)] });
   const page = fakePage(app);
-  page.view = () => ({ busy: true, prompts: ['X', 'Q', 'R'], reply: '', complete: false });
+  page.view = () => ({ ...showing(['X', 'Q', 'R'], ''), busy: true, complete: false });
   await assert.rejects(sendGpt(app, page, GPT, 'Other', { ...fast, wait: true }), code('BUSY'));
   page.view = () => showing(['X', 'Q', 'R'], 'reply to R');
   const sent = await sendGpt(app, page, GPT, 'R', { ...fast, wait: true });
@@ -419,4 +420,30 @@ test('a page that holds only the newest messages still returns the reply at once
   page.view = () => (app.sent.length ? showing(['P2', 'P3', 'Q'], 'reply to Q') : showing(['P1', 'P2', 'P3']));
   const sent = await sendGpt(app, page, GPT, 'Q', { ...fast, wait: true });
   assert.deepEqual([sent.turn?.turnId, sent.turn?.reply], [null, 'reply to Q']);
+});
+
+test('a page that cannot be placed keeps an older newest message from being taken for this one', async () => {
+  const app = new FakeApp();
+  app.add({ id: GPT, kind: 'chatgpt', title: 'Chat', turns: [userTurn('t1', 'X', 'reply to the first X')] });
+  const page = fakePage(app);
+  // Q and another X were sent from elsewhere; X shows twice, so the page cannot be placed.
+  page.view = () => ({ ...showing(['X', 'Q', 'X'], 'reply to the second X') });
+  await assert.rejects(sendGpt(app, page, GPT, 'X', { ...fast, wait: true }), code('BUSY'));
+  page.view = () => showing(['X', 'Q', 'X', 'R'], 'reply to R');
+  await assert.rejects(sendGpt(app, page, GPT, 'X', { ...fast, wait: true }), code('BUSY'));
+  assert.deepEqual(app.sent, []);
+});
+
+test('a page scrolled up to older messages is not taken for the reply', async () => {
+  const app = new FakeApp();
+  app.add({ id: GPT, kind: 'chatgpt', title: 'Chat', turns: [userTurn('t1', 'D', PAGE_REPLY)] });
+  const page = fakePage(app);
+  // After sending, the user scrolls up to where an older E was answered.
+  page.view = () =>
+    app.sent.length
+      ? { ...showing(['A', 'B', 'C', 'D', 'E'], 'reply to the older E'), atEnd: false }
+      : showing(['X', 'A', 'B', 'C', 'D']);
+  app.answer = 'reply to E';
+  const sent = await sendGpt(app, page, GPT, 'E', { ...fast, wait: true });
+  assert.equal(sent.turn?.reply, 'reply to E');
 });
