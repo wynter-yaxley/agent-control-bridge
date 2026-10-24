@@ -13,8 +13,6 @@ export interface PageRead {
   pageError?: string;
 }
 
-const RECOGNIZE_MS = 30_000;
-
 export async function listGpt(app: App, options: { limit?: number } = {}): Promise<ThreadSummary[]> {
   return chatgptThreads(await app.listThreads()).slice(0, options.limit ?? 20);
 }
@@ -77,7 +75,7 @@ export async function createGpt(
     } finally {
       await giveBack();
     }
-    return recognize(app, new Set(known.map((thread) => thread.id)), prompt);
+    return recognize(app, new Set(known.map((thread) => thread.id)), prompt, options.deadline);
   });
   const turn = await waitForTurn(app, conversationId, prompt, { after: undefined }, options);
   // ChatGPT names a new conversation after its first reply, so the title is set afterwards.
@@ -98,8 +96,8 @@ function chatgptThreads({ threads, unavailable }: Inventory): ThreadSummary[] {
 }
 
 /** The one new conversation whose first message is `prompt`. */
-async function recognize(app: App, known: Set<string>, prompt: string): Promise<string> {
-  const deadline = Date.now() + RECOGNIZE_MS;
+/** The app can take a minute to list a new conversation, so this waits until `deadline`. */
+async function recognize(app: App, known: Set<string>, prompt: string, deadline: number): Promise<string> {
   for (;;) {
     const matches: string[] = [];
     for (const thread of chatgptThreads(await app.listThreads())) {
