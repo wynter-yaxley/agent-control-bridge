@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
-import { sendPrompt, waitForTurn } from '../src/conversation.ts';
+import { type Live, sendPrompt, waitForTurn } from '../src/conversation.ts';
 import { AcbError } from '../src/errors.ts';
 import { CODEX, FakeApp, GPT, userTurn } from './fake-app.ts';
 
@@ -222,4 +222,74 @@ test('a turn named by its ID is found further back than the newest three', async
   });
   const turn = await waitForTurn(app, GPT, 't1', { turnId: 't1' }, fast);
   assert.equal(turn.turnId, 't1');
+});
+
+/** A page that confirms the reply to every prompt at once, or never. */
+const page =
+  (confirms: boolean) =>
+  async (prompt: string): Promise<Live> => ({
+    placed: true,
+    ahead: false,
+    newest: false,
+    busy: false,
+    reply: async () =>
+      confirms
+        ? {
+            turnId: null,
+            status: 'completed',
+            prompt,
+            reply: `page reply to ${prompt}`,
+            replyOnPage: false,
+            truncated: false,
+            error: null,
+          }
+        : undefined,
+  });
+
+test('a prompt sent again is matched to its own turn, not to the earlier one', async () => {
+  const app = new FakeApp();
+  const thread = app.add({ id: GPT, kind: 'chatgpt', turns: [userTurn('t0', 'X')] });
+  app.listAfterMs = 60_000;
+  await sendPrompt(app, 'chatgpt', GPT, 'A', { ...fast, watch: page(true) });
+  await sendPrompt(app, 'chatgpt', GPT, 'B', { ...fast, watch: page(true) });
+  const third = sendPrompt(app, 'chatgpt', GPT, 'A', { ...fast, deadline: Date.now() + 300, watch: page(false) });
+  // Once all three are sent, the app lists the first A only, then B and the second A.
+  while (app.sent.length < 3) await delay(1);
+  thread.turns.unshift(userTurn('a1', 'A', 'reply to the first A'));
+  await assert.rejects(third, code('TIMEOUT'));
+  thread.turns.unshift(userTurn('a2', 'A', 'reply to the second A'), userTurn('b', 'B'));
+  const again = await sendPrompt(app, 'chatgpt', GPT, 'A', fast);
+  assert.deepEqual([again.alreadySent, again.turn?.reply], [true, 'reply to the second A']);
+  assert.equal(app.sent.length, 3);
+});
+
+test('a turn is not looked for among turns that may not follow the one it was sent after', async () => {
+  const app = new FakeApp();
+  const thread = app.add({ id: GPT, kind: 'chatgpt', turns: [userTurn('t0', 'X')] });
+  app.listAfterMs = 60_000;
+  const sending = sendPrompt(app, 'chatgpt', GPT, 'Q', { ...fast, deadline: Date.now() + 300 });
+  while (!app.sent.length) await delay(1);
+  // Q, then ten more turns, the last of them Q again: t0 is no longer among the newest ten.
+  const later = ['Q', ...Array.from({ length: 9 }, (_, index) => `other ${index}`), 'Q'];
+  thread.turns.unshift(
+    ...later.map((prompt, index) => userTurn(`t${index + 1}`, prompt, `reply of t${index + 1}`)).reverse(),
+  );
+  await assert.rejects(sending, code('TIMEOUT'));
+});
+
+test('a message of unknown outcome that can no longer be matched is never sent again on its own', async () => {
+  const app = new FakeApp();
+  const thread = app.add({ id: GPT, kind: 'chatgpt', turns: [userTurn('t0', 'X')] });
+  app.listAfterMs = 60_000;
+  app.lostAnswer = new AcbError('PROTOCOL', 'The connection to the desktop app broke');
+  await assert.rejects(sendPrompt(app, 'chatgpt', GPT, 'Q', fast), code('PROTOCOL'));
+  app.lostAnswer = null;
+  // The conversation goes on elsewhere, until t0 is older than the turns the app returns.
+  thread.turns.unshift(...Array.from({ length: 10 }, (_, index) => userTurn(`t${10 - index}`, `other ${10 - index}`)));
+  await assert.rejects(sendPrompt(app, 'chatgpt', GPT, 'Q', fast), code('TIMEOUT'));
+  await sendPrompt(app, 'chatgpt', GPT, 'Something else', { ...fast, wait: false });
+  assert.deepEqual(
+    app.sent.map((entry) => entry.prompt),
+    ['Q', 'Something else'],
+  );
 });

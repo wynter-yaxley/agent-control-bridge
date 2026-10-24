@@ -2,7 +2,8 @@ import type { AppTurn, Json, Kind, ThreadPage } from './desktop.ts';
 
 /** A turn as ACB reports it: the message, the final reply and how it ended. */
 export interface Turn {
-  turnId: string;
+  /** Null for a ChatGPT turn confirmed on the page before the app lists it. */
+  turnId: string | null;
   /** `completed`, `inProgress`, `failed` or `interrupted`. */
   status: string;
   prompt: string | null;

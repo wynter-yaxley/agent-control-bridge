@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { createGpt, listGpt, type Page, readGpt, sendGpt } from '../src/chatgpt.ts';
 import { createCodex, listCodex, sendCodex } from '../src/codex.ts';
 import { AcbError } from '../src/errors.ts';
-import { WindowsHelper } from '../src/helper.ts';
+import { type PageState, WindowsHelper } from '../src/helper.ts';
 import { CODEX, FakeApp, type FakeThread, GPT, userTurn } from './fake-app.ts';
 
 /** Options waiting up to two seconds from the moment they are used. */
@@ -17,8 +17,10 @@ const PAGE_REPLY = '::chatgpt-content-reference{index="0" source_message_id="m1"
 const code = (expected: string) => (error: unknown) => error instanceof AcbError && error.code === expected;
 
 interface FakePage extends Page {
-  reads: { title: string; prompt: string; messages: number }[];
+  reads: { title: string; prompts: string[] }[];
   chats: string[];
+  /** What the page shows; by default it shows no conversation, so only the app's list counts. */
+  view: () => PageState | null;
 }
 
 /**
@@ -31,10 +33,14 @@ function fakePage(app: FakeApp, reply = 'reply from the page'): FakePage {
   return {
     reads: [],
     chats: [],
+    view: () => null,
     run: (task) => queue.run(task),
     holdForeground: async () => async () => {},
-    async readReply(title, prompt, messages) {
-      this.reads.push({ title, prompt, messages });
+    async pageState() {
+      return this.view();
+    },
+    async readReply(title, prompts) {
+      this.reads.push({ title, prompts });
       if (!app.shown.length) throw new AcbError('WINDOW', 'nothing shown');
       return reply;
     },
@@ -107,8 +113,8 @@ test('a ChatGPT reply kept on the page is read there after sending', async () =>
   app.answer = answerOnPage;
   const page = fakePage(app);
   const sent = await sendGpt(app, page, GPT, 'Question', { ...fast, wait: true });
-  assert.deepEqual(app.shown, [GPT]);
-  assert.deepEqual(page.reads, [{ title: 'Chat', prompt: 'Question', messages: 1 }]);
+  assert.ok(app.shown.every((id) => id === GPT));
+  assert.deepEqual(page.reads, [{ title: 'Chat', prompts: ['Question'] }]);
   assert.equal(sent.turn?.reply, 'reply from the page');
   assert.equal(sent.turn?.replyOnPage, false);
 });
@@ -178,34 +184,266 @@ test('a page cannot tell apart conversations with the same title', async () => {
   assert.deepEqual(app.shown, []);
 });
 
-test('the page must show as many messages as the conversation has turns', async () => {
+test('the page must end with the prompts of the turns the app lists', async () => {
   const app = new FakeApp();
   app.add({
     id: GPT,
     kind: 'chatgpt',
-    turns: [userTurn('t3', 'Q', PAGE_REPLY), userTurn('t2', 'R', PAGE_REPLY), userTurn('t1', 'Q', PAGE_REPLY)],
+    turns: [userTurn('t3', 'S', PAGE_REPLY), userTurn('t2', 'R', PAGE_REPLY), userTurn('t1', 'Q', PAGE_REPLY)],
   });
   const page = fakePage(app);
   await readGpt(app, page, GPT, { fromPage: true });
-  assert.equal(page.reads[0].messages, 3, 'a page stuck at the first Q shows only one message');
+  assert.deepEqual(page.reads[0].prompts, ['Q', 'R', 'S']);
 });
 
-test('counting a long conversation stops when no time is left for the page', async () => {
+test('a page is not read when the prompts repeat, as an older state of it would match', async () => {
   const app = new FakeApp();
-  const turns = Array.from({ length: 25 }, (_, index) => userTurn(`t${25 - index}`, `Q${25 - index}`, PAGE_REPLY));
-  app.add({ id: GPT, kind: 'chatgpt', turns });
+  app.add({
+    id: GPT,
+    kind: 'chatgpt',
+    turns: ['Q', 'R', 'Q', 'R'].map((prompt, index) => userTurn(`t${4 - index}`, prompt, PAGE_REPLY)),
+  });
   const page = fakePage(app);
-  assert.equal((await readGpt(app, page, GPT, { fromPage: true })).turns[0].reply, 'reply from the page');
-  assert.equal(page.reads[0].messages, 25, 'every page of turns is counted');
-  // Once the reply is in, every read takes 200 ms: the page budget runs out while counting.
-  app.answer = (thread) => {
-    answerOnPage(thread);
-    app.afterRead = () => {
-      const until = Date.now() + 200;
-      while (Date.now() < until);
-    };
+  await assert.rejects(readGpt(app, page, GPT, { fromPage: true }), code('WINDOW'));
+  assert.deepEqual(page.reads, []);
+});
+
+/** A finished page showing `prompts`. */
+const showing = (prompts: string[], reply = 'Earlier reply'): PageState => ({
+  busy: false,
+  atEnd: true,
+  prompts,
+  reply,
+  complete: true,
+});
+
+/** A page with one earlier exchange that shows `reply` to `prompt` once the app has taken it. */
+function answeringPage(app: FakeApp, page: FakePage, prompt: string, reply: string): void {
+  page.view = () => {
+    const sent = app.sent.filter((entry) => entry.id === GPT).map((entry) => entry.prompt);
+    return sent.includes(prompt) ? showing(['Earlier', ...sent], reply) : showing(['Earlier', ...sent]);
   };
-  const sent = await sendGpt(app, page, GPT, 'One more', { deadline: Date.now() + 300, pollMs: 1, wait: true });
-  assert.equal(sent.turn?.replyOnPage, true);
-  assert.match(sent.pageError ?? '', /No time was left/);
+}
+
+/** A ChatGPT conversation with one earlier turn whose new turns the app lists a minute late. */
+function lateConversation(): FakeApp {
+  const app = new FakeApp();
+  app.add({ id: GPT, kind: 'chatgpt', title: 'Chat', turns: [userTurn('t1', 'Earlier', PAGE_REPLY)] });
+  app.listAfterMs = 60_000;
+  return app;
+}
+
+test('a ChatGPT reply on the page is returned without waiting for the app to list it', async () => {
+  const app = lateConversation();
+  const page = fakePage(app);
+  answeringPage(app, page, 'Question', 'reply from the page');
+  const sent = await sendGpt(app, page, GPT, 'Question', { ...fast, wait: true });
+  assert.equal(sent.turn?.turnId, null);
+  assert.equal(sent.turn?.reply, 'reply from the page');
+});
+
+test("a page that does not catch up leaves the reply to the app's list", async () => {
+  const app = new FakeApp();
+  app.add({ id: GPT, kind: 'chatgpt', title: 'Chat', turns: [userTurn('t1', 'Earlier', 'Earlier reply')] });
+  const page = fakePage(app);
+  page.view = () => showing(['Earlier']);
+  const sent = await sendGpt(app, page, GPT, 'Question', { ...fast, wait: true });
+  assert.equal(typeof sent.turn?.turnId, 'string');
+  assert.equal(sent.turn?.reply, 'ok');
+});
+
+test('a page behind the app is not taken for the reply, nor its newest prompt for one sent', async () => {
+  const app = new FakeApp();
+  const turns = ['R', 'Q', 'R'].map((prompt, index) => userTurn(`t${3 - index}`, prompt, 'listed reply'));
+  app.add({ id: GPT, kind: 'chatgpt', title: 'Chat', turns });
+  const page = fakePage(app);
+  // The page still shows the conversation as it was after the first Q.
+  page.view = () => showing(['R', 'Q'], 'reply to the first Q');
+  const sent = await sendGpt(app, page, GPT, 'S', { ...fast, wait: true });
+  assert.equal(sent.turn?.reply, 'ok');
+  await assert.rejects(sendGpt(app, page, GPT, 'Q', { ...fast, wait: true }), code('BUSY'));
+  assert.deepEqual(
+    app.sent.map((entry) => entry.prompt),
+    ['S'],
+  );
+});
+
+test('a busy page refuses a new prompt even when it cannot be matched to the app', async () => {
+  const app = new FakeApp();
+  app.add({ id: GPT, kind: 'chatgpt', title: 'Chat', turns: [userTurn('t1', 'X', PAGE_REPLY)] });
+  const page = fakePage(app);
+  page.view = () => ({ ...showing(['X', 'Q', 'X', 'R'], ''), busy: true, complete: false });
+  await assert.rejects(sendGpt(app, page, GPT, 'R', { ...fast, wait: true }), code('BUSY'));
+  page.view = () => showing(['X', 'Q', 'X', 'R'], 'reply to R');
+  await assert.rejects(sendGpt(app, page, GPT, 'R', { ...fast, wait: true }), code('BUSY'));
+  assert.deepEqual(app.sent, []);
+});
+
+test('a reply confirmed on the page is returned again, and does not hold back the next message', async () => {
+  const app = lateConversation();
+  const page = fakePage(app);
+  answeringPage(app, page, 'First', 'first reply');
+  await sendGpt(app, page, GPT, 'First', { ...fast, wait: true });
+  const again = await sendGpt(app, page, GPT, 'First', { ...fast, wait: true });
+  assert.deepEqual([again.alreadySent, again.turn?.reply], [true, 'first reply']);
+  const second = await sendGpt(app, page, GPT, 'Second', { ...fast, wait: false });
+  assert.equal(second.alreadySent, false);
+  assert.deepEqual(
+    app.sent.map((entry) => entry.prompt),
+    ['First', 'Second'],
+  );
+});
+
+test('a message that was certainly not sent keeps the protection of the one before', async () => {
+  const app = lateConversation();
+  const page = fakePage(app);
+  answeringPage(app, page, 'First', 'first reply');
+  await sendGpt(app, page, GPT, 'First', { ...fast, wait: true });
+  app.refuse = new AcbError('FAILED', 'Rate limited', { refused: true });
+  await assert.rejects(sendGpt(app, page, GPT, 'Second', { ...fast, wait: true }), code('FAILED'));
+  app.refuse = null;
+  const again = await sendGpt(app, page, GPT, 'First', { ...fast, wait: true });
+  assert.equal(again.alreadySent, true);
+  assert.deepEqual(
+    app.sent.map((entry) => entry.prompt),
+    ['First'],
+  );
+});
+
+test('a page busy with a message the app does not list yet refuses a new one', async () => {
+  const app = new FakeApp();
+  app.add({ id: GPT, kind: 'chatgpt', title: 'Chat', turns: [userTurn('t1', 'Earlier', PAGE_REPLY)] });
+  const page = fakePage(app);
+  page.view = () => ({ ...showing(['Earlier', 'Typed in the app'], ''), busy: true, complete: false });
+  await assert.rejects(sendGpt(app, page, GPT, 'Question', { ...fast, wait: true }), code('BUSY'));
+  assert.deepEqual(app.sent, []);
+});
+
+test('a page two messages ahead of the app still tells that ChatGPT is busy, or that the prompt was sent', async () => {
+  const app = new FakeApp();
+  app.add({ id: GPT, kind: 'chatgpt', title: 'Chat', turns: [userTurn('t1', 'X', PAGE_REPLY)] });
+  const page = fakePage(app);
+  page.view = () => ({ ...showing(['X', 'Q', 'R'], ''), busy: true, complete: false });
+  await assert.rejects(sendGpt(app, page, GPT, 'Other', { ...fast, wait: true }), code('BUSY'));
+  page.view = () => showing(['X', 'Q', 'R'], 'reply to R');
+  const sent = await sendGpt(app, page, GPT, 'R', { ...fast, wait: true });
+  assert.deepEqual([sent.alreadySent, sent.turn?.reply], [true, 'reply to R']);
+  assert.deepEqual(app.sent, []);
+});
+
+test('a prompt the page shows as its newest message is not sent again', async () => {
+  const app = new FakeApp();
+  app.add({ id: GPT, kind: 'chatgpt', title: 'Chat', turns: [userTurn('t1', 'Earlier', PAGE_REPLY)] });
+  const page = fakePage(app);
+  page.view = () => showing(['Earlier', 'Question'], 'reply from the page');
+  const sent = await sendGpt(app, page, GPT, 'Question', { ...fast, wait: true });
+  assert.deepEqual(app.sent, []);
+  assert.deepEqual([sent.alreadySent, sent.turn?.reply], [true, 'reply from the page']);
+});
+
+test('a reply confirmed on the page is read back before the app lists it', async () => {
+  const app = lateConversation();
+  const page = fakePage(app);
+  answeringPage(app, page, 'Question', 'reply from the page');
+  await sendGpt(app, page, GPT, 'Question', { ...fast, wait: true });
+  const read = await readGpt(app, page, GPT, { turns: 2, fromPage: true });
+  assert.deepEqual(
+    read.turns.map((turn) => [turn.turnId, turn.prompt, turn.reply]),
+    [
+      ['t1', 'Earlier', null],
+      [null, 'Question', 'reply from the page'],
+    ],
+  );
+  assert.equal(page.reads.length, 0);
+});
+
+test('answers confirmed on the page follow the turns the app lists, also once it lists some of them', async () => {
+  const app = lateConversation();
+  const thread = app.threads.get(GPT) as FakeThread;
+  const page = fakePage(app);
+  answeringPage(app, page, 'A', 'reply to A');
+  await sendGpt(app, page, GPT, 'A', { ...fast, wait: true });
+  answeringPage(app, page, 'B', 'reply to B');
+  await sendGpt(app, page, GPT, 'B', { ...fast, wait: true });
+  // The app lists A, but only right after the first read of acb_gpt_read.
+  app.afterRead = () => {
+    app.afterRead = null;
+    thread.turns.unshift(userTurn('a', 'A', PAGE_REPLY));
+  };
+  const read = await readGpt(app, page, GPT, { turns: 3 });
+  assert.deepEqual(
+    read.turns.map((turn) => [turn.turnId, turn.prompt]),
+    [
+      ['t1', 'Earlier'],
+      ['a', 'A'],
+      [null, 'B'],
+    ],
+  );
+});
+
+test('a prompt equal to the newest known message is sent when the page shows newer ones', async () => {
+  const app = new FakeApp();
+  app.add({ id: GPT, kind: 'chatgpt', title: 'Chat', turns: [userTurn('t1', 'X', PAGE_REPLY)] });
+  const page = fakePage(app);
+  // Q was sent from elsewhere; the app does not list it yet.
+  page.view = () => showing(['X', 'Q'], 'reply to Q');
+  const sent = await sendGpt(app, page, GPT, 'X', { ...fast, wait: false });
+  assert.equal(sent.alreadySent, false);
+  assert.deepEqual(
+    app.sent.map((entry) => entry.prompt),
+    ['X'],
+  );
+});
+
+test('an answer confirmed on the page is not returned again once newer messages follow it', async () => {
+  const app = lateConversation();
+  const page = fakePage(app);
+  answeringPage(app, page, 'A', 'reply to A');
+  await sendGpt(app, page, GPT, 'A', { ...fast, wait: true });
+  // E was sent from elsewhere after A.
+  page.view = () => showing(['Earlier', 'A', 'E'], 'reply to E');
+  const again = await sendGpt(app, page, GPT, 'A', { ...fast, wait: false });
+  assert.equal(again.alreadySent, false);
+  assert.deepEqual(
+    app.sent.map((entry) => entry.prompt),
+    ['A', 'A'],
+  );
+});
+
+test('a page that holds only the newest messages still returns the reply at once', async () => {
+  const app = new FakeApp();
+  const turns = ['P1', 'P2', 'P3'].map((prompt, index) => userTurn(`t${3 - index}`, prompt, PAGE_REPLY));
+  app.add({ id: GPT, kind: 'chatgpt', title: 'Chat', turns });
+  app.listAfterMs = 60_000;
+  const page = fakePage(app);
+  // The page holds three messages: the oldest drops out as the new one comes in.
+  page.view = () => (app.sent.length ? showing(['P2', 'P3', 'Q'], 'reply to Q') : showing(['P1', 'P2', 'P3']));
+  const sent = await sendGpt(app, page, GPT, 'Q', { ...fast, wait: true });
+  assert.deepEqual([sent.turn?.turnId, sent.turn?.reply], [null, 'reply to Q']);
+});
+
+test('a page that cannot be placed keeps an older newest message from being taken for this one', async () => {
+  const app = new FakeApp();
+  app.add({ id: GPT, kind: 'chatgpt', title: 'Chat', turns: [userTurn('t1', 'X', 'reply to the first X')] });
+  const page = fakePage(app);
+  // Q and another X were sent from elsewhere; X shows twice, so the page cannot be placed.
+  page.view = () => ({ ...showing(['X', 'Q', 'X'], 'reply to the second X') });
+  await assert.rejects(sendGpt(app, page, GPT, 'X', { ...fast, wait: true }), code('BUSY'));
+  page.view = () => showing(['X', 'Q', 'X', 'R'], 'reply to R');
+  await assert.rejects(sendGpt(app, page, GPT, 'X', { ...fast, wait: true }), code('BUSY'));
+  assert.deepEqual(app.sent, []);
+});
+
+test('a page scrolled up to older messages is not taken for the reply', async () => {
+  const app = new FakeApp();
+  app.add({ id: GPT, kind: 'chatgpt', title: 'Chat', turns: [userTurn('t1', 'D', PAGE_REPLY)] });
+  const page = fakePage(app);
+  // After sending, the user scrolls up to where an older E was answered.
+  page.view = () =>
+    app.sent.length
+      ? { ...showing(['A', 'B', 'C', 'D', 'E'], 'reply to the older E'), atEnd: false }
+      : showing(['X', 'A', 'B', 'C', 'D']);
+  app.answer = 'reply to E';
+  const sent = await sendGpt(app, page, GPT, 'E', { ...fast, wait: true });
+  assert.equal(sent.turn?.reply, 'reply to E');
 });

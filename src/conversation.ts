@@ -8,6 +8,38 @@ export interface WaitOptions {
   deadline: number;
   /** Longest pause between two status reads. */
   pollMs?: number;
+  /**
+   * Another way to learn that the turn has ended, tried first on every poll: the ChatGPT page
+   * shows a reply long before the app lists it.
+   */
+  early?: () => Promise<Turn | undefined>;
+}
+
+/**
+ * What the page shows of a conversation right before a prompt is sent to it. The ChatGPT page
+ * is up to a minute ahead of the app's list.
+ */
+export interface Live {
+  /** The page shows the messages known to the app and ACB, at one place. */
+  placed: boolean;
+  /** It shows messages after them, so neither the app nor ACB knows the newest. */
+  ahead: boolean;
+  /** Its newest message is the prompt. */
+  newest: boolean;
+  /** ChatGPT is writing a reply. */
+  busy: boolean;
+  /** The finished reply to the prompt, once the page shows it. */
+  reply: () => Promise<Turn | undefined>;
+}
+
+export interface SendOptions extends Omit<WaitOptions, 'early'> {
+  wait: boolean;
+  caller?: string;
+  /**
+   * Looks at the page right before `prompt` is sent, given the prompts of the messages ACB sent
+   * that the app does not list yet; undefined when the page cannot tell.
+   */
+  watch?: (prompt: string, unlisted: string[]) => Promise<Live | undefined>;
 }
 
 export interface Sent {
@@ -19,26 +51,40 @@ export interface Sent {
   turn: Turn | null;
 }
 
-/** Which turn a sent prompt opens: turn `turnId`, or the first turn after `after`. */
-type Match = { turnId: string } | { after: string | undefined };
+/** Which turn a prompt opens: turn `turnId`, or its `occurrence`-th (from 0) turn after turn `after`. */
+type Match = { turnId: string } | { after: string | undefined; occurrence: number };
 
-/**
- * A message ACB sent, or may have sent, whose turn the app does not list yet. It is kept until
- * the app lists a newer turn: no amount of time proves that the message was not delivered.
- */
-interface Accepted {
+/** A message ACB sent, or may have sent, that the app does not list yet. */
+interface Message {
   prompt: string;
-  after: string | undefined;
   sentAt: string;
+  /** Its turn as confirmed on the page. */
+  answer?: Turn;
 }
 
-/** Per app: sends to one conversation run one at a time, and messages sent but not yet listed. */
-const state = new WeakMap<App, { locks: Map<string, Promise<unknown>>; accepted: Map<string, Accepted> }>();
+/**
+ * The messages ACB sent to a conversation after turn `after`, oldest first, that the app does
+ * not list yet. A message is dropped once the app lists it, or when it certainly was not sent:
+ * no amount of time proves that a message was not delivered.
+ */
+interface Chain {
+  after: string | undefined;
+  messages: Message[];
+}
+
+/**
+ * Per app: sends to one conversation run one at a time, the messages not listed yet, and the
+ * messages that may have been delivered but can no longer be matched to a turn (see reconcile).
+ */
+const state = new WeakMap<
+  App,
+  { locks: Map<string, Promise<unknown>>; chains: Map<string, Chain>; unmatched: Map<string, Message[]> }
+>();
 
 function stateOf(app: App) {
   let current = state.get(app);
   if (!current) {
-    current = { locks: new Map(), accepted: new Map() };
+    current = { locks: new Map(), chains: new Map(), unmatched: new Map() };
     state.set(app, current);
   }
   return current;
@@ -58,74 +104,160 @@ function exclusive<T>(app: App, threadId: string, task: () => Promise<T>): Promi
 
 /**
  * Sends one prompt to a conversation and, with `wait`, returns the turn it opens. A prompt
- * that is the conversation's newest message, or that ACB sent and the app has not listed
- * yet, is not sent again: its turn is returned instead, so a call that timed out can be
- * repeated safely. A conversation that is still answering refuses a new prompt.
+ * that is the conversation's newest message (listed, shown on the page, or sent by ACB and
+ * not listed yet) is not sent again: its turn is returned instead, so a call that timed out
+ * can be repeated safely. A conversation that is still answering refuses a new prompt.
  */
 export async function sendPrompt(
   app: App,
   kind: Kind,
   threadId: string,
   prompt: string,
-  options: WaitOptions & { wait: boolean; caller?: string },
+  options: SendOptions,
 ): Promise<Sent> {
   const text = normalize(prompt);
-  const { title, alreadySent, match } = await exclusive(app, threadId, async (): Promise<Decision> => {
-    let before = await app.readThread(threadId);
-    if (before.kind !== kind) {
-      const tool = before.kind === 'codex' ? 'acb_codex_send' : 'acb_gpt_send';
-      throw new AcbError(
-        'INPUT',
-        `This is a ${before.kind === 'codex' ? 'Codex' : 'ChatGPT'} conversation: use ${tool}`,
-      );
-    }
-    const earlier = await sentBefore(app, threadId);
-    if (earlier) {
-      const { entry, turn } = earlier;
-      if (entry.prompt === text) {
-        return { title: before.title, alreadySent: true, match: turn ? { turnId: turn.id } : { after: entry.after } };
-      }
-      if (!turn) {
-        throw new AcbError(
-          'BUSY',
-          `A message ACB sent at ${entry.sentAt} has not appeared in the conversation yet; wait for it before sending another`,
-          { threadId },
-        );
-      }
-      // That message has just been listed: decide on the conversation as it is now.
-      before = await app.readThread(threadId);
-    }
-    const last = before.turns[0];
-    if (last && opensWith(last, text)) return { title: before.title, alreadySent: true, match: { turnId: last.id } };
-    if (statusOf(before) !== 'idle') {
-      throw new AcbError('BUSY', 'The conversation is still answering; read it, then send when it is idle', {
-        threadId,
-      });
-    }
-    await deliver(app, kind, threadId, text, options.caller, last?.id);
-    return { title: before.title, alreadySent: false, match: { after: last?.id } };
-  });
-  const turn = options.wait ? await waitForTurn(app, threadId, text, match, options) : null;
+  const plan = await exclusive(app, threadId, () => decide(app, kind, threadId, text, options));
+  const { title, alreadySent } = plan;
+  if (plan.answer) return { threadId, title, alreadySent, turn: options.wait ? plan.answer : null };
+  const turn = options.wait
+    ? await waitForTurn(app, threadId, text, plan.match, { ...options, early: plan.early })
+    : null;
+  if (turn?.turnId === null && plan.message) plan.message.answer = turn;
   return { threadId, title, alreadySent, turn };
 }
 
-interface Decision {
+interface Plan {
   title: string;
   alreadySent: boolean;
   match: Match;
+  /** The turn of the prompt, already confirmed on the page. */
+  answer?: Turn;
+  /** The message just sent. */
+  message?: Message;
+  early?: () => Promise<Turn | undefined>;
+}
+
+async function decide(app: App, kind: Kind, threadId: string, text: string, options: SendOptions): Promise<Plan> {
+  let before = await app.readThread(threadId);
+  if (before.kind !== kind) {
+    const tool = before.kind === 'codex' ? 'acb_codex_send' : 'acb_gpt_send';
+    throw new AcbError('INPUT', `This is a ${before.kind === 'codex' ? 'Codex' : 'ChatGPT'} conversation: use ${tool}`);
+  }
+  if (await reconcile(app, threadId)) before = await app.readThread(threadId);
+  const { title } = before;
+  const unmatched = stateOf(app)
+    .unmatched.get(threadId)
+    ?.find((message) => message.prompt === text);
+  if (unmatched) {
+    throw new AcbError(
+      'TIMEOUT',
+      `This prompt was sent at ${unmatched.sentAt} and may have arrived, but the conversation has since moved on further than ACB can follow, so it is not sent again: read the conversation, and change the prompt slightly to send it anyway`,
+      { threadId },
+    );
+  }
+  const chain = stateOf(app).chains.get(threadId);
+  const last = before.turns[0];
+  const after = chain ? chain.after : last?.id;
+  const occurrence = chain?.messages.filter((message) => message.prompt === text).length ?? 0;
+  const newest = chain?.messages.at(-1);
+  // A message whose arrival is not confirmed yet holds back every other.
+  if (newest?.prompt === text && !newest.answer) {
+    return { title, alreadySent: true, match: { after, occurrence: occurrence - 1 } };
+  }
+  const unanswered = chain?.messages.find((message) => !message.answer);
+  if (unanswered) {
+    throw new AcbError(
+      'BUSY',
+      `A message ACB sent at ${unanswered.sentAt} has not appeared in the conversation yet; wait for it before sending another`,
+      { threadId },
+    );
+  }
+  const live = await options.watch?.(
+    text,
+    (chain?.messages ?? []).map((message) => message.prompt),
+  );
+  if (live?.ahead && live.newest) return { title, alreadySent: true, match: { after, occurrence }, early: live.reply };
+  // A page that cannot be placed leaves the newest message unknown.
+  const unplaced = () =>
+    new AcbError(
+      'BUSY',
+      'The ChatGPT page cannot be matched to the turns the app lists, so whether this prompt is the newest message is unknown; read the conversation, then send',
+      { threadId },
+    );
+  if (live && !live.placed && live.newest) throw unplaced();
+  if (!live?.ahead) {
+    // The newest message is ACB's last one, or else the app's newest turn.
+    const known: Plan | undefined =
+      newest?.prompt === text
+        ? { title, alreadySent: true, match: { after, occurrence: occurrence - 1 }, answer: newest.answer }
+        : !chain && last && opensWith(last, text)
+          ? { title, alreadySent: true, match: { turnId: last.id } }
+          : undefined;
+    if (known && live && !live.placed) throw unplaced();
+    if (known) return known;
+  }
+  if (live?.busy) {
+    throw new AcbError('BUSY', 'ChatGPT is still writing a reply on the page; read the conversation, then send', {
+      threadId,
+    });
+  }
+  if (statusOf(before) !== 'idle') {
+    throw new AcbError('BUSY', 'The conversation is still answering; read it, then send when it is idle', {
+      threadId,
+    });
+  }
+  const message = await deliver(app, kind, threadId, text, options.caller, after);
+  return { title, alreadySent: false, match: { after, occurrence }, message, early: live?.reply };
 }
 
 /**
- * The message ACB sent (or may have sent) to `threadId` before, with the turn it opened once
- * the app lists one; the record is then dropped. Other new turns prove nothing about it.
+ * The turns of messages ACB sent that were answered on the page but that the app does not list
+ * yet, oldest first, and the turn they follow; undefined when there are none.
  */
-async function sentBefore(app: App, threadId: string): Promise<{ entry: Accepted; turn?: AppTurn } | undefined> {
-  const { accepted } = stateOf(app);
-  const entry = accepted.get(threadId);
-  if (!entry) return undefined;
-  const turn = await findTurn(app, threadId, entry.after, (candidate) => opensWith(candidate, entry.prompt));
-  if (turn) accepted.delete(threadId);
-  return { entry, ...(turn ? { turn } : {}) };
+export function unlistedAnswers(
+  app: App,
+  threadId: string,
+): Promise<{ after: string | undefined; answers: Turn[] } | undefined> {
+  return exclusive(app, threadId, async () => {
+    await reconcile(app, threadId);
+    const chain = stateOf(app).chains.get(threadId);
+    const answers = chain?.messages.flatMap((message) => (message.answer ? [message.answer] : [])) ?? [];
+    return chain && answers.length ? { after: chain.after, answers } : undefined;
+  });
+}
+
+/**
+ * Drops the messages the app now lists: its turns after the chain's start are matched to the
+ * messages in order, skipping turns of other senders. When the app no longer returns the
+ * chain's start, more turns followed it than the app returns and its messages can no longer be
+ * matched: the chain is dropped, but those not confirmed on the page are kept as unmatched,
+ * never to be sent again on their own. Whether any was dropped.
+ */
+async function reconcile(app: App, threadId: string): Promise<boolean> {
+  const { chains, unmatched } = stateOf(app);
+  const chain = chains.get(threadId);
+  if (!chain) return false;
+  const turns = await turnsAfter(app, threadId, chain.after);
+  if (!turns) {
+    const unknown = chain.messages.filter((message) => !message.answer);
+    if (unknown.length) unmatched.set(threadId, [...(unmatched.get(threadId) ?? []), ...unknown]);
+    chains.delete(threadId);
+    return true;
+  }
+  let listed = 0;
+  let through: string | undefined;
+  for (const turn of turns) {
+    const message = chain.messages[listed];
+    if (message && opensWith(turn, message.prompt)) {
+      listed++;
+      through = turn.id;
+    }
+  }
+  if (!listed) return false;
+  chain.messages.splice(0, listed);
+  chain.after = through;
+  if (!chain.messages.length) chains.delete(threadId);
+  return true;
 }
 
 /**
@@ -140,9 +272,12 @@ async function deliver(
   prompt: string,
   caller: string | undefined,
   after: string | undefined,
-): Promise<void> {
-  const { accepted } = stateOf(app);
-  accepted.set(threadId, { prompt, after, sentAt: new Date().toISOString() });
+): Promise<Message> {
+  const { chains } = stateOf(app);
+  const chain = chains.get(threadId) ?? { after, messages: [] };
+  chains.set(threadId, chain);
+  const message: Message = { prompt, sentAt: new Date().toISOString() };
+  chain.messages.push(message);
   try {
     try {
       await app.sendMessage(threadId, prompt, caller);
@@ -153,57 +288,64 @@ async function deliver(
     }
   } catch (error) {
     if (error instanceof AcbError && (error.details.notSent || error.details.refused)) {
-      accepted.delete(threadId);
+      chain.messages.splice(chain.messages.indexOf(message), 1);
+      if (!chain.messages.length) chains.delete(threadId);
       throw error;
     }
     const failure = error instanceof AcbError ? error : new AcbError('PROTOCOL', String(error));
     throw new AcbError(
       failure.code,
       `${failure.message}. The message may have been sent: read the conversation before sending again`,
-      {
-        ...failure.details,
-        threadId,
-      },
+      { ...failure.details, threadId },
     );
   }
+  return message;
 }
 
 /**
- * The newest turn after turn `after` (any turn when undefined) that satisfies `test`, read in
- * full. It looks at most ten turns back.
+ * The turns after turn `after` (all when undefined), oldest first, read in full; undefined when
+ * the app does not return turn `after` among the newest ten (for ChatGPT, it returns five).
  */
-async function findTurn(
-  app: App,
-  threadId: string,
-  after: string | undefined,
-  test: (turn: AppTurn) => boolean,
-): Promise<AppTurn | undefined> {
+async function turnsAfter(app: App, threadId: string, after: string | undefined): Promise<AppTurn[] | undefined> {
+  const read = async (turns: number) => {
+    const page = await app.readThread(threadId, { turns });
+    const end = after === undefined ? page.turns.length : page.turns.findIndex((turn) => turn.id === after);
+    return { page, end };
+  };
+  let { page, end } = await read(3);
+  if ((after === undefined || end < 0) && page.nextCursor) ({ page, end } = await read(10));
+  return end < 0 ? undefined : page.turns.slice(0, end).reverse();
+}
+
+/** Turn `turnId`, read in full. It looks at most ten turns back. */
+async function turnById(app: App, threadId: string, turnId: string): Promise<AppTurn | undefined> {
   for (const turns of [3, 10]) {
     const page = await app.readThread(threadId, { turns });
-    const end = after === undefined ? -1 : page.turns.findIndex((turn) => turn.id === after);
-    const found = (end < 0 ? page.turns : page.turns.slice(0, end)).find(test);
-    if (found || end >= 0 || !page.nextCursor) return found;
+    const found = page.turns.find((turn) => turn.id === turnId);
+    if (found || !page.nextCursor) return found;
   }
   return undefined;
 }
 
 /**
- * Waits for the turn opened by `prompt` to end and returns it: turn `turnId`, or the turn
- * after `after` that `prompt` opened. Status is watched without message text, which is
- * cheap; turns are read in full only when nothing is running.
+ * Waits for the turn opened by `prompt` to end and returns it (see Match). Status is watched
+ * without message text, which is cheap; turns are read in full only when nothing is running.
  */
 export async function waitForTurn(
   app: App,
   threadId: string,
   prompt: string,
   match: Match,
-  { deadline, pollMs = 1500 }: WaitOptions,
+  { deadline, pollMs = 1500, early }: WaitOptions,
 ): Promise<Turn> {
   const ours =
     'turnId' in match
-      ? () => findTurn(app, threadId, undefined, (turn) => turn.id === match.turnId)
-      : () => findTurn(app, threadId, match.after, (turn) => opensWith(turn, prompt));
+      ? () => turnById(app, threadId, match.turnId)
+      : async () =>
+          (await turnsAfter(app, threadId, match.after))?.filter((turn) => opensWith(turn, prompt))[match.occurrence];
   for (let poll = 0; ; poll++) {
+    const confirmed = await early?.();
+    if (confirmed) return confirmed;
     const page = await app.readThread(threadId, { outputs: false });
     const status = statusOf(page);
     const moved = page.turns[0] !== undefined && ('turnId' in match || page.turns[0].id !== match.after);

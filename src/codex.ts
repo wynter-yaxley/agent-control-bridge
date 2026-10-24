@@ -75,7 +75,9 @@ export async function createCodex(
     ? { type: 'project', projectId: request.projectId, environment: { type: 'local' } }
     : { type: 'projectless', ...(request.folder ? { directoryName: request.folder } : {}) };
   const threadId = await app.createThread({ prompt, target, ...(request.title ? { title: request.title } : {}) });
-  const turn = request.wait ? await waitForTurn(app, threadId, prompt, { after: undefined }, options) : null;
+  const turn = request.wait
+    ? await waitForTurn(app, threadId, prompt, { after: undefined, occurrence: 0 }, options)
+    : null;
   const page = await app.readThread(threadId, { outputs: false });
   return { threadId, title: page.title, cwd: page.cwd, turn };
 }

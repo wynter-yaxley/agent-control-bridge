@@ -45,7 +45,7 @@ flowchart LR
 | Operation | Takes the foreground and keyboard focus | Switches the page the app shows |
 |---|---|---|
 | All Codex tools; listing and reading; `acb_projects`, `acb_status` | No | No |
-| `acb_gpt_send` | No: the message is sent in the background | Yes: once answered, the conversation is shown to read the reply text |
+| `acb_gpt_send` | No: the message is sent in the background | Yes: before sending, the conversation is shown to read the reply text |
 | `acb_gpt_read` with `page: true` | No | Yes: the conversation is shown to read the reply text |
 | `acb_open` | No | Yes |
 | **`acb_gpt_create`** | **Yes, for a second or two**: the app activates the ChatGPT window when it opens a new chat; ACB gives the foreground back to your window as soon as the message is sent. ACB sends no keystrokes, but keys you press during those seconds can land in ChatGPT's composer | Yes |
@@ -112,16 +112,17 @@ A send waits up to 240 seconds by default. Set the client's tool timeout to 300 
 **ChatGPT conversations**
 
 - ChatGPT shows your messages as ordinary user messages.
-- The app's record of a conversation usually keeps only a placeholder for each reply; the text is read from the page. Reading the page needs the ChatGPT window **visible on screen**: behind other windows or partly covered is fine, fully covered (say, by a full-screen video) is not. If the page cannot be read, the send still succeeds; the result marks `replyOnPage` with the reason, and `acb_gpt_read` with `page: true` reads it later.
-- The page shows no conversation ID, so ACB confirms it shows the turn to read by the conversation's title, its number of messages and the last prompt. If another ChatGPT conversation the app lists has the same title, the reply cannot be read from the page (`WINDOW`); rename one of them.
+- The app's record of a conversation usually keeps only a placeholder for each reply; the text is read from the page. Reading the page needs the ChatGPT window **visible on screen**: behind other windows or partly covered is fine, fully covered (say, by a full-screen video) or on another virtual desktop is not, because the app then stops updating the page. ACB checks this before reading the page. If the page cannot be read, the send still succeeds; the result marks `replyOnPage` with the reason, and `acb_gpt_read` with `page: true` reads it later.
+- The page shows no conversation ID, so ACB confirms it shows the turn to read by the conversation's title and its prompts: the last prompts on the page must be those of the turns the app lists. If another ChatGPT conversation the app lists has the same title, or the recent prompts repeat in a cycle (say Q, R, Q, R, where a page stuck at an older state would look the same), the reply cannot be read from the page (`WINDOW`). In the first case, rename one of them.
+- **Speed**: the app records a ChatGPT turn up to a minute after the reply ends. With the window visible, `acb_gpt_send` returns as soon as the page shows the finished reply (usually within 10-20 seconds), with `turnId: null` for now; until the app records the turn, `acb_gpt_read` in the same ACB process returns it as the newest turn. Without a visible window, ACB waits for the app to record it, about a minute. `acb_gpt_create` always waits for the app to list the new conversation, about a minute.
 - After the ChatGPT window has been fully covered or minimized for a long time, the app slows down its background page, and a message can take about a minute to go out.
 - If the new-chat page holds a draft you have not sent, starting a ChatGPT conversation is refused rather than overwriting it.
 
 **In general**
 
-- **No duplicates**: if the message to send is exactly the conversation's newest message, or the one ACB just sent and the app does not show yet, ACB does not send it again and returns that turn's reply. To repeat the same text on purpose, change it slightly.
+- **No duplicates**: if the message to send is exactly the conversation's newest message (as the app lists it, as the ChatGPT page already shows it, or the one ACB just sent and the app does not list yet), ACB does not send it again and returns that turn's reply. If the outcome of a send is unknown (say, the connection broke) and the conversation then went on for more turns than the app returns, ACB can no longer tell whether it arrived, and that prompt is not sent again on its own (`TIMEOUT`). To repeat the same text on purpose, change it slightly.
 - A message can have up to 20,000 characters: the app reads back no more, and ACB must read a message back whole to know which reply belongs to it. Messages to Codex have `&`, `<` and `>` escaped, so many of those lower the limit a little. Put longer material in a file and refer to it.
-- A conversation that is still answering refuses new messages (`BUSY`).
+- A conversation that is still answering refuses new messages (`BUSY`), also while the ChatGPT page is writing a reply. So does a ChatGPT page that shows the prompt as its newest message when ACB cannot tell how that follows the messages the app lists. The page holds only the messages near where you are looking, so while you scroll the ChatGPT page up to older messages, ACB does not read it and waits for the app to list the reply.
 - Lists follow the app's sidebar: pinned first, then most recently updated by default. The app lists the 50 most recent conversations (plus pinned ones); older ones can still be read by ID.
 - **Caller**: the app requires every call to be made on behalf of a Codex conversation. ACB uses the most recent one, or the one given with `--caller`. Nothing is recorded in that conversation; only the first message of a new Codex conversation is shown as delegated by it.
 - ACB talks only to the desktop app on this computer. It does not go online by itself and does not read account credentials. Before connecting, it checks the server of the app's pipe: the ChatGPT app with a valid OpenAI signature, run by the current user in the current Windows session.

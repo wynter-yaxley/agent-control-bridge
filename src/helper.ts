@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { AcbError, type ErrorCode } from './errors.ts';
 import { normalize } from './turns.ts';
 
-/** A Text or Button of the ChatGPT page, in page order. */
+/** A Text or Button of the ChatGPT page, in page order; one Text holds a run of page text. */
 export interface PageNode {
   type: string;
   name: string;
@@ -14,13 +14,41 @@ export interface PageNode {
   label?: boolean;
 }
 
-export interface Exchange {
-  /** User messages on the page. */
-  messages: number;
-  prompt: string;
+/** What the ChatGPT page shows of a conversation. */
+export interface PageState extends PageMessages {
+  /** ChatGPT is writing a reply. */
+  busy: boolean;
+  /** The page is scrolled to the end, so its last messages are the conversation's newest. */
+  atEnd: boolean;
+}
+
+export interface PageMessages {
+  /** The user messages the page holds, oldest first: the newest few, near what it shows. */
+  prompts: string[];
+  /** The reply to the last user message, as far as it is shown. */
   reply: string;
   /** The reply's action buttons are shown, so it is finished. */
   complete: boolean;
+}
+
+/** A vertical scroll position: how far down, and how much of the height shows (percent). */
+export interface Scroll {
+  percent: number;
+  view: number;
+}
+
+/** How far from its end, in screens, a page still counts as at its end: scrolling is fractional. */
+const END_SCREENS = 0.05;
+
+/**
+ * Whether a conversation scrolled to `scroll` (null: it fits, so it does not scroll) shows its
+ * end. The page holds only the messages near what it shows, so its last one is the newest only
+ * at the end.
+ */
+export function atEnd(scroll: Scroll | null): boolean {
+  if (!scroll) return true;
+  if (!(scroll.view > 0)) return false;
+  return (100 / scroll.view - 1) * (1 - scroll.percent / 100) <= END_SCREENS;
 }
 
 /** Page labels of the Simplified Chinese app. */
@@ -29,21 +57,26 @@ const REQUEST_TIMEOUT_MS = 30_000;
 /** How long a reply may take to show on the page. */
 export const READ_TIMEOUT_MS = 20_000;
 
-/** The last user message on the page and the ChatGPT reply after it. */
-export function lastExchange(nodes: PageNode[]): Exchange | null {
-  const text = (node: PageNode, names: string[]) =>
+/** The user messages on the page and the ChatGPT reply after the last one. */
+export function readPage(nodes: PageNode[]): PageMessages {
+  const heading = (node: PageNode, names: string[]) =>
     node.type === 'Text' && node.label === true && names.includes(node.name);
-  const you = nodes.findLastIndex((node) => text(node, LABELS.you));
-  if (you < 0) return null;
-  const messages = nodes.filter((node) => text(node, LABELS.you)).length;
-  const assistant = nodes.findIndex((node, index) => index > you && text(node, LABELS.assistant));
-  const end = assistant < 0 ? nodes.length : assistant;
-  const prompt = nodes.slice(you + 1, end).filter((node) => node.type === 'Text' && !node.label);
-  if (assistant < 0) return { messages, prompt: textOf(prompt), reply: '', complete: false };
+  const starts = nodes.flatMap((node, index) => (heading(node, LABELS.you) ? [index] : []));
+  /** The message text after the heading at `start`, up to the next heading. */
+  const message = (start: number) => {
+    const end = nodes.findIndex((node, index) => index > start && node.label === true);
+    return textOf(nodes.slice(start + 1, end < 0 ? nodes.length : end).filter((node) => node.type === 'Text'));
+  };
+  const prompts = starts.map(message);
+  const you = starts.at(-1);
+  const assistant = nodes.findIndex(
+    (node, index) => you !== undefined && index > you && heading(node, LABELS.assistant),
+  );
+  if (assistant < 0) return { prompts, reply: '', complete: false };
   const rest = nodes.slice(assistant + 1);
   const finished = rest.findIndex((node) => node.type === 'Button' && node.name === LABELS.finished);
   const reply = (finished < 0 ? rest : rest.slice(0, finished)).filter((node) => node.type === 'Text' && !node.label);
-  return { messages, prompt: textOf(prompt), reply: textOf(reply), complete: finished >= 0 };
+  return { prompts, reply: textOf(reply), complete: finished >= 0 };
 }
 
 function textOf(nodes: PageNode[]): string {
@@ -53,7 +86,64 @@ function textOf(nodes: PageNode[]): string {
     .trim();
 }
 
-const squash = (text: string) => normalize(text).replace(/\s+/g, ' ');
+/**
+ * Whether a message reads the same as one shown on the page, which keeps a user message as
+ * written except for the backticks around its `inline code`.
+ */
+export function samePrompt(shown: string, message: string): boolean {
+  const plain = (text: string) => normalize(text).replace(/`([^`\n]+)`/g, '$1');
+  return plain(shown) === plain(message);
+}
+
+/** Whether `shown` ends with `prompts`. */
+function endsWith(shown: string[], prompts: string[]): boolean {
+  const offset = shown.length - prompts.length;
+  return offset >= 0 && prompts.every((prompt, index) => samePrompt(shown[offset + index], prompt));
+}
+
+/**
+ * Whether the page's user messages end with `prompts`. The page holds only the newest messages
+ * (five or more, fewer when they are long), so only as many as it holds are compared, but at
+ * least two.
+ */
+export function showsPrompts(state: PageMessages, prompts: string[]): boolean {
+  const count = Math.max(Math.min(prompts.length, state.prompts.length), Math.min(2, prompts.length));
+  return endsWith(state.prompts, prompts.slice(prompts.length - count));
+}
+
+/**
+ * The finished reply on a page scrolled to the end whose user messages end with `prompts` (see
+ * showsPrompts); null otherwise.
+ */
+export function replyTo(state: PageState | null, prompts: string[]): string | null {
+  if (!state?.atEnd || state.busy || !state.complete || !state.reply) return null;
+  return showsPrompts(state, prompts) ? state.reply : null;
+}
+
+/**
+ * The messages the page shows after `known`, the newest messages known to be in the
+ * conversation; undefined when the page does not show `known` exactly once.
+ */
+export function shownAfter(state: PageMessages, known: string[]): string[] | undefined {
+  if (!known.length) return undefined;
+  const ends: number[] = [];
+  for (let end = known.length; end <= state.prompts.length; end++) {
+    if (endsWith(state.prompts.slice(0, end), known)) ends.push(end);
+  }
+  return ends.length === 1 ? state.prompts.slice(ends[0]) : undefined;
+}
+
+/** Why the page does not show the reply after `prompts`. */
+function missing(state: PageState | null, prompts: string[]): string {
+  if (!state) {
+    return 'The ChatGPT window does not show the conversation; the app does not update a window that is fully covered, so keep part of it visible';
+  }
+  if (!state.atEnd) return 'The ChatGPT page is scrolled up from the newest messages';
+  if (showsPrompts({ ...state, prompts: state.prompts.slice(0, -1) }, prompts)) {
+    return 'The page shows a newer message than the app lists; the app lists a ChatGPT turn up to a minute after it ends, so read again shortly';
+  }
+  return 'The reply was not found on the ChatGPT page';
+}
 
 /**
  * A long-lived Windows PowerShell helper (helper.ps1) for what the app's tools do not offer:
@@ -105,26 +195,37 @@ export class WindowsHelper {
   }
 
   /**
-   * The reply to `prompt` from the page showing `title`, once ChatGPT has finished it. The
-   * page must show `messages` user messages, the last being exactly `prompt`: a page that has
-   * not caught up with the conversation shows fewer.
+   * What the page showing `title` shows, or null when no window shows it within `waitMs` (the
+   * page needs a moment after it has been asked to show a conversation).
    */
-  async readReply(title: string, prompt: string, messages: number, timeoutMs = READ_TIMEOUT_MS): Promise<string> {
-    const deadline = Date.now() + timeoutMs;
-    const expected = squash(prompt);
+  async pageState(title: string, waitMs = 0): Promise<PageState | null> {
+    const until = Date.now() + waitMs;
     for (;;) {
       const page = await this.#request({ op: 'transcript', title });
-      const exchange = page.found && !page.busy ? lastExchange(page.nodes as PageNode[]) : null;
-      const current = exchange?.complete && exchange.messages === messages && squash(exchange.prompt) === expected;
-      if (current && exchange.reply) return exchange.reply;
-      if (Date.now() >= deadline) {
-        throw new AcbError(
-          'WINDOW',
-          page.found
-            ? 'The reply was not found on the ChatGPT page'
-            : 'The ChatGPT window does not show the conversation; the app does not update a window that is fully covered, so keep part of it visible',
-        );
+      if (page.found) {
+        // Without the conversation's frame, where it is scrolled to is unknown.
+        const end = page.framed === true && atEnd((page.scroll as Scroll | null) ?? null);
+        return { busy: page.busy === true, atEnd: end, ...readPage(page.nodes as PageNode[]) };
       }
+      if (Date.now() >= until) return null;
+      await delay(300);
+    }
+  }
+
+  /**
+   * The reply after `prompts` from the page showing `title`, once ChatGPT has finished it. The
+   * page's user messages must end with `prompts` (see replyTo) on two reads in a row: a page
+   * just asked to show a conversation can show what it kept of it for a moment.
+   */
+  async readReply(title: string, prompts: string[], timeoutMs = READ_TIMEOUT_MS): Promise<string> {
+    const deadline = Date.now() + timeoutMs;
+    let previous: string | null = null;
+    for (;;) {
+      const state = await this.pageState(title);
+      const reply = replyTo(state, prompts);
+      if (reply !== null && reply === previous) return reply;
+      previous = reply;
+      if (Date.now() >= deadline) throw new AcbError('WINDOW', missing(state, prompts));
       await delay(500);
     }
   }
