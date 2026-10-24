@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { setTimeout as delay } from 'node:timers/promises';
 import { sendPrompt } from '../src/conversation.ts';
 import { AcbError } from '../src/errors.ts';
 import { CODEX, FakeApp, GPT, userTurn } from './fake-app.ts';
@@ -135,15 +136,30 @@ test('a different prompt sent before the first one is listed is refused', async 
   );
 });
 
-test('a turn of another message waiting for approval is not reported as ours', async () => {
+test('another message waiting for approval is not reported as ours', async () => {
   const app = new FakeApp();
   const thread = app.add({ id: CODEX, kind: 'codex' });
-  app.answer = () => {
-    // Someone else's message takes over and waits for approval.
-    thread.turns.unshift(userTurn('foreign', 'Not ours', null, 'inProgress'));
-    thread.activeFlags = ['waitingOnApproval'];
-  };
-  await assert.rejects(sendPrompt(app, 'codex', CODEX, 'Ours', fast), code('BUSY'));
+  app.listAfterMs = 10_000;
+  const sending = sendPrompt(app, 'codex', CODEX, 'Ours', { ...fast, deadline: Date.now() + 200 });
+  while (!app.sent.length) await delay(1);
+  // Before ours is listed, someone else's message starts and waits for approval.
+  thread.turns.unshift(userTurn('foreign', 'Not ours', null, 'inProgress'));
+  thread.status = 'active';
+  thread.activeFlags = ['waitingOnApproval'];
+  await assert.rejects(sending, code('TIMEOUT'));
+});
+
+test('another message listed first does not end the protection of ours', async () => {
+  const app = new FakeApp();
+  const thread = app.add({ id: GPT, kind: 'chatgpt' });
+  app.listAfterMs = 10_000;
+  app.lostAnswer = new AcbError('PROTOCOL', 'The connection to the desktop app broke');
+  await assert.rejects(sendPrompt(app, 'chatgpt', GPT, 'Q', fast), code('PROTOCOL'));
+  app.lostAnswer = null;
+  thread.turns.unshift(userTurn('r', 'R', 'answer to R'));
+  await sendPrompt(app, 'chatgpt', GPT, 'Q', { ...fast, wait: false });
+  assert.equal(app.sent.length, 1, 'Q is still unlisted, so it is not sent again');
+  await assert.rejects(sendPrompt(app, 'chatgpt', GPT, 'Something else', fast), code('BUSY'));
 });
 
 test('an archived ChatGPT conversation is restored as a ChatGPT conversation', async () => {

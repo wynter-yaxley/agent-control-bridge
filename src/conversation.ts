@@ -79,18 +79,18 @@ export async function sendPrompt(
         `This is a ${before.kind === 'codex' ? 'Codex' : 'ChatGPT'} conversation: use ${tool}`,
       );
     }
-    const last = before.turns[0];
-    const accepted = pendingOf(app, threadId, last);
-    if (accepted) {
-      if (accepted.prompt !== text) {
+    const pending = await unlisted(app, threadId);
+    if (pending) {
+      if (pending.prompt !== text) {
         throw new AcbError(
           'BUSY',
-          `A message ACB sent at ${accepted.sentAt} has not appeared in the conversation yet; wait for it before sending another`,
+          `A message ACB sent at ${pending.sentAt} has not appeared in the conversation yet; wait for it before sending another`,
           { threadId },
         );
       }
-      return { title: before.title, alreadySent: true, match: { after: accepted.after } };
+      return { title: before.title, alreadySent: true, match: { after: pending.after } };
     }
+    const last = before.turns[0];
     if (last && opensWith(last, text)) return { title: before.title, alreadySent: true, match: { turnId: last.id } };
     if (statusOf(before) !== 'idle') {
       throw new AcbError('BUSY', 'The conversation is still answering; read it, then send when it is idle', {
@@ -104,11 +104,15 @@ export async function sendPrompt(
   return { threadId, title, alreadySent, turn };
 }
 
-/** The message ACB sent to `threadId` while the app still lists `newest` as the latest turn. */
-function pendingOf(app: App, threadId: string, newest: AppTurn | undefined): Accepted | undefined {
+/**
+ * The message ACB sent (or may have sent) to `threadId` that the app does not list yet. It
+ * counts as listed only once a turn it opened is found; other new turns prove nothing.
+ */
+async function unlisted(app: App, threadId: string): Promise<Accepted | undefined> {
   const { accepted } = stateOf(app);
   const entry = accepted.get(threadId);
-  if (entry && entry.after === newest?.id) return entry;
+  if (!entry) return undefined;
+  if (!(await findTurn(app, threadId, entry.after, (turn) => opensWith(turn, entry.prompt)))) return entry;
   accepted.delete(threadId);
   return undefined;
 }
@@ -125,7 +129,7 @@ async function deliver(
   prompt: string,
   caller: string | undefined,
   after: string | undefined,
-) {
+): Promise<void> {
   const { accepted } = stateOf(app);
   accepted.set(threadId, { prompt, after, sentAt: new Date().toISOString() });
   try {
@@ -154,9 +158,28 @@ async function deliver(
 }
 
 /**
- * Waits for the turn opened by `prompt` to end and returns it. Status is watched without
- * message text, which is cheap; the turn is read in full once to confirm it is the one
- * `prompt` opened.
+ * The newest turn after turn `after` (any turn when undefined) that satisfies `test`, read in
+ * full. It looks at most ten turns back.
+ */
+async function findTurn(
+  app: App,
+  threadId: string,
+  after: string | undefined,
+  test: (turn: AppTurn) => boolean,
+): Promise<AppTurn | undefined> {
+  for (const turns of [3, 10]) {
+    const page = await app.readThread(threadId, { turns });
+    const end = after === undefined ? page.turns.length : page.turns.findIndex((turn) => turn.id === after);
+    const found = (end < 0 ? page.turns : page.turns.slice(0, end)).find(test);
+    if (found || end >= 0 || !page.nextCursor) return found;
+  }
+  return undefined;
+}
+
+/**
+ * Waits for the turn opened by `prompt` to end and returns it: turn `turnId`, or the turn
+ * after `after` that `prompt` opened. Status is watched without message text, which is
+ * cheap; turns are read in full only when nothing is running.
  */
 export async function waitForTurn(
   app: App,
@@ -165,17 +188,20 @@ export async function waitForTurn(
   match: Match,
   { deadline, pollMs = 1500 }: WaitOptions,
 ): Promise<Turn> {
+  const ours =
+    'turnId' in match
+      ? () => findTurn(app, threadId, undefined, (turn) => turn.id === match.turnId)
+      : () => findTurn(app, threadId, match.after, (turn) => opensWith(turn, prompt));
   for (let poll = 0; ; poll++) {
     const page = await app.readThread(threadId, { outputs: false });
-    const newest = page.turns[0];
-    const ours = newest !== undefined && ('turnId' in match ? newest.id === match.turnId : newest.id !== match.after);
     const status = statusOf(page);
-    if (ours && newest.status !== 'inProgress' && status === 'idle') return finished(app, threadId, newest.id, prompt);
-    if (ours && status === 'needsUser') {
-      await confirm(app, threadId, newest.id, prompt);
+    const moved = page.turns[0] !== undefined && ('turnId' in match || page.turns[0].id !== match.after);
+    const turn = moved && status !== 'running' ? await ours() : undefined;
+    if (turn && turn.status !== 'inProgress') return finished(threadId, turn);
+    if (turn && status === 'needsUser') {
       throw new AcbError('NEEDS_USER', 'Codex is waiting for your approval or answer in the desktop app', {
         threadId,
-        turnId: newest.id,
+        turnId: turn.id,
       });
     }
     const left = deadline - Date.now();
@@ -183,36 +209,19 @@ export async function waitForTurn(
       throw new AcbError(
         'TIMEOUT',
         'The reply is still pending: read the conversation later (sending the same prompt again does not resend it)',
-        { threadId, ...(ours ? { turnId: newest.id } : {}) },
+        { threadId },
       );
     }
     await delay(Math.min(left, pollMs, 250 * 2 ** poll));
   }
 }
 
-/** Reads the newest turn in full and checks that it is `turnId`, opened by `prompt`. */
-async function confirm(app: App, threadId: string, turnId: string, prompt: string): Promise<AppTurn> {
-  const newest = (await app.readThread(threadId)).turns[0];
-  if (newest?.id !== turnId) {
-    throw new AcbError('BUSY', 'Another message arrived in the conversation meanwhile; read the conversation', {
-      threadId,
-    });
-  }
-  if (!opensWith(newest, prompt)) {
-    throw new AcbError('BUSY', 'The conversation is answering another message; read the conversation', {
-      threadId,
-      turnId,
-    });
-  }
-  return newest;
-}
-
-async function finished(app: App, threadId: string, turnId: string, prompt: string): Promise<Turn> {
-  const turn = toTurn(await confirm(app, threadId, turnId, prompt));
+function finished(threadId: string, opened: AppTurn): Turn {
+  const turn = toTurn(opened);
   if (turn.status !== 'completed') {
     throw new AcbError('FAILED', `The turn ended as ${turn.status}${turn.error ? `: ${turn.error}` : ''}`, {
       threadId,
-      turnId,
+      turnId: turn.turnId,
     });
   }
   return turn;

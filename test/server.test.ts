@@ -11,7 +11,7 @@ async function connect(app = new FakeApp(), queued: string[] = []) {
       queued.push('page');
       return task();
     },
-    keepingForeground: <T>(task: () => Promise<T>) => task(),
+    holdForeground: async () => async () => {},
     readReply: async () => '',
     startChat: async () => {},
   };

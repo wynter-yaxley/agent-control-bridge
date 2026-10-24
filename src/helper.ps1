@@ -2,7 +2,7 @@
 # One JSON request per stdin line, one JSON response per stdout line:
 #   {"op":"pipe-owner","path":"\\.\pipe\..."} -> {"ok":true,"isApp":bool}
 #   {"op":"foreground"}                        -> {"ok":true,"window":handle}
-#   {"op":"give-back","window":handle}         -> {"ok":true,"restored":bool}
+#   {"op":"give-back","window":handle}         -> {"ok":true,"taken":bool,"restored":bool}
 #   {"op":"transcript","title":"..."}          -> {"ok":true,"found":bool,"busy":bool,"nodes":[{"type","name","label"}]}
 #   {"op":"compose","prompt":"..."}            -> {"ok":true}
 #   failure                                    -> {"ok":false,"code":"WINDOW|BUSY|UNAVAILABLE|INPUT","message":"..."}
@@ -97,7 +97,7 @@ function Foreground { return @{ ok = $true; window = [Acb.Win32]::GetForegroundW
 # holds the foreground lets this helper set it without any synthetic input.
 function GiveBack($request) {
   $target = [IntPtr][long]$request.window
-  if ($target -eq [IntPtr]::Zero -or -not [Acb.Win32]::IsWindow($target)) { return @{ ok = $true; restored = $false } }
+  if ($target -eq [IntPtr]::Zero -or -not [Acb.Win32]::IsWindow($target)) { return @{ ok = $true; taken = $false; restored = $false } }
   $app = @(Get-Process -Name ChatGPT -ErrorAction SilentlyContinue | ForEach-Object Id)
   $taken = Until 300 {
     $current = [Acb.Win32]::GetForegroundWindow()
@@ -105,11 +105,11 @@ function GiveBack($request) {
     $thread = [Acb.Win32]::GetWindowThreadProcessId($current, [ref]$owner)
     if ($current -ne $target -and $app -contains [int]$owner) { $thread }
   }
-  if (-not $taken) { return @{ ok = $true; restored = $false } }
+  if (-not $taken) { return @{ ok = $true; taken = $false; restored = $false } }
   $self = [Acb.Win32]::GetCurrentThreadId()
   [void][Acb.Win32]::AttachThreadInput($self, $taken, $true)
   try { [void][Acb.Win32]::SetForegroundWindow($target) } finally { [void][Acb.Win32]::AttachThreadInput($self, $taken, $false) }
-  return @{ ok = $true; restored = ([Acb.Win32]::GetForegroundWindow() -eq $target) }
+  return @{ ok = $true; taken = $true; restored = ([Acb.Win32]::GetForegroundWindow() -eq $target) }
 }
 
 # The app's top-level windows. A minimized window exposes no UI tree, so it is restored

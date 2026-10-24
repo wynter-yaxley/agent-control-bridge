@@ -17,7 +17,7 @@ const PAGE_REPLY = '::chatgpt-content-reference{index="0" source_message_id="m1"
 const code = (expected: string) => (error: unknown) => error instanceof AcbError && error.code === expected;
 
 interface FakePage extends Page {
-  reads: { title: string; prompt: string }[];
+  reads: { title: string; prompt: string; messages: number }[];
   chats: string[];
 }
 
@@ -32,9 +32,9 @@ function fakePage(app: FakeApp, reply = 'reply from the page'): FakePage {
     reads: [],
     chats: [],
     run: (task) => queue.run(task),
-    keepingForeground: (task) => task(),
-    async readReply(title, prompt) {
-      this.reads.push({ title, prompt });
+    holdForeground: async () => async () => {},
+    async readReply(title, prompt, messages) {
+      this.reads.push({ title, prompt, messages });
       if (!app.shown.length) throw new AcbError('WINDOW', 'nothing shown');
       return reply;
     },
@@ -108,7 +108,7 @@ test('a ChatGPT reply kept on the page is read there after sending', async () =>
   const page = fakePage(app);
   const sent = await sendGpt(app, page, GPT, 'Question', { ...fast, wait: true });
   assert.deepEqual(app.shown, [GPT]);
-  assert.deepEqual(page.reads, [{ title: 'Chat', prompt: 'Question' }]);
+  assert.deepEqual(page.reads, [{ title: 'Chat', prompt: 'Question', messages: 1 }]);
   assert.equal(sent.turn?.reply, 'reply from the page');
   assert.equal(sent.turn?.replyOnPage, false);
 });
@@ -178,8 +178,14 @@ test('a page cannot tell apart conversations with the same title', async () => {
   assert.deepEqual(app.shown, []);
 });
 
-test('a page cannot tell apart the replies to the same prompt sent twice in a row', async () => {
+test('the page must show as many messages as the conversation has turns', async () => {
   const app = new FakeApp();
-  app.add({ id: GPT, kind: 'chatgpt', turns: [userTurn('t2', 'Q', PAGE_REPLY), userTurn('t1', 'Q', PAGE_REPLY)] });
-  await assert.rejects(readGpt(app, fakePage(app), GPT, { fromPage: true }), code('WINDOW'));
+  app.add({
+    id: GPT,
+    kind: 'chatgpt',
+    turns: [userTurn('t3', 'Q', PAGE_REPLY), userTurn('t2', 'R', PAGE_REPLY), userTurn('t1', 'Q', PAGE_REPLY)],
+  });
+  const page = fakePage(app);
+  await readGpt(app, page, GPT, { fromPage: true });
+  assert.equal(page.reads[0].messages, 3, 'a page stuck at the first Q shows only one message');
 });

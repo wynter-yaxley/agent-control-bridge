@@ -3,10 +3,10 @@ import { type Sent, sendPrompt, type WaitOptions, waitForTurn } from './conversa
 import type { App, Inventory, ThreadSummary } from './desktop.ts';
 import { AcbError } from './errors.ts';
 import { READ_TIMEOUT_MS, type WindowsHelper } from './helper.ts';
-import { type Conversation, normalize, opensWith, promptOf, type Turn, toConversation } from './turns.ts';
+import { type Conversation, normalize, opensWith, type Turn, toConversation } from './turns.ts';
 
 /** The page operations of WindowsHelper; tests substitute them. */
-export type Page = Pick<WindowsHelper, 'run' | 'keepingForeground' | 'readReply' | 'startChat'>;
+export type Page = Pick<WindowsHelper, 'run' | 'holdForeground' | 'readReply' | 'startChat'>;
 
 /** A finished turn whose reply could not be read from the page keeps `replyOnPage` and says why. */
 export interface PageRead {
@@ -70,10 +70,13 @@ export async function createGpt(
   const conversationId = await page.run(async () => {
     const known = chatgptThreads(await app.listThreads());
     if (!known.length) throw new AcbError('WINDOW', 'Start one ChatGPT conversation in the desktop app first');
-    await page.keepingForeground(async () => {
+    const giveBack = await page.holdForeground();
+    try {
       await app.show(known[0].id);
       await page.startChat(prompt);
-    });
+    } finally {
+      await giveBack();
+    }
     return recognize(app, new Set(known.map((thread) => thread.id)), prompt);
   });
   const turn = await waitForTurn(app, conversationId, prompt, { after: undefined }, options);
@@ -145,26 +148,33 @@ async function withPageReply(
   }
 }
 
+/** How many turns the conversation has, counted page by page without message text. */
+async function turnCount(app: App, conversationId: string): Promise<number> {
+  let count = 0;
+  let cursor: string | undefined;
+  do {
+    const page = await app.readThread(conversationId, { turns: 10, outputs: false, ...(cursor ? { cursor } : {}) });
+    count += page.turns.length;
+    cursor = page.nextCursor ?? undefined;
+  } while (cursor);
+  return count;
+}
+
 /**
  * Reads the reply of `turn` from the page, within `deadline`. The page shows no conversation
- * ID, so the conversation is recognized by its title and the turn by its prompt: the title
- * must be unique among the app's ChatGPT conversations, the prompt must differ from the one
- * before it, and the turn must be the newest, finished one before and after reading.
+ * ID, so it is recognized by the conversation's title, which must be unique among the
+ * conversations the app lists, and by its messages: as many as the conversation has turns,
+ * the last being the turn's prompt. A page that has not caught up shows fewer. The turn
+ * must also be the newest, finished one before and after reading.
  */
 async function pageReply(app: App, page: Page, conversationId: string, turn: Turn, deadline: number): Promise<string> {
   if (!turn.prompt || turn.truncated) {
     throw new AcbError('WINDOW', 'This prompt is too long to be matched on the page', { conversationId });
   }
   const prompt = turn.prompt;
-  const read = await app.readThread(conversationId, { turns: 2 });
-  const previous = read.turns[1] && promptOf(read.turns[1]);
-  if (previous?.text === prompt) {
-    throw new AcbError('WINDOW', 'The same prompt was sent twice in a row; the page cannot tell its replies apart', {
-      conversationId,
-    });
-  }
+  const { title } = await app.readThread(conversationId, { outputs: false });
   const namesakes = chatgptThreads(await app.listThreads()).filter(
-    (thread) => thread.title === read.title && thread.id !== conversationId,
+    (thread) => thread.title === title && thread.id !== conversationId,
   );
   if (namesakes.length) {
     throw new AcbError(
@@ -175,22 +185,28 @@ async function pageReply(app: App, page: Page, conversationId: string, turn: Tur
       },
     );
   }
+  const messages = await turnCount(app, conversationId);
   const newest = async () => {
     const current = (await app.readThread(conversationId, { outputs: false })).turns[0];
     if (current?.id !== turn.turnId || current.status !== 'completed') {
       throw new AcbError('BUSY', 'The conversation has moved on; read it again', { conversationId });
     }
   };
-  return page.run(() =>
-    page.keepingForeground(async () => {
+  return page.run(async () => {
+    const giveBack = await page.holdForeground();
+    try {
+      await app.show(conversationId);
+      await giveBack();
+      await newest();
       const left = Math.min(READ_TIMEOUT_MS, deadline - Date.now());
       if (left < 1000)
         throw new AcbError('TIMEOUT', 'No time was left to read the reply from the page', { conversationId });
-      await app.show(conversationId);
-      await newest();
-      const reply = await page.readReply(read.title, prompt, left);
+      const reply = await page.readReply(title, prompt, messages, left);
       await newest();
       return reply;
-    }),
-  );
+    } finally {
+      // The app can take the foreground late; check once more.
+      await giveBack();
+    }
+  });
 }

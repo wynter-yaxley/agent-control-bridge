@@ -25,6 +25,7 @@ const page: PageNode[] = [
 
 test('the last exchange is the newest prompt and every paragraph of its reply', () => {
   assert.deepEqual(lastExchange(page), {
+    messages: 2,
     prompt: 'second\nquestion',
     reply: 'Paragraph one.\nParagraph two.',
     complete: true,
@@ -49,6 +50,7 @@ test('label text inside a message is content, not a new message', () => {
     button('更多操作'),
   ];
   assert.deepEqual(lastExchange(quoted), {
+    messages: 1,
     prompt: 'What does 你说：mean?',
     reply: 'It means "you said".',
     complete: true,
@@ -66,5 +68,5 @@ test('message text that equals a role heading is still message text', () => {
     text('end'),
     button('更多操作'),
   ];
-  assert.deepEqual(lastExchange(page), { prompt: 'Q', reply: 'Start\n你说：\nQ\nend', complete: true });
+  assert.deepEqual(lastExchange(page), { messages: 1, prompt: 'Q', reply: 'Start\n你说：\nQ\nend', complete: true });
 });

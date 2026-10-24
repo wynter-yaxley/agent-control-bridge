@@ -15,6 +15,8 @@ export interface PageNode {
 }
 
 export interface Exchange {
+  /** User messages on the page. */
+  messages: number;
   prompt: string;
   reply: string;
   /** The reply's action buttons are shown, so it is finished. */
@@ -33,14 +35,15 @@ export function lastExchange(nodes: PageNode[]): Exchange | null {
     node.type === 'Text' && node.label === true && names.includes(node.name);
   const you = nodes.findLastIndex((node) => text(node, LABELS.you));
   if (you < 0) return null;
+  const messages = nodes.filter((node) => text(node, LABELS.you)).length;
   const assistant = nodes.findIndex((node, index) => index > you && text(node, LABELS.assistant));
   const end = assistant < 0 ? nodes.length : assistant;
   const prompt = nodes.slice(you + 1, end).filter((node) => node.type === 'Text' && !node.label);
-  if (assistant < 0) return { prompt: textOf(prompt), reply: '', complete: false };
+  if (assistant < 0) return { messages, prompt: textOf(prompt), reply: '', complete: false };
   const rest = nodes.slice(assistant + 1);
   const finished = rest.findIndex((node) => node.type === 'Button' && node.name === LABELS.finished);
   const reply = (finished < 0 ? rest : rest.slice(0, finished)).filter((node) => node.type === 'Text' && !node.label);
-  return { prompt: textOf(prompt), reply: textOf(reply), complete: finished >= 0 };
+  return { messages, prompt: textOf(prompt), reply: textOf(reply), complete: finished >= 0 };
 }
 
 function textOf(nodes: PageNode[]): string {
@@ -85,16 +88,15 @@ export class WindowsHelper {
   }
 
   /**
-   * Runs `task`, which may make the app take the foreground (switching its page, opening a
-   * new chat), then gives the foreground back to the window that had it if the app took it.
+   * Notes which window has the foreground and returns a function that gives it back if the
+   * app has taken it since; switching pages or opening a new chat can make the app take it.
    */
-  async keepingForeground<T>(task: () => Promise<T>): Promise<T> {
+  async holdForeground(): Promise<() => Promise<void>> {
     const { window } = await this.#request({ op: 'foreground' });
-    try {
-      return await task();
-    } finally {
-      await this.#request({ op: 'give-back', window }).catch(() => undefined);
-    }
+    return async () => {
+      const { taken, restored } = await this.#request({ op: 'give-back', window });
+      if (taken && !restored) process.stderr.write('agent-control-bridge: could not give the foreground back\n');
+    };
   }
 
   /** Whether the server of the tool pipe at `path` is the signed app of this user session. */
@@ -104,15 +106,17 @@ export class WindowsHelper {
 
   /**
    * The reply to `prompt` from the page showing `title`, once ChatGPT has finished it. The
-   * page's newest message must be exactly `prompt`, so the reply belongs to it.
+   * page must show `messages` user messages, the last being exactly `prompt`: a page that has
+   * not caught up with the conversation shows fewer.
    */
-  async readReply(title: string, prompt: string, timeoutMs = READ_TIMEOUT_MS): Promise<string> {
+  async readReply(title: string, prompt: string, messages: number, timeoutMs = READ_TIMEOUT_MS): Promise<string> {
     const deadline = Date.now() + timeoutMs;
     const expected = squash(prompt);
     for (;;) {
       const page = await this.#request({ op: 'transcript', title });
       const exchange = page.found && !page.busy ? lastExchange(page.nodes as PageNode[]) : null;
-      if (exchange?.complete && exchange.reply && squash(exchange.prompt) === expected) return exchange.reply;
+      const current = exchange?.complete && exchange.messages === messages && squash(exchange.prompt) === expected;
+      if (current && exchange.reply) return exchange.reply;
       if (Date.now() >= deadline) {
         throw new AcbError(
           'WINDOW',

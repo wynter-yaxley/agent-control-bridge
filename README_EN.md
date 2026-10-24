@@ -113,7 +113,7 @@ A send waits up to 240 seconds by default. Set the client's tool timeout to 300 
 
 - ChatGPT shows your messages as ordinary user messages.
 - The app's record of a conversation usually keeps only a placeholder for each reply; the text is read from the page. Reading the page needs the ChatGPT window **visible on screen**: behind other windows or partly covered is fine, fully covered (say, by a full-screen video) is not. If the page cannot be read, the send still succeeds; the result marks `replyOnPage` with the reason, and `acb_gpt_read` with `page: true` reads it later.
-- The page shows no conversation ID, so ACB recognizes the turn to read by the conversation's title and the prompt. Two cases therefore cannot be read from the page (`WINDOW`): another ChatGPT conversation has the same title (rename one), or the same prompt was sent twice in a row in this conversation.
+- The page shows no conversation ID, so ACB confirms it shows the turn to read by the conversation's title, its number of messages and the last prompt. If another ChatGPT conversation the app lists has the same title, the reply cannot be read from the page (`WINDOW`); rename one of them.
 - After the ChatGPT window has been fully covered or minimized for a long time, the app slows down its background page, and a message can take about a minute to go out.
 - If the new-chat page holds a draft you have not sent, starting a ChatGPT conversation is refused rather than overwriting it.
 

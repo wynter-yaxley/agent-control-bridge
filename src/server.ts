@@ -77,7 +77,14 @@ export function createServer({ app, page, version, timeoutMs }: Services): McpSe
     },
     (args) =>
       answer(async () => {
-        await page.run(() => page.keepingForeground(() => app.show(args.id)));
+        await page.run(async () => {
+          const giveBack = await page.holdForeground();
+          try {
+            await app.show(args.id);
+          } finally {
+            await giveBack();
+          }
+        });
         return { shown: args.id };
       }),
   );
