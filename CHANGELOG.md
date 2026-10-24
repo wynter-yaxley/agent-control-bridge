@@ -2,7 +2,13 @@
 
 Versions follow Semantic Versioning. Desktop behavior is verified manually on Windows (`npm run smoke`); unit tests use mocks.
 
-## 0.6.0 (Unreleased)
+## 0.6.1 (Unreleased)
+
+- **Faster ChatGPT replies**: the app records a ChatGPT turn up to a minute after it ends (it caches conversations for a minute, and none of its tools refreshes them). `acb_gpt_send` now shows the conversation before sending and returns as soon as the page's last two prompts are the previous one and the new one and the reply is finished: about 10-20 seconds instead of 60-90. Such a turn has `turnId: null`; until the app records it, `acb_gpt_read` in the same process returns it as the newest turn. Without a usable page, the app's list is still awaited.
+- Page text follows the page's structure: a reply being written is one UI Automation element per word, which used to come out one word per line. The page is now fetched as one cached batch of its raw tree, and its text is joined within paragraphs, list items and code lines, with line breaks between them and list markers kept (a read takes 150-400 ms).
+- Fixes: a reply in a conversation with more than five turns could not be read from the page (the app returns only the newest turns, so the count of page messages never matched); a prompt with `inline code` never matched the page, which shows it without backticks. The page is now matched by the last two prompts, ignoring whitespace and backticks. When the page is a turn ahead of the app, `WINDOW` says to read again shortly.
+
+## 0.6.0
 
 Rebuilt on the tools the desktop app serves to its own agents. Every message now runs inside the app, so conversations and their progress appear live in its sidebar.
 

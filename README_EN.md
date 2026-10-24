@@ -45,7 +45,7 @@ flowchart LR
 | Operation | Takes the foreground and keyboard focus | Switches the page the app shows |
 |---|---|---|
 | All Codex tools; listing and reading; `acb_projects`, `acb_status` | No | No |
-| `acb_gpt_send` | No: the message is sent in the background | Yes: once answered, the conversation is shown to read the reply text |
+| `acb_gpt_send` | No: the message is sent in the background | Yes: before sending, the conversation is shown to read the reply text |
 | `acb_gpt_read` with `page: true` | No | Yes: the conversation is shown to read the reply text |
 | `acb_open` | No | Yes |
 | **`acb_gpt_create`** | **Yes, for a second or two**: the app activates the ChatGPT window when it opens a new chat; ACB gives the foreground back to your window as soon as the message is sent. ACB sends no keystrokes, but keys you press during those seconds can land in ChatGPT's composer | Yes |
@@ -113,7 +113,8 @@ A send waits up to 240 seconds by default. Set the client's tool timeout to 300 
 
 - ChatGPT shows your messages as ordinary user messages.
 - The app's record of a conversation usually keeps only a placeholder for each reply; the text is read from the page. Reading the page needs the ChatGPT window **visible on screen**: behind other windows or partly covered is fine, fully covered (say, by a full-screen video) is not. If the page cannot be read, the send still succeeds; the result marks `replyOnPage` with the reason, and `acb_gpt_read` with `page: true` reads it later.
-- The page shows no conversation ID, so ACB confirms it shows the turn to read by the conversation's title, its number of messages and the last prompt. If another ChatGPT conversation the app lists has the same title, the reply cannot be read from the page (`WINDOW`); rename one of them.
+- The page shows no conversation ID, so ACB confirms it shows the turn to read by the conversation's title and its last two prompts. If another ChatGPT conversation the app lists has the same title, the reply cannot be read from the page (`WINDOW`); rename one of them.
+- **Speed**: the app records a ChatGPT turn up to a minute after the reply ends. With the window visible, `acb_gpt_send` returns as soon as the page shows the finished reply (usually within 10-20 seconds), with `turnId: null` for now; until the app records the turn, `acb_gpt_read` in the same ACB process returns it as the newest turn. Without a visible window, ACB waits for the app to record it, about a minute. `acb_gpt_create` always waits for the app to list the new conversation, about a minute.
 - After the ChatGPT window has been fully covered or minimized for a long time, the app slows down its background page, and a message can take about a minute to go out.
 - If the new-chat page holds a draft you have not sent, starting a ChatGPT conversation is refused rather than overwriting it.
 

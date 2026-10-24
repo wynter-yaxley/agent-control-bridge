@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { lastExchange, type PageNode } from '../src/helper.ts';
+import { lastExchange, type PageNode, readyReply } from '../src/helper.ts';
 
 const text = (name: string): PageNode => ({ type: 'Text', name });
 const label = (name: string): PageNode => ({ type: 'Text', name, label: true });
@@ -25,7 +25,7 @@ const page: PageNode[] = [
 
 test('the last exchange is the newest prompt and every paragraph of its reply', () => {
   assert.deepEqual(lastExchange(page), {
-    messages: 2,
+    previous: 'first question',
     prompt: 'second\nquestion',
     reply: 'Paragraph one.\nParagraph two.',
     complete: true,
@@ -50,7 +50,7 @@ test('label text inside a message is content, not a new message', () => {
     button('更多操作'),
   ];
   assert.deepEqual(lastExchange(quoted), {
-    messages: 1,
+    previous: null,
     prompt: 'What does 你说：mean?',
     reply: 'It means "you said".',
     complete: true,
@@ -68,5 +68,15 @@ test('message text that equals a role heading is still message text', () => {
     text('end'),
     button('更多操作'),
   ];
-  assert.deepEqual(lastExchange(page), { messages: 1, prompt: 'Q', reply: 'Start\n你说：\nQ\nend', complete: true });
+  assert.deepEqual(lastExchange(page), { previous: null, prompt: 'Q', reply: 'Start\n你说：\nQ\nend', complete: true });
+});
+
+test('a prompt matches the page however the page lays out its whitespace and inline code', () => {
+  const state = {
+    busy: false,
+    exchange: { previous: 'Earlier', prompt: 'Use\nls -a, then stop.', reply: 'Done.', complete: true },
+  };
+  assert.equal(readyReply(state, 'Use `ls -a`, then stop.', 'Earlier'), 'Done.');
+  assert.equal(readyReply(state, 'Use `ls -l`, then stop.', 'Earlier'), null);
+  assert.equal(readyReply(state, 'Use `ls -a`, then stop.', null), null);
 });

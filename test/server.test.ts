@@ -12,6 +12,7 @@ async function connect(app = new FakeApp(), queued: string[] = []) {
       return task();
     },
     holdForeground: async () => async () => {},
+    pageState: async () => null,
     readReply: async () => '',
     startChat: async () => {},
   };

@@ -8,6 +8,11 @@ export interface WaitOptions {
   deadline: number;
   /** Longest pause between two status reads. */
   pollMs?: number;
+  /**
+   * Another way to learn that the turn of a message just sent has ended, tried first on every
+   * poll: the ChatGPT page shows a reply long before the app lists it.
+   */
+  early?: () => Promise<Turn | undefined>;
 }
 
 export interface Sent {
@@ -30,6 +35,8 @@ interface Accepted {
   prompt: string;
   after: string | undefined;
   sentAt: string;
+  /** Its turn as confirmed on the page: it no longer holds back another message. */
+  answer?: Turn;
 }
 
 /** Per app: sends to one conversation run one at a time, and messages sent but not yet listed. */
@@ -80,12 +87,14 @@ export async function sendPrompt(
       );
     }
     const earlier = await sentBefore(app, threadId);
+    // A message answered on the page but not listed yet: the listed newest turn is older.
+    const stale = earlier?.entry.answer !== undefined && !earlier.turn;
     if (earlier) {
       const { entry, turn } = earlier;
       if (entry.prompt === text) {
         return { title: before.title, alreadySent: true, match: turn ? { turnId: turn.id } : { after: entry.after } };
       }
-      if (!turn) {
+      if (!turn && !entry.answer) {
         throw new AcbError(
           'BUSY',
           `A message ACB sent at ${entry.sentAt} has not appeared in the conversation yet; wait for it before sending another`,
@@ -93,10 +102,12 @@ export async function sendPrompt(
         );
       }
       // That message has just been listed: decide on the conversation as it is now.
-      before = await app.readThread(threadId);
+      if (turn) before = await app.readThread(threadId);
     }
     const last = before.turns[0];
-    if (last && opensWith(last, text)) return { title: before.title, alreadySent: true, match: { turnId: last.id } };
+    if (!stale && last && opensWith(last, text)) {
+      return { title: before.title, alreadySent: true, match: { turnId: last.id } };
+    }
     if (statusOf(before) !== 'idle') {
       throw new AcbError('BUSY', 'The conversation is still answering; read it, then send when it is idle', {
         threadId,
@@ -105,8 +116,20 @@ export async function sendPrompt(
     await deliver(app, kind, threadId, text, options.caller, last?.id);
     return { title: before.title, alreadySent: false, match: { after: last?.id } };
   });
-  const turn = options.wait ? await waitForTurn(app, threadId, text, match, options) : null;
+  const early = alreadySent ? undefined : options.early;
+  const turn = options.wait ? await waitForTurn(app, threadId, text, match, { ...options, early }) : null;
+  const entry = stateOf(app).accepted.get(threadId);
+  if (turn && turn.turnId === null && entry?.prompt === text) entry.answer = turn;
   return { threadId, title, alreadySent, turn };
+}
+
+/**
+ * The turn of a message ACB sent whose reply was confirmed on the page, while the app still
+ * lists turn `newest` (the one before it) as the conversation's newest.
+ */
+export function unlistedAnswer(app: App, threadId: string, newest: string | undefined): Turn | undefined {
+  const entry = state.get(app)?.accepted.get(threadId);
+  return entry?.answer && entry.after === newest ? entry.answer : undefined;
 }
 
 interface Decision {
@@ -197,13 +220,15 @@ export async function waitForTurn(
   threadId: string,
   prompt: string,
   match: Match,
-  { deadline, pollMs = 1500 }: WaitOptions,
+  { deadline, pollMs = 1500, early }: WaitOptions,
 ): Promise<Turn> {
   const ours =
     'turnId' in match
       ? () => findTurn(app, threadId, undefined, (turn) => turn.id === match.turnId)
       : () => findTurn(app, threadId, match.after, (turn) => opensWith(turn, prompt));
   for (let poll = 0; ; poll++) {
+    const confirmed = await early?.();
+    if (confirmed) return confirmed;
     const page = await app.readThread(threadId, { outputs: false });
     const status = statusOf(page);
     const moved = page.turns[0] !== undefined && ('turnId' in match || page.turns[0].id !== match.after);
