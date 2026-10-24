@@ -16,17 +16,12 @@ function ExactBytes($stream,[int]$length) {
  while($offset -lt $length){$task=$stream.ReadAsync($buffer,$offset,$length-$offset);if(-not $task.Wait((Budget))){throw 'TIMEOUT'};if($task.Result -le 0){throw 'IO'};$offset+=$task.Result}
  return ,$buffer
 }
-Import-Module ([System.IO.Path]::Combine($PSHOME,'Modules','Microsoft.PowerShell.Utility','Microsoft.PowerShell.Utility.psd1'))
-$owners=@{}
-$hostIdentity=$null
-while ($null -ne ($inputText=[Console]::In.ReadLine())) {
- $pipe=$null;$script:stage='input'
- try {
+# Parses and checks one input line against the request allowlist; throws IO otherwise.
+function ReadRequest([string]$inputText) {
  if($inputText.Length -gt 300000){throw 'IO'}
  $inputData=$inputText | ConvertFrom-Json
  Fields $inputData @('requestJson','timeoutMs','maxFrameBytes','maxCandidates','expectedProcessId','expectedProcessStartedAt')
  foreach($spec in @(@('timeoutMs',1,60000),@('maxFrameBytes',4096,4194304),@('maxCandidates',1,128))){$value=$inputData.($spec[0]);if($value -isnot [int] -or $value -lt $spec[1] -or $value -gt $spec[2]){throw 'IO'}}
- $script:deadline=[DateTime]::UtcNow.AddMilliseconds($inputData.timeoutMs)
  if($inputData.requestJson -isnot [string] -or ($null -ne $inputData.expectedProcessId -and ($inputData.expectedProcessId -isnot [int] -or $inputData.expectedProcessId -lt 1))){throw 'IO'}
  if(($null -eq $inputData.expectedProcessId) -ne ($null -eq $inputData.expectedProcessStartedAt)){throw 'IO'}
  if($null -ne $inputData.expectedProcessStartedAt -and ($inputData.expectedProcessStartedAt -isnot [string] -or $inputData.expectedProcessStartedAt -notmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{7}Z$')){throw 'IO'}
@@ -46,14 +41,33 @@ while ($null -ne ($inputText=[Console]::In.ReadLine())) {
   $text={param($value,[int]$max) $value -is [string] -and $value.Trim().Length -gt 0 -and $value.Length -le $max -and $value -notmatch '[\x00-\x08\x0b\x0c\x0e-\x1f]'}
   if($params.tool -eq 'list_threads'){Fields $a @('limit');if($a.limit -isnot [int] -or $a.limit -lt 1 -or $a.limit -gt 50){throw 'IO'}}
   elseif($params.tool -eq 'read_thread'){
-   Fields $a @('threadId','turnLimit','includeOutputs','maxOutputCharsPerItem')
-   if($a.threadId -isnot [string] -or $a.threadId -notmatch $uuid -or $a.turnLimit -isnot [int] -or $a.turnLimit -ne 1 -or $a.includeOutputs -isnot [bool] -or $a.maxOutputCharsPerItem -isnot [int] -or -not (($a.includeOutputs -ceq $false -and $a.maxOutputCharsPerItem -eq 0) -or ($a.includeOutputs -ceq $true -and $a.maxOutputCharsPerItem -eq 20000))){throw 'IO'}
+   Fields $a @('threadId','turnLimit','cursor','includeOutputs','maxOutputCharsPerItem')
+   if($a.threadId -isnot [string] -or $a.threadId -notmatch $uuid -or $a.turnLimit -isnot [int] -or $a.turnLimit -lt 1 -or $a.turnLimit -gt 10 -or $a.includeOutputs -isnot [bool] -or $a.maxOutputCharsPerItem -isnot [int] -or -not (($a.includeOutputs -ceq $false -and $a.maxOutputCharsPerItem -eq 0) -or ($a.includeOutputs -ceq $true -and $a.maxOutputCharsPerItem -eq 20000))){throw 'IO'}
+   # A page cursor is opaque host text: bounded and free of control characters.
+   if($null -ne $a.PSObject.Properties['cursor'] -and -not (& $text $a.cursor 2000)){throw 'IO'}
   }elseif($params.tool -eq 'list_projects'){Fields $a @()}
   elseif($params.tool -ceq 'set_thread_title'){
    Fields $a @('source','threadId','title')
    if($a.source -cnotin @('codex','chatgpt') -or $a.threadId -notmatch $uuid -or -not (& $text $a.title 200) -or $a.title -match '\n'){throw 'IO'}
   }else{throw 'IO'}
  }else{throw 'IO'}
+ return $inputData,$request
+}
+# App tools moved to their own pipe in v26.1021; the browser-use pipe of that and later
+# hosts answers only ping and browser automation. Older hosts serve the tools there.
+function SelectPipes([string[]]$pipes) {
+ $names=@($pipes | Where-Object{$_ -match '^codex-app-tools-[a-f0-9-]+$'})
+ if($names.Count -eq 0){$names=@($pipes | Where-Object{$_ -match '^codex-browser-use-[a-f0-9-]+$'})}
+ return $names
+}
+Import-Module ([System.IO.Path]::Combine($PSHOME,'Modules','Microsoft.PowerShell.Utility','Microsoft.PowerShell.Utility.psd1'))
+$owners=@{}
+$hostIdentity=$null
+while ($null -ne ($inputText=[Console]::In.ReadLine())) {
+ $pipe=$null;$script:stage='input'
+ try {
+ $inputData,$request=ReadRequest $inputText
+ $script:deadline=[DateTime]::UtcNow.AddMilliseconds($inputData.timeoutMs)
  $script:stage='load-native'
  if(-not ('AcbNativeReadonly' -as [type])) {
  Add-Type -TypeDefinition @'
@@ -74,7 +88,7 @@ public static class AcbNativeReadonly {
  # connected handle's PID and process start time are still checked below.
  if($null -ne $hostIdentity){$selected=$hostIdentity}else{
  $script:stage='pipe-discovery'
- $names=@([System.IO.Directory]::GetFiles('\\.\pipe\') | ForEach-Object{[System.IO.Path]::GetFileName($_)} | Where-Object{$_ -match '^codex-browser-use-[a-f0-9-]+$'})
+ $names=@(SelectPipes @([System.IO.Directory]::GetFiles('\\.\pipe\') | ForEach-Object{[System.IO.Path]::GetFileName($_)}))
  if($names.Count -eq 0){throw 'OWNER'}
  if($names.Count -gt $inputData.maxCandidates){$script:stage='pipe-discovery-budget';throw 'IO'}
  $script:stage='host-verification'
@@ -124,7 +138,8 @@ public static class AcbNativeReadonly {
  $response=$utf8.GetString((ExactBytes $pipe ([int]$size))) | ConvertFrom-Json
  $script:stage='response-shape'
  if($response.jsonrpc -ne '2.0' -or $response.id -ne $request.id){throw 'IO'}
- $envelope=@{ok=$true;peer=@{sameUserSignedHost=$true;processId=$connectedId;processStartedAt=$selected.startedAt;appVersion=$selected.version;foregroundUnchanged=([AcbNativeReadonly]::GetForegroundWindow() -eq $foreground)};response=$response}
+ $family=if($selected.name -like 'codex-app-tools-*'){'app-tools'}else{'browser-use'}
+ $envelope=@{ok=$true;peer=@{sameUserSignedHost=$true;processId=$connectedId;processStartedAt=$selected.startedAt;appVersion=$selected.version;pipe=$family;foregroundUnchanged=([AcbNativeReadonly]::GetForegroundWindow() -eq $foreground)};response=$response}
  $script:stage='output'
  [Console]::Out.WriteLine(($envelope | ConvertTo-Json -Depth 40 -Compress))
 }catch{if($_.Exception.Message -eq 'TIMEOUT'){Fail 'TIMEOUT'}elseif($_.Exception.Message -eq 'OWNER'){Fail 'OWNER'}else{Fail 'IO'}}finally{if($null -ne $pipe){$pipe.Dispose()}}

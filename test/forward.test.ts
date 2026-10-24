@@ -4,8 +4,8 @@ import { EventEmitter } from 'node:events';
 import { PassThrough, Writable } from 'node:stream';
 import type { spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
-import { createGpt, sendGpt } from '../src/gpt.ts';
-import { createCodex, sendCodex } from '../src/codex.ts';
+import { createGpt, readGptWithWindow, sendGpt } from '../src/gpt.ts';
+import { createCodex, listCodex, readCodex, sendCodex } from '../src/codex.ts';
 import { createWorkspace } from '../src/workspace.ts';
 import { BridgeError } from '../src/errors.ts';
 import type { NativeChatPage, NativeThread } from '../src/native.ts';
@@ -35,6 +35,31 @@ test('gpt: opens the uniquely titled target, sends once and returns the UI reply
   const result = await sendGpt(deps, 'gpt-id', prompt);
   assert.deepEqual(calls, ['chat-open-title', 'chat-send', 'chat-read-reply']);
   assert.deepEqual({ ...result }, { conversationId: 'gpt-id', title: '测试消息', turnId: 'new', reply: 'OK', alreadySent: false, inputMode: 'typed', uiIdentity: 'titleOnly', navigation: 'sidebar' });
+});
+
+test('gpt read: a reply kept only as a reference is read from the shown chat, without typing or sending', async () => {
+  const reference = { type: 'agentMessage' as const, id: 'a-new', text: '::chatgpt-content-reference{index="0" source_message_id="a-new"}' };
+  const turn = { id: 'new', status: 'completed', error: null, items: [{ type: 'userMessage' as const, id: 'u-new', content: [{ type: 'text', text: prompt }] }, reference] };
+  const { deps, calls } = gpt([page('idle', [turn])]);
+  const read = await readGptWithWindow(deps, 'gpt-id');
+  assert.deepEqual(calls, ['chat-open-title', 'chat-read-reply']);
+  assert.deepEqual(read.turns, [{ turnId: 'new', status: 'completed', prompt, reply: 'OK', truncated: false, error: null, replyInWindowOnly: false }]);
+  assert.equal(read.uiIdentity, 'titleOnly'); assert.equal(read.navigation, 'sidebar');
+  // A reply already in the transcript needs no window; a running turn is not read.
+  const plain = gpt([page('idle', [answered('new')])]);
+  assert.equal((await readGptWithWindow(plain.deps, 'gpt-id')).turns[0].reply, '[native]'); assert.deepEqual(plain.calls, []);
+  const running = gpt([page('idle', [turn]), page('active', [{ ...turn, status: 'inProgress' }])]);
+  await assert.rejects(readGptWithWindow(running.deps, 'gpt-id'), { code: 'CONFLICT' }); assert.deepEqual(running.calls, []);
+  // The page is searched with the complete prompt, never the 20,000-character transcript text;
+  // a prompt the host shortened cannot locate its reply and nothing is read.
+  const long = 'x'.repeat(20005), seen: string[] = [];
+  const full = gpt([page('idle', [{ ...turn, items: [{ type: 'userMessage', id: 'u', content: [{ type: 'text', text: long }] }, reference] }])]);
+  const call = full.deps.ui.call;
+  full.deps.ui.call = (async (operation: string, fields: { name: string; prompt?: string }) => { if (operation === 'chat-read-reply') seen.push(fields.prompt!); return call(operation, fields); }) as typeof call;
+  const fullRead = await readGptWithWindow(full.deps, 'gpt-id');
+  assert.equal(fullRead.turns[0].truncated, true); assert.equal(seen[0], long);
+  const cut = gpt([page('idle', [{ ...turn, items: [{ type: 'userMessage', id: 'u', content: [{ type: 'text', text: 'x'.repeat(100), truncated: true }] }, reference] }])]);
+  await assert.rejects(readGptWithWindow(cut.deps, 'gpt-id'), { code: 'PROVENANCE' }); assert.deepEqual(cut.calls, []);
 });
 
 test('gpt: no resend; busy, non-GPT, same-title or unprovable targets are refused before any send', async () => {
@@ -199,7 +224,7 @@ test('gpt: a stale sidebar inventory after rename must converge before create su
 });
 
 /** A scripted codex app-server answering JSON-RPC lines. */
-function appServer(threads: Record<string, { turns: Record<string, unknown>[]; archived?: boolean }>, storeErrors = 0, deferred = false) {
+function appServer(threads: Record<string, { turns: Record<string, unknown>[]; archived?: boolean }>, storeErrors = 0, deferred = false, listShape: 'data' | 'changed' = 'data') {
   const seen: Record<string, any>[] = [];
   let failing = 0;
   const spawnFn = (() => {
@@ -212,7 +237,9 @@ function appServer(threads: Record<string, { turns: Record<string, unknown>[]; a
         if (message.id === undefined || !message.method) continue;
         if (message.method === 'thread/start') { threads['new-thread'] = { turns: [] }; reply({ id: message.id, result: { thread: { id: 'new-thread' } } }); }
         else if (message.method === 'thread/read' && failing > 0) { failing--; reply({ id: message.id, error: { code: -32603, message: 'thread store internal error' } }); }
-        else if (message.method === 'thread/read') reply({ id: message.id, result: { thread: { id: params.threadId, status: { type: 'idle' }, turns: threads[params.threadId].turns } } });
+        else if (message.method === 'thread/read') reply({ id: message.id, result: { thread: { id: params.threadId, name: `name of ${params.threadId}`, cwd: 'D:\\ws', updatedAt: 1792800000, status: { type: 'idle' }, turns: threads[params.threadId].turns } } });
+        else if (message.method === 'thread/list' && listShape === 'changed') reply({ id: message.id, result: { threads: [] } });
+        else if (message.method === 'thread/list') reply({ id: message.id, result: { data: Object.keys(threads).map(id => ({ id, name: null, preview: 'p'.repeat(300), cwd: 'D:\\ws', updatedAt: 1792800000, status: { type: 'notLoaded' }, turns: [] })), nextCursor: 'next' } });
         else if (message.method === 'thread/unarchive') { threads[params.threadId].archived = false; reply({ id: message.id, result: {} }); }
         else if (message.method === 'turn/start') {
           const thread = threads[params.threadId];
@@ -272,6 +299,23 @@ test('codex: a new conversation starts in the workspace, is persisted by its fir
   assert.equal((await createCodex(options(transient.spawnFn), 'D:\\ws', 'ACB Codex', 'hi')).reply, 'OK');
   assert.equal(transient.seen.filter(message => message.method === 'turn/start').length, 1);
   await assert.rejects(createCodex(options(appServer({}, 4).spawnFn), 'D:\\ws', 'ACB Codex', 'hi'), (error: any) => error.code === 'EXECUTION');
+});
+
+test('codex read: lists and reads conversations through the App Server without sending, resuming or starting anything', async () => {
+  const turn = (n: number, extra: Record<string, unknown>[] = []) => ({ id: `turn-${n}`, status: 'completed', items: [{ type: 'userMessage', content: [{ type: 'text', text: `ask ${n}` }] }, ...extra, { type: 'agentMessage', id: `m${n}`, text: `reply ${n}` }] });
+  const server = appServer({ 'codex-id': { turns: [turn(1), turn(2, [{ type: 'agentMessage', phase: 'commentary', text: 'thinking' }, { type: 'commandExecution', command: 'ls' }]), turn(3)] } });
+  const listed = await listCodex(options(server.spawnFn), { limit: 5, cwd: 'D:\\ws' });
+  assert.deepEqual(listed, { threads: [{ threadId: 'codex-id', name: null, preview: 'p'.repeat(200), cwd: 'D:\\ws', status: 'notLoaded', updatedAt: '2026-10-24T00:00:00.000Z' }], nextCursor: 'next' });
+  assert.deepEqual(server.seen.find(message => message.method === 'thread/list')!.params, { limit: 5, sortKey: 'updated_at', cwd: 'D:\\ws' });
+  const read = await readCodex(options(server.spawnFn), 'codex-id', 2);
+  assert.equal(read.name, 'name of codex-id'); assert.equal(read.turnCount, 3);
+  assert.deepEqual(read.turns, [{ turnId: 'turn-2', status: 'completed', prompt: 'ask 2', reply: 'reply 2', truncated: false, error: null }, { turnId: 'turn-3', status: 'completed', prompt: 'ask 3', reply: 'reply 3', truncated: false, error: null }]);
+  assert.deepEqual(server.seen.filter(message => message.method).map(message => message.method).filter(method => !['initialize', 'initialized'].includes(method)), ['thread/list', 'thread/read']);
+  await assert.rejects(readCodex(options(server.spawnFn), 'bad id'), { code: 'INPUT' });
+  await assert.rejects(readCodex(options(server.spawnFn), 'codex-id', 21), { code: 'INPUT' });
+  await assert.rejects(listCodex(options(server.spawnFn), { limit: 0 }), { code: 'INPUT' });
+  // A changed response shape is an error, not an empty list.
+  await assert.rejects(listCodex(options(appServer({}, 0, false, 'changed').spawnFn)), { code: 'IO' });
 });
 
 test('workspace: creates the directory and registers it with a key stable per directory', async t => {

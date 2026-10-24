@@ -335,3 +335,38 @@ Add-Member -InputObject $edit -MemberType ScriptMethod -Name TryGetCurrentPatter
 @{outcome=${attempt("Invoke $edit;'ok'")};loss=$script:diagnostics} | ConvertTo-Json -Compress`);
   assert.deepEqual(result, { outcome: 'ERR:FOCUS_REQUIRED', loss: { focusReason: 'foregroundChanged', targetHandle: 1, foregroundHandle: 2, typedLength: 10 } });
 });
+
+test('minimized window: with authorization the app\'s only, unreadable window is restored once, then identified before any use', { skip: !available }, () => {
+  const result = pwsh(`Add-Type -TypeDefinition @'
+using System;
+public static class AcbInput {
+ public static bool Iconic, Accept; public static int Restores, Command;
+ public static bool IsIconic(IntPtr w){return Iconic;}
+ public static bool ShowWindowAsync(IntPtr w,int c){Restores++;Command=c;if(Accept)Iconic=false;return Accept;}
+}
+'@
+${fn('Within')}${fn('RevealMinimized')}
+$request=[pscustomobject]@{timeoutMs=100;pollMs=1;foregroundInput=$true}
+function W {[pscustomobject]@{Current=@{NativeWindowHandle=7}}}
+# A minimized window has no readable tree; once shown it reads as $script:mode.
+function WindowKind($w) {if ([AcbInput]::Iconic) {$null} else {$script:mode}}
+function Run($windows,[bool]$iconic=$true,[bool]$authorized=$true,[bool]$accept=$true,$mode='ChatGPT') {
+ [AcbInput]::Iconic=$iconic;[AcbInput]::Accept=$accept;[AcbInput]::Restores=0;$script:mode=$mode;$request.foregroundInput=$authorized;$script:all=$windows;$all=$windows
+ RevealMinimized
+ @{restores=[AcbInput]::Restores;command=[AcbInput]::Command;kind=(WindowKind $windows[0]);stage=$script:stage}
+}
+@{
+ restored=Run @(W)
+ codexAfterRestore=Run @(W) -mode 'Codex'
+ unauthorized=Run @(W) -authorized $false
+ twoWindows=Run @((W),(W))
+ shown=Run @(W) -iconic $false
+ refused=Run @(W) -accept $false
+} | ConvertTo-Json -Compress`);
+  // SW_SHOWNOACTIVATE (4), never SW_RESTORE (9): an unidentified window is not activated.
+  assert.deepEqual(result.restored, { restores: 1, command: 4, kind: 'ChatGPT', stage: 'chatgpt-window' });
+  // Restoring only reveals the window: a Codex window still reads as Codex and is refused by PickGptWindow.
+  assert.equal(result.codexAfterRestore.restores, 1); assert.equal(result.codexAfterRestore.kind, 'Codex');
+  for (const name of ['unauthorized', 'twoWindows', 'shown']) assert.equal(result[name].restores, 0, name);
+  assert.deepEqual(result.refused, { restores: 1, command: 4, kind: null, stage: 'chatgpt-window' });
+});

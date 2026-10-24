@@ -1,7 +1,9 @@
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { isAbsolute, join, resolve, win32 } from 'node:path';
 import { BridgeError } from './errors.ts';
+
+export const VERSION = '0.5.0';
 
 export interface BridgeConfig {
   /** Reply wait for one send (UIA worker and Codex turn); below Hermes' 300 s tool timeout. */
@@ -47,6 +49,21 @@ export function findCodex(env: Env = process.env, platform: string = process.pla
     if (file && existsSync(file)) return { path: file, source: 'PATH' };
   }
   return null;
+}
+
+/** The server runs for days while the desktop app updates itself and deletes its old
+ * version folder, so a discovered codex.exe is discovered again before every use. A
+ * configured path is kept as given, but a missing absolute file fails before spawning. */
+export function refreshCodex(config: BridgeConfig, env: Env = process.env, platform: string = process.platform): void {
+  if (!config.codexSource || config.codexSource === 'desktop' || config.codexSource === 'PATH') {
+    const found = findCodex(env, platform);
+    config.codexExecutable = found?.path ?? null; config.codexSource = found?.source ?? null;
+    return;
+  }
+  // A bare command name is left to PATH; anything with a directory is a file to check.
+  const file = config.codexExecutable;
+  if (file && (isAbsolute(file) || win32.isAbsolute(file) || /[\\/]/.test(file)) && !existsSync(resolve(file)))
+    throw new BridgeError('DEPENDENCY', `The configured Codex executable no longer exists (${config.codexSource}): ${file}`, { fix: 'Point --codex / ACB_CODEX / codexExecutable at the current codex.exe, or remove it to use automatic discovery' });
 }
 
 /** Options, then ACB_* environment variables, then the optional JSON file, then discovery

@@ -11,9 +11,13 @@ test('mcp: the server starts with no configuration and declares its tools and in
     env: { PATH: '', LOCALAPPDATA: '', ACB_CODEX: '', ACB_CONFIG: '' }, stderr: 'pipe' }));
   try {
     const tools = (await client.listTools()).tools;
-    assert.deepEqual(tools.map(tool => tool.name).sort(), ['acb_codex_create', 'acb_codex_find', 'acb_codex_send', 'acb_gpt_create', 'acb_gpt_open', 'acb_gpt_send', 'acb_projects', 'acb_status', 'acb_threads', 'acb_workspace_create']);
+    assert.deepEqual(tools.map(tool => tool.name).sort(), ['acb_codex_create', 'acb_codex_find', 'acb_codex_list', 'acb_codex_read', 'acb_codex_send', 'acb_gpt_create', 'acb_gpt_list', 'acb_gpt_open', 'acb_gpt_read', 'acb_gpt_send', 'acb_projects', 'acb_status', 'acb_threads', 'acb_workspace_create']);
     assert.deepEqual(tools.find(tool => tool.name === 'acb_codex_send')!.inputSchema.required, ['threadId', 'prompt']);
-    assert.match(client.getInstructions() ?? '', /Reuse existing projects and conversations/);
+    assert.deepEqual(tools.find(tool => tool.name === 'acb_gpt_read')!.inputSchema.required, ['conversationId']);
+    // Every list, find and read tool is declared read-only.
+    for (const tool of tools.filter(tool => /_(list|read|find|threads|projects|status)$/.test(tool.name))) assert.equal(tool.annotations?.readOnlyHint, true, tool.name);
+    assert.match(client.getInstructions() ?? '', /independent tools/);
+    assert.doesNotMatch(client.getInstructions() ?? '', /ChatGPT analyses/);
     // Without Codex, a Codex tool fails with a clear fix instead of crashing the server.
     const failed = await client.callTool({ name: 'acb_codex_find', arguments: { searchTerm: 'x' } });
     assert.equal(failed.isError, true);

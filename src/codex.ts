@@ -1,6 +1,8 @@
 import { spawn as nodeSpawn, type ChildProcess } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { BridgeError, controlledProcessEnv } from './errors.ts';
+import { VERSION } from './config.ts';
+import { turnText, type TurnText } from './turns.ts';
 
 type Row = Record<string, any>;
 const ID = /^[a-zA-Z0-9_-]{1,200}$/;
@@ -66,7 +68,7 @@ class AppServer {
     });
   }
   async initialize(): Promise<void> {
-    await this.request('initialize', { clientInfo: { name: 'agent_control_bridge', title: 'Agent Control Bridge', version: '0.3.0' }, capabilities: { experimentalApi: true } }, 30000);
+    await this.request('initialize', { clientInfo: { name: 'agent_control_bridge', title: 'Agent Control Bridge', version: VERSION }, capabilities: { experimentalApi: true } }, 30000);
     this.write({ method: 'initialized', params: {} });
   }
   close(): void { this.fail(new BridgeError('IO', 'App-server connection closed')); try { this.child.kill(); } catch { /* already gone */ } }
@@ -192,6 +194,35 @@ export async function latestCodexThread(options: CodexOptions): Promise<string |
     const data = (await server.request('thread/list', { limit: 5 })).data;
     const row = (Array.isArray(data) ? data : []).find((thread: Row) => typeof thread?.id === 'string' && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(thread.id));
     return row ? String(row.id) : null;
+  });
+}
+
+export interface CodexThreadRow { threadId: string; name: string | null; preview: string; cwd: string | null; status: string; updatedAt: string | null }
+const rowOf = (thread: Row): CodexThreadRow => ({ threadId: String(thread.id), name: typeof thread.name === 'string' ? thread.name : null, preview: typeof thread.preview === 'string' ? thread.preview.slice(0, 200) : '',
+  cwd: typeof thread.cwd === 'string' ? thread.cwd : null, status: String(thread.status?.type ?? ''), updatedAt: Number.isFinite(thread.updatedAt) ? new Date(thread.updatedAt * 1000).toISOString() : null });
+
+/** Recently updated Codex conversations (thread/list), optionally only those of one
+ * working directory; `nextCursor` continues the list. Read-only. */
+export async function listCodex(options: CodexOptions, query: { limit?: number; cwd?: string; cursor?: string } = {}): Promise<{ threads: CodexThreadRow[]; nextCursor: string | null }> {
+  const limit = query.limit ?? 20;
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new BridgeError('INPUT', 'Limit must be 1..100');
+  return session(options, async server => {
+    const result = await server.request('thread/list', { limit, sortKey: 'updated_at', ...(query.cwd ? { cwd: query.cwd } : {}), ...(query.cursor ? { cursor: query.cursor } : {}) });
+    // A changed response shape must not read as "no conversations".
+    if (!Array.isArray(result.data)) throw new BridgeError('IO', 'thread/list returned no thread list');
+    const data: Row[] = result.data;
+    return { threads: data.filter((thread: Row) => typeof thread?.id === 'string').map(rowOf), nextCursor: typeof result.nextCursor === 'string' ? result.nextCursor : null };
+  });
+}
+
+/** Reads one Codex conversation (thread/read): its metadata and the prompt and reply
+ * text of its newest `turns` turns, oldest first. Nothing is sent or resumed. */
+export async function readCodex(options: CodexOptions, threadId: string, turns = 1): Promise<CodexThreadRow & { turnCount: number; turns: TurnText[] }> {
+  if (typeof threadId !== 'string' || !ID.test(threadId)) throw new BridgeError('INPUT', 'Invalid Codex thread ID');
+  if (!Number.isInteger(turns) || turns < 1 || turns > 20) throw new BridgeError('INPUT', 'Turns must be 1..20');
+  return session(options, async server => {
+    const thread = await readThread(server, threadId);
+    return { ...rowOf(thread), turnCount: thread.turns.length, turns: thread.turns.slice(-turns).map(turnText) };
   });
 }
 

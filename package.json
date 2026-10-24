@@ -1,6 +1,6 @@
 {
   "name": "agent-control-bridge",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "private": true,
   "license": "MIT",
   "bin": {
@@ -20,7 +20,7 @@
     "THIRD_PARTY_NOTICES.md"
   ],
   "type": "module",
-  "description": "MCP server that lets Hermes (or any MCP client) drive the ChatGPT and Codex desktop apps: workspaces, conversations, prompts and replies",
+  "description": "MCP server with independent tools for the ChatGPT/Codex desktop app: list, find and read Codex and ChatGPT conversations, create them, send a prompt and return the reply",
   "keywords": ["mcp", "hermes", "codex", "chatgpt", "agent"],
   "scripts": {
     "prepare": "node scripts/build.mjs",

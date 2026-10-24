@@ -5,7 +5,10 @@ import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { BridgeError, controlledProcessEnv } from './errors.ts';
 
-/** Native IPC against the signed, same-user Codex desktop host. */
+/** Native IPC against the signed, same-user desktop host (the ChatGPT/Codex desktop app).
+ * Its app tools (`tools/call`, namespace codex_app) are served on `codex-app-tools-<uuid>`;
+ * hosts before v26.1021 served them on `codex-browser-use-<uuid>`, which now only answers
+ * browser automation and ping. Both use 4-byte length-prefixed JSON-RPC frames. */
 type JsonObject = Record<string, unknown>;
 export interface NativeChatPage {
   thread: { id: string; kind: string; title: string; status: { type: string } };
@@ -13,7 +16,12 @@ export interface NativeChatPage {
     { type: 'userMessage'; id: string; content: { type: string; text?: string; truncated?: boolean }[] } |
     { type: 'agentMessage'; id: string; text: string; truncated?: boolean; phase?: string }
   )[] }[];
+  /** Newest-first paging of the host (absent on hosts that return one turn only). */
+  page?: { nextCursor: string | null; hasMore: boolean };
 }
+export interface NativePeer { processId: number; processStartedAt: string; appVersion: string | null; pipe: string | null }
+/** Host text is untrusted: one line, bounded, for error messages only. */
+const brief = (value: unknown, max: number) => String(value ?? '').replace(/[\x00-\x1f\x7f]+/g, ' ').trim().slice(0, max);
 export interface NativeOptions { carrierThreadId: string; timeoutMs: number; maxFrameBytes: number; maxCandidates: number; worker?: NativeReadWorker }
 function object(value: unknown): JsonObject {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new BridgeError('IO', 'Invalid native interface response');
@@ -95,6 +103,7 @@ type WriteTool = 'set_thread_title';
 const WRITES: WriteTool[] = ['set_thread_title'];
 export interface NativeThread { id: string; kind: string; title: string; projectId: string | null; cwd: string | null }
 export interface NativeProject { projectId: string; projectKind: string; label: string; path: string; hostId: string }
+export interface NativeInventory { threads: NativeThread[]; unavailableSources: string[] }
 const sharedWorker = new NativeReadWorker();
 export const closeNativeWorker = () => sharedWorker.close();
 
@@ -102,35 +111,52 @@ export const closeNativeWorker = () => sharedWorker.close();
 export class NativeClient {
   private readonly options: NativeOptions;
   private readonly worker: NativeReadWorker;
-  private peerPid: number | undefined;
-  private peerStartedAt: string | undefined;
+  private verified: NativePeer | undefined;
   constructor(options: NativeOptions) {
     identifier(options.carrierThreadId);
     this.options = options; this.worker = options.worker ?? sharedWorker;
   }
+  /** The verified desktop host of the last call, for diagnostics. */
+  get peer(): NativePeer | undefined { return this.verified; }
   private async call(tool: ReadTool | WriteTool, args: JsonObject): Promise<JsonObject> {
     const write = WRITES.includes(tool as WriteTool), id = randomUUID(), prefix = write ? 'acb-write-' : 'acb-readonly-';
     const request = { jsonrpc: '2.0', id, method: 'tools/call', params: { arguments: args, callId: `${prefix}${randomUUID()}`, namespace: 'codex_app',
       threadId: this.options.carrierThreadId, tool, turnId: `${prefix}${randomUUID()}`, callerSource: 'codex' } };
     const envelope = await this.worker.request({ requestJson: JSON.stringify(request), timeoutMs: this.options.timeoutMs, maxFrameBytes: this.options.maxFrameBytes,
-      maxCandidates: this.options.maxCandidates, expectedProcessId: this.peerPid ?? null, expectedProcessStartedAt: this.peerStartedAt ?? null }, this.options.timeoutMs);
-    if (envelope.ok !== true) throw new BridgeError(envelope.code === 'TIMEOUT' ? 'TIMEOUT' : envelope.code === 'OWNER' ? 'OWNER' : 'IO', `Native worker refused the request at ${String(envelope.stage)}`);
+      maxCandidates: this.options.maxCandidates, expectedProcessId: this.verified?.processId ?? null, expectedProcessStartedAt: this.verified?.processStartedAt ?? null }, this.options.timeoutMs);
+    if (envelope.ok !== true) {
+      // The worker keeps the pipe it verified; after the desktop app restarts or updates,
+      // that pipe is gone. A fresh worker discovers and verifies the host again next time.
+      this.worker.close();
+      throw new BridgeError(envelope.code === 'TIMEOUT' ? 'TIMEOUT' : envelope.code === 'OWNER' ? 'OWNER' : 'IO', `Native worker refused the request at ${brief(envelope.stage, 40)}`, { stage: brief(envelope.stage, 40) });
+    }
     const peer = object(envelope.peer);
     if (peer.sameUserSignedHost !== true || !Number.isSafeInteger(peer.processId) || Number(peer.processId) < 1 || typeof peer.processStartedAt !== 'string' ||
-        (this.peerPid !== undefined && (this.peerPid !== peer.processId || this.peerStartedAt !== peer.processStartedAt))) throw new BridgeError('OWNER', 'Native desktop host changed or is unverified');
-    this.peerPid = Number(peer.processId); this.peerStartedAt = peer.processStartedAt;
+        (this.verified && (this.verified.processId !== peer.processId || this.verified.processStartedAt !== peer.processStartedAt))) throw new BridgeError('OWNER', 'Native desktop host changed or is unverified');
+    this.verified = { processId: Number(peer.processId), processStartedAt: peer.processStartedAt, appVersion: typeof peer.appVersion === 'string' ? peer.appVersion : null, pipe: typeof peer.pipe === 'string' ? peer.pipe : null };
     const response = object(envelope.response);
     if (response.jsonrpc !== '2.0' || response.id !== id) throw new BridgeError('IO', 'Native response identity mismatch');
-    if (response.error !== undefined) throw new BridgeError(object(response.error).code === -32602 ? 'IPC_CONFIG' : 'IO', 'Native request was rejected');
+    if (response.error !== undefined) {
+      // Keep the host's own code and message: they tell a protocol change ("No handler
+      // registered for method") from a refused argument within minutes.
+      const error = object(response.error), code = Number.isSafeInteger(error.code) ? Number(error.code) : null, message = brief(error.message, 200);
+      // The pipe the worker kept may be one that no longer serves app tools (e.g. found
+      // before the host opened its app-tools pipe): discover again on the next call. The
+      // request itself is not repeated.
+      this.worker.close();
+      throw new BridgeError(code === -32602 ? 'IPC_CONFIG' : 'IO', `Native request was rejected: [${code ?? '?'}] ${message || 'no message'}`, { nativeError: { code, message }, pipe: this.verified.pipe });
+    }
     const result = object(response.result);
-    if (result.success !== true || !Array.isArray(result.contentItems)) throw new BridgeError('IO', 'Native tool did not report success');
+    if (!Array.isArray(result.contentItems)) throw new BridgeError('IO', 'Native tool response has an unexpected shape');
     const text = result.contentItems.filter(item => object(item).type === 'inputText');
     if (text.length !== 1 || typeof object(text[0]).text !== 'string') throw new BridgeError('IO', 'Native tool response has an unexpected shape');
+    if (result.success !== true) throw new BridgeError('IO', `Native tool ${tool} failed: ${brief(object(text[0]).text, 300) || 'no message'}`);
     // Writes may answer in plain text; reads must be JSON.
     try { return object(JSON.parse(object(text[0]).text as string)); }
     catch (error) { if (write) return { text: String(object(text[0]).text).slice(0, 2000) }; if (error instanceof BridgeError) throw error; throw new BridgeError('IO', 'Native tool response JSON is invalid'); }
   }
-  async listThreads(): Promise<NativeThread[]> {
+  /** The desktop inventory as the host reports it, including sources it could not list. */
+  async inventory(): Promise<NativeInventory> {
     // The desktop catalog supports at most 50 non-pinned rows and has no cursor.
     // Results follow the user's sidebar sorting; a newly created chat is not
     // necessarily first. Callers must inspect every row, or read an exposed ID.
@@ -138,18 +164,32 @@ export class NativeClient {
     if (result.nextCursor) throw new BridgeError('IO', 'Native inventory requires pagination that this host does not support');
     const rows = [...(Array.isArray(result.pinnedThreads) ? result.pinnedThreads : []), ...(Array.isArray(result.threads) ? result.threads : [])].map(object)
       .map(row => ({ id: String(row.id), kind: String(row.kind), title: String(row.title ?? ''), projectId: typeof row.projectId === 'string' ? row.projectId : null, cwd: typeof row.cwd === 'string' ? row.cwd : null }));
-    return [...new Map(rows.map(row => [row.id, row])).values()];
+    const unavailableSources = (Array.isArray(result.unavailableSources) ? result.unavailableSources : []).map(source => brief(source, 40));
+    return { threads: [...new Map(rows.map(row => [row.id, row])).values()], unavailableSources };
+  }
+  /** The full inventory. Title uniqueness is proven against it, so a host that could not
+   * list its ChatGPT chats is an error, never an empty (seemingly unique) list. */
+  async listThreads(): Promise<NativeThread[]> {
+    const { threads, unavailableSources } = await this.inventory();
+    if (unavailableSources.includes('chatgpt')) throw new BridgeError('DEPENDENCY', 'The desktop app could not list its ChatGPT conversations', { fix: 'Make sure ChatGPT is signed in and online in the desktop app' });
+    return threads;
   }
   async listProjects(): Promise<NativeProject[]> {
     const result = await this.call('list_projects', {});
     return (Array.isArray(result.projects) ? result.projects : []).map(object).map(row => ({ projectId: String(row.projectId), projectKind: String(row.projectKind), label: String(row.label ?? ''), path: String(row.path ?? ''), hostId: String(row.hostId ?? '') }));
   }
   async setThreadTitle(threadId: string, source: 'chatgpt' | 'codex', title: string): Promise<void> { await this.call('set_thread_title', { source, threadId: identifier(threadId), title }); }
-  async readThread(threadId: string): Promise<NativeChatPage> {
-    const result = await this.call('read_thread', { threadId: identifier(threadId), turnLimit: 1, includeOutputs: true, maxOutputCharsPerItem: 20000 });
-    // The current host nests turns in thread; older builds returned them beside it.
+  /** Reads the newest turn (default), or `turnLimit` newest turns from `cursor` on, newest
+   * first. Without `outputs`, tool outputs are left out; message text is always included. */
+  async readThread(threadId: string, page: { turnLimit?: number; cursor?: string; outputs?: boolean } = {}): Promise<NativeChatPage> {
+    const outputs = page.outputs ?? true;
+    const result = await this.call('read_thread', { threadId: identifier(threadId), turnLimit: page.turnLimit ?? 1, ...(page.cursor ? { cursor: page.cursor } : {}),
+      includeOutputs: outputs, maxOutputCharsPerItem: outputs ? 20000 : 0 });
+    // Hosts have returned turns both beside the thread and nested in it.
     const thread = object(result.thread), turns = Array.isArray(result.turns) ? result.turns : Array.isArray(thread.turns) ? thread.turns : null;
     if (thread.id !== threadId || !turns) throw new BridgeError('PROVENANCE', 'Native conversation page identity differs');
-    return { thread: { id: threadId, kind: String(thread.kind), title: String(thread.title ?? ''), status: { type: String(object(thread.status ?? {}).type ?? '') } }, turns } as NativeChatPage;
+    const paging = result.page ? object(result.page) : undefined;
+    return { thread: { id: threadId, kind: String(thread.kind), title: String(thread.title ?? ''), status: { type: String(object(thread.status ?? {}).type ?? '') } }, turns,
+      ...(paging ? { page: { nextCursor: typeof paging.nextCursor === 'string' ? paging.nextCursor : null, hasMore: paging.hasMore === true } } : {}) } as NativeChatPage;
   }
 }

@@ -3,10 +3,11 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { BridgeError, asBridgeError } from './errors.ts';
 import type { NativeChatPage, NativeProject, NativeThread } from './native.ts';
 import type { UiResult } from './windows-ui.ts';
+import { turnText, type TurnText } from './turns.ts';
 
 export interface GptDeps {
   native: {
-    readThread(id: string): Promise<NativeChatPage>;
+    readThread(id: string, page?: { turnLimit?: number; cursor?: string; outputs?: boolean }): Promise<NativeChatPage>;
     listThreads(): Promise<NativeThread[]>;
     setThreadTitle(id: string, source: 'chatgpt', title: string): Promise<void>;
     listProjects?(): Promise<NativeProject[]>;
@@ -26,6 +27,66 @@ const signal = (deps: GptDeps) => AbortSignal.timeout(deps.timeoutMs + 60000);
 async function until<T>(read: () => Promise<T | undefined>, ms: number, pollMs: number): Promise<T | undefined> {
   const deadline = Date.now() + ms;
   for (;;) { const value = await read(); if (value !== undefined) return value; if (Date.now() >= deadline) return undefined; await delay(pollMs); }
+}
+
+/** ChatGPT conversations of the desktop inventory (pinned first, then sidebar order; at
+ * most 50 unpinned). Native read only: no window is touched. */
+export async function listGpt(native: Pick<GptDeps['native'], 'listThreads'>): Promise<{ conversationId: string; title: string; projectId: string | null }[]> {
+  return (await native.listThreads()).filter(thread => thread.kind === 'chatgpt').map(thread => ({ conversationId: thread.id, title: thread.title, projectId: thread.projectId }));
+}
+
+/** The desktop transcript keeps a ChatGPT reply only as a content reference; its text is
+ * on the page. Such a reply is reported as missing, never as the reference text. */
+const REFERENCE = /^(?:\s*::chatgpt-content-reference\{[^}\n]*\}\s*)+$/;
+export type GptTurnText = TurnText & { replyInWindowOnly: boolean };
+function gptTurn(turn: Turn): GptTurnText {
+  const reference = (item: Turn['items'][number]) => item.type === 'agentMessage' && REFERENCE.test(item.text);
+  const text = turnText({ ...turn, items: turn.items.filter(item => !reference(item)) });
+  return { ...text, replyInWindowOnly: !text.reply && turn.items.some(reference) };
+}
+type GptRead = { conversationId: string; title: string; status: string; turns: GptTurnText[]; nextCursor: string | null };
+
+/** Reads one ChatGPT conversation by ID: the prompt and reply text of its newest `turns`
+ * turns (1..10), oldest first; `nextCursor` continues with older turns. Native read only:
+ * no window is touched and nothing is sent. Replies the transcript holds only as a
+ * reference come back as `replyInWindowOnly` (see readGptWithWindow). */
+export async function readGpt(native: Pick<GptDeps['native'], 'readThread'>, conversationId: string, turns = 1, cursor?: string): Promise<GptRead> {
+  if (!Number.isInteger(turns) || turns < 1 || turns > 10) throw new BridgeError('INPUT', 'Turns must be 1..10');
+  // Without outputs the host also empties message text, so outputs stay on.
+  const page = await native.readThread(conversationId, { turnLimit: turns, cursor, outputs: true });
+  if (page.thread.kind !== 'chatgpt') throw new BridgeError('INPUT', 'This is not a ChatGPT conversation; read Codex conversations with acb_codex_read');
+  // The host pages newest first; the transcript reads oldest first.
+  return { conversationId, title: page.thread.title, status: page.thread.status.type, turns: page.turns.slice(0, turns).reverse().map(gptTurn), nextCursor: page.page?.hasMore ? page.page.nextCursor : null };
+}
+
+/** As readGpt, and the newest reply is read from the ChatGPT window when the transcript
+ * holds only its reference: the chat is shown (current view or its single sidebar entry,
+ * as acb_gpt_open) and the reply after its prompt is read through UIA. Nothing is typed
+ * or sent, and the turn must still be the newest, completed one afterwards. */
+export async function readGptWithWindow(deps: GptDeps, conversationId: string, turns = 1): Promise<GptRead & { uiIdentity: 'uuid' | 'titleOnly' | null; navigation: Navigation | null }> {
+  const read = await readGpt(deps.native, conversationId, turns), latest = read.turns.at(-1);
+  if (!latest?.replyInWindowOnly) return { ...read, uiIdentity: null, navigation: null };
+  const page = await deps.native.readThread(conversationId);
+  if (page.turns[0]?.id !== latest.turnId || !done(page, page.turns[0])) throw new BridgeError('CONFLICT', 'The newest GPT turn is still running or changed; read it again later');
+  // The page is searched for the reply after this exact prompt, so it must be the host's
+  // complete text: a shortened one could match an earlier turn that starts the same way.
+  const parts = page.turns[0].items.flatMap(item => item.type === 'userMessage' ? item.content.filter(part => part.type === 'text') : []);
+  if (!parts.length || parts.some(part => part.truncated || typeof part.text !== 'string' || !part.text.trim())) throw new BridgeError('PROVENANCE', 'The newest prompt is not fully available to locate its reply in the window');
+  const prompt = normalize(parts.map(part => part.text).join('\n\n'));
+  const navigation = await openGpt(deps, conversationId, read.title);
+  const { reply, uiIdentity } = await windowReply(deps, conversationId, read.title, prompt, latest.turnId);
+  return { ...read, turns: [...read.turns.slice(0, -1), { ...latest, reply, replyInWindowOnly: false }], uiIdentity, navigation };
+}
+
+/** The reply body of completed turn `turnId` (carrying `prompt`) from the window showing
+ * the conversation; the turn must still be the newest, completed one afterwards. */
+async function windowReply(deps: GptDeps, conversationId: string, title: string, prompt: string, turnId: string): Promise<{ reply: string; uiIdentity: 'uuid' | 'titleOnly' }> {
+  const body = await deps.ui.call('chat-read-reply', { name: title, conversationId, prompt }, signal(deps));
+  const identity = body.conversationId === conversationId ? 'uuid' : !body.conversationId && body.identity === 'titleOnly' ? 'titleOnly' : null;
+  if (!identity || body.completionVerified !== true || !body.body?.trim()) throw new BridgeError('PROVENANCE', 'Reply body could not be read from the target conversation');
+  const after = await deps.native.readThread(conversationId);
+  if (after.turns[0]?.id !== turnId || !done(after, after.turns[0])) throw new BridgeError('PROVENANCE', 'GPT turn changed while reading the reply');
+  return { reply: body.body, uiIdentity: identity };
 }
 
 /** Brings the target chat into the ChatGPT window. The app offers no ID navigation for
@@ -78,12 +139,8 @@ export async function sendGpt(deps: GptDeps, conversationId: string, text: strin
     if (Date.now() >= deadline) throw new BridgeError('TIMEOUT', 'Sent, but the reply is pending or the prompt did not reach this conversation; call again with the same prompt to read it (it is not resent)');
     await delay(deps.pollMs);
   }
-  const body = await deps.ui.call('chat-read-reply', { name: title, conversationId, prompt }, signal(deps));
-  const identity = body.conversationId === conversationId ? 'uuid' : !body.conversationId && body.identity === 'titleOnly' ? 'titleOnly' : null;
-  if (!identity || body.completionVerified !== true || !body.body?.trim()) throw new BridgeError('PROVENANCE', 'Reply body could not be read from the target conversation');
-  const after = await deps.native.readThread(conversationId);
-  if (after.turns[0]?.id !== turn.id || !done(after, after.turns[0])) throw new BridgeError('PROVENANCE', 'GPT turn changed while reading the reply');
-  return { conversationId, title, turnId: turn.id, reply: body.body, alreadySent, inputMode, uiIdentity: identity, navigation };
+  const { reply, uiIdentity } = await windowReply(deps, conversationId, title, prompt, turn.id);
+  return { conversationId, title, turnId: turn.id, reply, alreadySent, inputMode, uiIdentity, navigation };
 }
 
 /** Starts a new ordinary ChatGPT chat with a one-time identity marker, finds its exact

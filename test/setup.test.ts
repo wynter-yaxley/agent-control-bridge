@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { findCodex, loadConfig } from '../src/config.ts';
+import { findCodex, loadConfig, refreshCodex } from '../src/config.ts';
 import { hermesCommands } from '../src/mcp.ts';
+import { status } from '../src/check.ts';
 
 function scratch(t: { after(fn: () => void): void }) { const root = mkdtempSync(join(tmpdir(), 'acb-setup-')); t.after(() => rmSync(root, { recursive: true, force: true })); return root; }
 const touch = (file: string, seconds: number) => { mkdirSync(join(file, '..'), { recursive: true }); writeFileSync(file, ''); utimesSync(file, seconds, seconds); };
@@ -23,6 +24,43 @@ test('setup: Codex is found in the desktop app (newest version folder), else on 
     assert.deepEqual(findCodex({ PATH: `${join(root, 'missing')}:${join(root, 'tools')}` }, 'linux'), { path: join(root, 'tools', 'codex'), source: 'PATH' });
   }
   assert.equal(findCodex({ PATH: '' }, 'linux'), null);
+});
+
+test('setup: a long-running server follows a desktop app update to the new codex.exe; a vanished configured path fails fast', t => {
+  const root = scratch(t), env = { LOCALAPPDATA: root, PATH: '' };
+  const old = join(root, 'OpenAI', 'Codex', 'bin', '6257d9e8f63c0f2b', 'codex.exe');
+  touch(old, 1000);
+  const config = loadConfig(undefined, {}, env);
+  refreshCodex(config, env, 'win32');
+  assert.deepEqual([config.codexExecutable, config.codexSource], [old, 'desktop']);
+  // The update removes the old version folder and installs a new one (2026-10-21, 10-24).
+  rmSync(join(old, '..'), { recursive: true });
+  const updated = join(root, 'OpenAI', 'Codex', 'bin', '2993767bd1dfb009', 'codex.exe');
+  touch(updated, 2000); touch(join(root, 'OpenAI', 'Codex', 'bin', 'c602dfdab3808440', 'rg.exe'), 3000);
+  refreshCodex(config, env, 'win32');
+  assert.deepEqual([config.codexExecutable, config.codexSource], [updated, 'desktop']);
+  // Installed after the server started: found on the next use.
+  const late = loadConfig(undefined, {}, { PATH: '' });
+  assert.equal(late.codexExecutable, null);
+  refreshCodex(late, env, 'win32');
+  assert.equal(late.codexExecutable, updated);
+  // A configured path is used as given, but a missing absolute file is reported, not spawned.
+  const pinned = loadConfig(undefined, { codexExecutable: old }, env);
+  assert.throws(() => refreshCodex(pinned, env, 'win32'), (error: any) => error.code === 'DEPENDENCY' && error.message.includes(old) && /--codex/.test(error.details.fix));
+  const bare = loadConfig(undefined, { codexExecutable: 'codex' }, env);
+  refreshCodex(bare, env, 'win32');
+  assert.equal(bare.codexExecutable, 'codex');
+  // A relative path with a directory is a file too (resolved like spawn does, from the cwd).
+  const relative = loadConfig(undefined, { codexExecutable: join('missing-runtime', 'codex.exe') }, env);
+  assert.throws(() => refreshCodex(relative, env, 'win32'), { code: 'DEPENDENCY' });
+});
+
+// On Windows the check would go on to the real desktop pipe, so it runs elsewhere only.
+test('setup: acb_status names the server process and a vanished configured codex.exe, even with a configured carrier thread', { skip: process.platform === 'win32' && 'would contact the real desktop app' }, async t => {
+  const root = scratch(t), gone = join(root, 'gone', 'codex.exe');
+  const result: any = await status(loadConfig(undefined, { codexExecutable: gone, carrierThreadId: '00000000-0000-0000-0000-000000000001' }, { PATH: '' }));
+  assert.equal(result.server.pid, process.pid); assert.match(result.server.startedAt, /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(result.codex.code, 'DEPENDENCY'); assert.ok(result.codex.message.includes(gone)); assert.match(result.codex.fix, /--codex/);
 });
 
 test('setup: options win over ACB_* variables, which win over the config file; defaults need no file', t => {

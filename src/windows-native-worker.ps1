@@ -445,7 +445,29 @@ try {
   $kinds=@($wins | ForEach-Object {[pscustomobject]@{Window=$_;Kind=(WindowKind $_)}})
   $gpt=@($kinds | Where-Object {$_.Kind -eq 'ChatGPT'})
   if ($gpt.Count -eq 1) {return $gpt[0].Window}
+  # Counts only, no text. A minimized window exposes no UI tree, so its mode stays unknown
+  # until the user shows it; it is never restored before its identity is known.
+  try {
+   $minimized=@($wins | Where-Object {$p=$null;$_.TryGetCurrentPattern([System.Windows.Automation.WindowPattern]::Pattern,[ref]$p) -and $p.Current.WindowVisualState -eq [System.Windows.Automation.WindowVisualState]::Minimized}).Count
+   $script:diagnostics=@{windows=$kinds.Count;chatgpt=$gpt.Count;codex=@($kinds | Where-Object {$_.Kind -eq 'Codex'}).Count;unidentified=@($kinds | Where-Object {-not $_.Kind}).Count;minimized=$minimized}
+  } catch {}
   throw 'OWNER'
+ }
+ # A minimized Chromium window exposes no UI tree, so its mode cannot be read before it is
+ # shown. With the user's authorization, the app's only window is restored once (not
+ # activated or focused, nothing typed); it is then identified like any other window, and an unknown or
+ # Codex window is still refused.
+ function RevealMinimized {
+  if ($request.foregroundInput -ne $true -or $all.Count -ne 1) {return}
+  $handle=[IntPtr]$all[0].Current.NativeWindowHandle
+  if ($handle -eq [IntPtr]::Zero -or -not [AcbInput]::IsIconic($handle) -or $null -ne (WindowKind $all[0])) {return}
+  $script:stage='chatgpt-restore'
+  # SW_SHOWNOACTIVATE: shown in its last size and position; the active window stays active.
+  if ([AcbInput]::ShowWindowAsync($handle,4)) {
+   # The tree appears once the restore has completed and the page is drawn.
+   $null=Within 5000 {-not [AcbInput]::IsIconic($handle) -and $null -ne (WindowKind $all[0])}
+  }
+  $script:stage='chatgpt-window'
  }
  # A named chat is used in the one window showing that title, never in a Codex window.
  function PickWindow {
@@ -552,6 +574,7 @@ try {
  }
  function GptBusy {return ($null -ne (Find (Document) 'Button' '停止') -or $null -ne (Find (Document) 'Text' 'ChatGPT 正在回应'))}
  $script:stage='chatgpt-window'
+ RevealMinimized
  $script:root=PickWindow
  $script:handle=[IntPtr]$script:root.Current.NativeWindowHandle
  $script:gptProven=((WindowKind $script:root) -eq 'ChatGPT')
