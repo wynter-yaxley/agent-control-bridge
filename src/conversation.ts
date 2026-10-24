@@ -4,7 +4,8 @@ import { AcbError } from './errors.ts';
 import { normalize, opensWith, statusOf, type Turn, toTurn } from './turns.ts';
 
 export interface WaitOptions {
-  timeoutMs: number;
+  /** When to stop waiting for the reply (epoch milliseconds). */
+  deadline: number;
   /** Longest pause between two status reads. */
   pollMs?: number;
 }
@@ -21,17 +22,17 @@ export interface Sent {
 /** Which turn a sent prompt opens: turn `turnId`, or the first turn after `after`. */
 type Match = { turnId: string } | { after: string | undefined };
 
-/** A message the app accepted whose turn the app does not list yet. */
+/**
+ * A message ACB sent, or may have sent, whose turn the app does not list yet. It is kept until
+ * the app lists a newer turn: no amount of time proves that the message was not delivered.
+ */
 interface Accepted {
   prompt: string;
   after: string | undefined;
-  until: number;
+  sentAt: string;
 }
 
-/** How long an accepted message may take to appear (a background page can be throttled for a minute). */
-const ACCEPTED_MS = 120_000;
-
-/** Per app: sends to one conversation run one at a time, and messages accepted but not yet listed. */
+/** Per app: sends to one conversation run one at a time, and messages sent but not yet listed. */
 const state = new WeakMap<App, { locks: Map<string, Promise<unknown>>; accepted: Map<string, Accepted> }>();
 
 function stateOf(app: App) {
@@ -81,13 +82,22 @@ export async function sendPrompt(
     const last = before.turns[0];
     const accepted = pendingOf(app, threadId, last);
     if (accepted) {
-      if (accepted.prompt !== text) throw busy(threadId);
+      if (accepted.prompt !== text) {
+        throw new AcbError(
+          'BUSY',
+          `A message ACB sent at ${accepted.sentAt} has not appeared in the conversation yet; wait for it before sending another`,
+          { threadId },
+        );
+      }
       return { title: before.title, alreadySent: true, match: { after: accepted.after } };
     }
     if (last && opensWith(last, text)) return { title: before.title, alreadySent: true, match: { turnId: last.id } };
-    if (statusOf(before) !== 'idle') throw busy(threadId);
-    await deliver(app, kind, threadId, text, options.caller);
-    stateOf(app).accepted.set(threadId, { prompt: text, after: last?.id, until: Date.now() + ACCEPTED_MS });
+    if (statusOf(before) !== 'idle') {
+      throw new AcbError('BUSY', 'The conversation is still answering; read it, then send when it is idle', {
+        threadId,
+      });
+    }
+    await deliver(app, kind, threadId, text, options.caller, last?.id);
     return { title: before.title, alreadySent: false, match: { after: last?.id } };
   });
   const turn = options.wait ? await waitForTurn(app, threadId, text, match, options) : null;
@@ -98,23 +108,48 @@ export async function sendPrompt(
 function pendingOf(app: App, threadId: string, newest: AppTurn | undefined): Accepted | undefined {
   const { accepted } = stateOf(app);
   const entry = accepted.get(threadId);
-  if (entry && entry.after === newest?.id && Date.now() < entry.until) return entry;
+  if (entry && entry.after === newest?.id) return entry;
   accepted.delete(threadId);
   return undefined;
 }
 
-function busy(threadId: string): AcbError {
-  return new AcbError('BUSY', 'The conversation is still answering; read it, then send when it is idle', { threadId });
-}
-
-/** An archived conversation refuses messages; nothing was sent then, so one retry is safe. */
-async function deliver(app: App, kind: Kind, threadId: string, prompt: string, caller?: string): Promise<void> {
+/**
+ * Sends the message and records it before it can arrive. The record is dropped only when the
+ * message certainly was not sent: it never left, or the app refused it. An archived
+ * conversation refuses messages, so one retry after restoring it is safe.
+ */
+async function deliver(
+  app: App,
+  kind: Kind,
+  threadId: string,
+  prompt: string,
+  caller: string | undefined,
+  after: string | undefined,
+) {
+  const { accepted } = stateOf(app);
+  accepted.set(threadId, { prompt, after, sentAt: new Date().toISOString() });
   try {
-    await app.sendMessage(threadId, prompt, caller);
+    try {
+      await app.sendMessage(threadId, prompt, caller);
+    } catch (error) {
+      if (!(error instanceof AcbError && error.details.archived)) throw error;
+      await app.setArchived(threadId, kind, false);
+      await app.sendMessage(threadId, prompt, caller);
+    }
   } catch (error) {
-    if (!(error instanceof AcbError && error.details.archived)) throw error;
-    await app.setArchived(threadId, kind, false);
-    await app.sendMessage(threadId, prompt, caller);
+    if (error instanceof AcbError && (error.details.notSent || error.details.refused)) {
+      accepted.delete(threadId);
+      throw error;
+    }
+    const failure = error instanceof AcbError ? error : new AcbError('PROTOCOL', String(error));
+    throw new AcbError(
+      failure.code,
+      `${failure.message}. The message may have been sent: read the conversation before sending again`,
+      {
+        ...failure.details,
+        threadId,
+      },
+    );
   }
 }
 
@@ -128,9 +163,8 @@ export async function waitForTurn(
   threadId: string,
   prompt: string,
   match: Match,
-  { timeoutMs, pollMs = 1500 }: WaitOptions,
+  { deadline, pollMs = 1500 }: WaitOptions,
 ): Promise<Turn> {
-  const deadline = Date.now() + timeoutMs;
   for (let poll = 0; ; poll++) {
     const page = await app.readThread(threadId, { outputs: false });
     const newest = page.turns[0];

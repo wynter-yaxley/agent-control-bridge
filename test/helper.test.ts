@@ -3,18 +3,19 @@ import { test } from 'node:test';
 import { lastExchange, type PageNode } from '../src/helper.ts';
 
 const text = (name: string): PageNode => ({ type: 'Text', name });
+const label = (name: string): PageNode => ({ type: 'Text', name, label: true });
 const button = (name: string): PageNode => ({ type: 'Button', name });
 
 const page: PageNode[] = [
-  text('你说：'),
+  label('你说：'),
   text('first question'),
   button('复制消息'),
-  text('ChatGPT 说：'),
+  label('ChatGPT 说：'),
   text('first answer'),
   button('更多操作'),
-  text('你说：'),
+  label('你说：'),
   text('second\nquestion'),
-  text('ChatGPT 说：'),
+  label('ChatGPT 说：'),
   text('Paragraph one.'),
   button('复制'),
   text('Paragraph two.'),
@@ -41,9 +42,9 @@ test('a page without messages has no exchange', () => {
 
 test('label text inside a message is content, not a new message', () => {
   const quoted = [
-    text('你说：'),
+    label('你说：'),
     text('What does 你说：mean?'),
-    text('ChatGPT 说：'),
+    label('ChatGPT 说：'),
     text('It means "you said".'),
     button('更多操作'),
   ];
@@ -52,4 +53,18 @@ test('label text inside a message is content, not a new message', () => {
     reply: 'It means "you said".',
     complete: true,
   });
+});
+
+test('message text that equals a role heading is still message text', () => {
+  const page = [
+    label('你说：'),
+    text('Q'),
+    label('ChatGPT 说：'),
+    text('Start'),
+    text('你说：'),
+    text('Q'),
+    text('end'),
+    button('更多操作'),
+  ];
+  assert.deepEqual(lastExchange(page), { prompt: 'Q', reply: 'Start\n你说：\nQ\nend', complete: true });
 });

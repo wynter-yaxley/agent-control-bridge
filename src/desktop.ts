@@ -261,11 +261,15 @@ export type App = Pick<
 /** Tools that may answer success in plain text rather than JSON. */
 const TEXT_RESULTS = new Set(['set_thread_title']);
 
-/** Unwraps a `tools/call` response: one text item holding JSON, or a failure message. */
+/**
+ * Unwraps a `tools/call` response: one text item holding JSON, or a failure message. A failure
+ * the app answered with carries `refused`: the app did not carry out the call.
+ */
 export function toolResult(tool: string, response: Json): Json {
   if (response.error !== undefined) {
     const error = object(response.error);
     throw new AcbError('PROTOCOL', `The desktop app refused ${tool}: ${String(error.message ?? 'no reason given')}`, {
+      refused: true,
       appError: { code: error.code ?? null, message: error.message ?? null },
     });
   }
@@ -283,10 +287,10 @@ export function toolResult(tool: string, response: Json): Json {
 
 function failure(tool: string, text: string): AcbError {
   const message = text.replace(/\s+/g, ' ').trim().slice(0, 500) || `${tool} failed`;
-  if (/not found|\bno\b[\w ]* found/i.test(message)) return new AcbError('NOT_FOUND', message);
-  if (/is archived/i.test(message)) return new AcbError('FAILED', message, { archived: true });
-  if (/invalid arguments/i.test(message)) return new AcbError('INPUT', message);
-  return new AcbError('FAILED', message);
+  if (/not found|\bno\b[\w ]* found/i.test(message)) return new AcbError('NOT_FOUND', message, { refused: true });
+  if (/is archived/i.test(message)) return new AcbError('FAILED', message, { refused: true, archived: true });
+  if (/invalid arguments/i.test(message)) return new AcbError('INPUT', message, { refused: true });
+  return new AcbError('FAILED', message, { refused: true });
 }
 
 function summary(row: Json, pinned: boolean): ThreadSummary | null {

@@ -10,6 +10,8 @@ import { normalize } from './turns.ts';
 export interface PageNode {
   type: string;
   name: string;
+  /** A screen-reader-only role heading such as "你说：", not message text. */
+  label?: boolean;
 }
 
 export interface Exchange {
@@ -22,20 +24,22 @@ export interface Exchange {
 /** Page labels of the Simplified Chinese app. */
 const LABELS = { you: ['你说：', '您说：'], assistant: ['ChatGPT 说：'], finished: '更多操作' };
 const REQUEST_TIMEOUT_MS = 30_000;
-const READ_TIMEOUT_MS = 20_000;
+/** How long a reply may take to show on the page. */
+export const READ_TIMEOUT_MS = 20_000;
 
 /** The last user message on the page and the ChatGPT reply after it. */
 export function lastExchange(nodes: PageNode[]): Exchange | null {
-  const text = (node: PageNode, names: string[]) => node.type === 'Text' && names.includes(node.name);
+  const text = (node: PageNode, names: string[]) =>
+    node.type === 'Text' && node.label === true && names.includes(node.name);
   const you = nodes.findLastIndex((node) => text(node, LABELS.you));
   if (you < 0) return null;
   const assistant = nodes.findIndex((node, index) => index > you && text(node, LABELS.assistant));
   const end = assistant < 0 ? nodes.length : assistant;
-  const prompt = nodes.slice(you + 1, end).filter((node) => node.type === 'Text');
+  const prompt = nodes.slice(you + 1, end).filter((node) => node.type === 'Text' && !node.label);
   if (assistant < 0) return { prompt: textOf(prompt), reply: '', complete: false };
   const rest = nodes.slice(assistant + 1);
   const finished = rest.findIndex((node) => node.type === 'Button' && node.name === LABELS.finished);
-  const reply = (finished < 0 ? rest : rest.slice(0, finished)).filter((node) => node.type === 'Text');
+  const reply = (finished < 0 ? rest : rest.slice(0, finished)).filter((node) => node.type === 'Text' && !node.label);
   return { prompt: textOf(prompt), reply: textOf(reply), complete: finished >= 0 };
 }
 
@@ -78,6 +82,19 @@ export class WindowsHelper {
   close(): void {
     this.#child?.kill();
     this.#child = undefined;
+  }
+
+  /**
+   * Runs `task`, which may make the app take the foreground (switching its page, opening a
+   * new chat), then gives the foreground back to the window that had it if the app took it.
+   */
+  async keepingForeground<T>(task: () => Promise<T>): Promise<T> {
+    const { window } = await this.#request({ op: 'foreground' });
+    try {
+      return await task();
+    } finally {
+      await this.#request({ op: 'give-back', window }).catch(() => undefined);
+    }
   }
 
   /** Whether the server of the tool pipe at `path` is the signed app of this user session. */

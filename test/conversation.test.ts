@@ -4,7 +4,14 @@ import { sendPrompt } from '../src/conversation.ts';
 import { AcbError } from '../src/errors.ts';
 import { CODEX, FakeApp, GPT, userTurn } from './fake-app.ts';
 
-const fast = { timeoutMs: 2000, pollMs: 1, wait: true };
+/** Options waiting up to two seconds from the moment they are used. */
+const fast = {
+  get deadline() {
+    return Date.now() + 2000;
+  },
+  pollMs: 1,
+  wait: true,
+};
 const code = (expected: string) => (error: unknown) => error instanceof AcbError && error.code === expected;
 
 test('a prompt is sent and its reply returned', async () => {
@@ -68,7 +75,7 @@ test('a turn that does not end in time is a TIMEOUT naming the conversation', as
   app.add({ id: CODEX, kind: 'codex' });
   app.answerAfterReads = Number.POSITIVE_INFINITY;
   await assert.rejects(
-    sendPrompt(app, 'codex', CODEX, 'Slow', { ...fast, timeoutMs: 20 }),
+    sendPrompt(app, 'codex', CODEX, 'Slow', { ...fast, deadline: Date.now() + 20 }),
     (error) => code('TIMEOUT')(error) && (error as AcbError).details.threadId === CODEX,
   );
 });
@@ -144,4 +151,31 @@ test('an archived ChatGPT conversation is restored as a ChatGPT conversation', a
   app.add({ id: GPT, kind: 'chatgpt', archived: true });
   await sendPrompt(app, 'chatgpt', GPT, 'Question', fast);
   assert.deepEqual(app.archiving, [{ id: GPT, kind: 'chatgpt', archived: false }]);
+});
+
+test('a send whose outcome is unknown is never repeated', async () => {
+  const app = new FakeApp();
+  app.add({ id: GPT, kind: 'chatgpt' });
+  app.listAfterMs = 50;
+  app.lostAnswer = new AcbError('PROTOCOL', 'The connection to the desktop app broke');
+  await assert.rejects(
+    sendPrompt(app, 'chatgpt', GPT, 'Question', fast),
+    (error) => code('PROTOCOL')(error) && /may have been sent/.test((error as Error).message),
+  );
+  app.lostAnswer = null;
+  const again = await sendPrompt(app, 'chatgpt', GPT, 'Question', fast);
+  assert.equal(app.sent.length, 1);
+  assert.equal(again.alreadySent, true);
+  assert.equal(again.turn?.prompt, 'Question');
+});
+
+test('a message the app refused can be sent again', async () => {
+  const app = new FakeApp();
+  app.add({ id: GPT, kind: 'chatgpt' });
+  app.refuse = new AcbError('FAILED', 'Rate limited', { refused: true });
+  await assert.rejects(sendPrompt(app, 'chatgpt', GPT, 'Question', fast), code('FAILED'));
+  app.refuse = null;
+  const again = await sendPrompt(app, 'chatgpt', GPT, 'Question', fast);
+  assert.equal(again.alreadySent, false);
+  assert.equal(app.sent.length, 1);
 });

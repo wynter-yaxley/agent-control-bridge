@@ -1,7 +1,9 @@
 ﻿# Windows helper for agent-control-bridge, driven by src/helper.ts.
 # One JSON request per stdin line, one JSON response per stdout line:
 #   {"op":"pipe-owner","path":"\\.\pipe\..."} -> {"ok":true,"isApp":bool}
-#   {"op":"transcript","title":"..."}          -> {"ok":true,"found":bool,"busy":bool,"nodes":[{"type","name"}]}
+#   {"op":"foreground"}                        -> {"ok":true,"window":handle}
+#   {"op":"give-back","window":handle}         -> {"ok":true,"restored":bool}
+#   {"op":"transcript","title":"..."}          -> {"ok":true,"found":bool,"busy":bool,"nodes":[{"type","name","label"}]}
 #   {"op":"compose","prompt":"..."}            -> {"ok":true}
 #   failure                                    -> {"ok":false,"code":"WINDOW|BUSY|UNAVAILABLE|INPUT","message":"..."}
 # The ChatGPT window is used through UI Automation patterns only: no keystrokes, no mouse,
@@ -15,6 +17,12 @@ Add-Type -Namespace Acb -Name Win32 -MemberDefinition @'
 [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr window, int command);
 [DllImport("kernel32.dll", SetLastError = true)]
 public static extern bool GetNamedPipeServerProcessId(Microsoft.Win32.SafeHandles.SafePipeHandle pipe, out uint processId);
+[DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr window);
+[DllImport("user32.dll")] public static extern bool IsWindow(IntPtr window);
+[DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+[DllImport("user32.dll")] public static extern bool AttachThreadInput(uint from, uint to, bool attach);
+[DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
 '@
 
 $Names = @{
@@ -58,23 +66,50 @@ function Until([int]$ms, [scriptblock]$probe) {
 
 # Whether the server of a tool pipe is the ChatGPT desktop app: signed by OpenAI and running
 # in this Windows session as this user.
+# A pipe that vanished, did not answer or whose server exited is not the app.
 function PipeOwner($request) {
-  $pipe = [IO.Pipes.NamedPipeClientStream]::new('.', ($request.path -replace '^\\\\\.\\pipe\\', ''), [IO.Pipes.PipeDirection]::InOut)
+  try { return @{ ok = $true; isApp = (IsAppPipe $request.path) } } catch { return @{ ok = $true; isApp = $false } }
+}
+
+function IsAppPipe([string]$path) {
+  $pipe = [IO.Pipes.NamedPipeClientStream]::new('.', ($path -replace '^\\\\\.\\pipe\\', ''), [IO.Pipes.PipeDirection]::InOut)
   [uint32]$id = 0
   try {
     $pipe.Connect(2000)
-    if (-not [Acb.Win32]::GetNamedPipeServerProcessId($pipe.SafePipeHandle, [ref]$id)) { return @{ ok = $true; isApp = $false } }
+    if (-not [Acb.Win32]::GetNamedPipeServerProcessId($pipe.SafePipeHandle, [ref]$id)) { return $false }
   } finally {
     $pipe.Dispose()
   }
   $server = Get-Process -Id $id
   $signature = Get-AuthenticodeSignature -LiteralPath $server.Path
   $owner = Invoke-CimMethod -InputObject (Get-CimInstance Win32_Process -Filter "ProcessId=$id") -MethodName GetOwnerSid
-  $isApp = $server.SessionId -eq (Get-Process -Id $PID).SessionId -and
+  return [bool]($server.SessionId -eq (Get-Process -Id $PID).SessionId -and
     $owner.Sid -eq [Security.Principal.WindowsIdentity]::GetCurrent().User.Value -and
     $signature.Status -eq 'Valid' -and
-    $signature.SignerCertificate.Subject -match '(^|, )O=("OpenAI OpCo, LLC"|OpenAI)(,|$)'
-  return @{ ok = $true; isApp = [bool]$isApp }
+    $signature.SignerCertificate.Subject -match '(^|, )O=("OpenAI OpCo, LLC"|OpenAI)(,|$)')
+}
+
+function Foreground { return @{ ok = $true; window = [Acb.Win32]::GetForegroundWindow().ToInt64() } }
+
+# Switching pages or opening a new chat can make the app take the foreground. Give it back
+# to `window`, which had it before, but only when it is the app that has it now: a window
+# the user switched to meanwhile is left alone. Attaching to the input of the thread that
+# holds the foreground lets this helper set it without any synthetic input.
+function GiveBack($request) {
+  $target = [IntPtr][long]$request.window
+  if ($target -eq [IntPtr]::Zero -or -not [Acb.Win32]::IsWindow($target)) { return @{ ok = $true; restored = $false } }
+  $app = @(Get-Process -Name ChatGPT -ErrorAction SilentlyContinue | ForEach-Object Id)
+  $taken = Until 300 {
+    $current = [Acb.Win32]::GetForegroundWindow()
+    [uint32]$owner = 0
+    $thread = [Acb.Win32]::GetWindowThreadProcessId($current, [ref]$owner)
+    if ($current -ne $target -and $app -contains [int]$owner) { $thread }
+  }
+  if (-not $taken) { return @{ ok = $true; restored = $false } }
+  $self = [Acb.Win32]::GetCurrentThreadId()
+  [void][Acb.Win32]::AttachThreadInput($self, $taken, $true)
+  try { [void][Acb.Win32]::SetForegroundWindow($target) } finally { [void][Acb.Win32]::AttachThreadInput($self, $taken, $false) }
+  return @{ ok = $true; restored = ([Acb.Win32]::GetForegroundWindow() -eq $target) }
 }
 
 # The app's top-level windows. A minimized window exposes no UI tree, so it is restored
@@ -104,7 +139,8 @@ function ComposerText($composer) {
   return $text
 }
 
-# Text and buttons of the conversation shown under `title`, in page order.
+# Text and buttons of the conversation shown under `title`, in page order. The role headings
+# before each message are screen-reader-only (`sr-only`), which tells them from message text.
 function Transcript($request) {
   $pages = @(foreach ($window in AppWindows) {
     $document = Find $window 'Document'
@@ -117,7 +153,9 @@ function Transcript($request) {
   $kinds = [Windows.Automation.OrCondition]::new((Condition 'Text'), (Condition 'Button'))
   $nodes = @(foreach ($node in $scope.FindAll($Descendants, $kinds)) {
     $current = $node.Current
-    if ($current.Name) { @{ type = $current.ControlType.ProgrammaticName.Substring(12); name = $current.Name } }
+    if ($current.Name) {
+      @{ type = $current.ControlType.ProgrammaticName.Substring(12); name = $current.Name; label = $current.ClassName -match '(^| )sr-only( |$)' }
+    }
   })
   return @{ ok = $true; found = $true; busy = [bool](Find $pages[0] 'Button' $Names.Stop); nodes = $nodes }
 }
@@ -171,6 +209,8 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
     $request = $line | ConvertFrom-Json
     $response = switch ($request.op) {
       'pipe-owner' { PipeOwner $request }
+      'foreground' { Foreground }
+      'give-back' { GiveBack $request }
       'transcript' { Transcript $request }
       'compose' { Compose $request }
       default { Fail 'INPUT' "Unknown operation: $($request.op)" }

@@ -2,11 +2,11 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { type Sent, sendPrompt, type WaitOptions, waitForTurn } from './conversation.ts';
 import type { App, Inventory, ThreadSummary } from './desktop.ts';
 import { AcbError } from './errors.ts';
-import type { WindowsHelper } from './helper.ts';
-import { type Conversation, normalize, opensWith, type Turn, toConversation } from './turns.ts';
+import { READ_TIMEOUT_MS, type WindowsHelper } from './helper.ts';
+import { type Conversation, normalize, opensWith, promptOf, type Turn, toConversation } from './turns.ts';
 
 /** The page operations of WindowsHelper; tests substitute them. */
-export type Page = Pick<WindowsHelper, 'run' | 'readReply' | 'startChat'>;
+export type Page = Pick<WindowsHelper, 'run' | 'keepingForeground' | 'readReply' | 'startChat'>;
 
 /** A finished turn whose reply could not be read from the page keeps `replyOnPage` and says why. */
 export interface PageRead {
@@ -34,7 +34,7 @@ export async function readGpt(
   const conversation = toConversation(read);
   const newest = conversation.turns.at(-1);
   if (options.fromPage && !options.cursor && newest?.replyOnPage && newest.status === 'completed') {
-    newest.reply = await pageReply(app, page, conversationId, newest);
+    newest.reply = await pageReply(app, page, conversationId, newest, Date.now() + READ_TIMEOUT_MS);
     newest.replyOnPage = false;
   }
   return conversation;
@@ -48,7 +48,9 @@ export async function sendGpt(
   options: WaitOptions & { wait: boolean },
 ): Promise<Sent & PageRead> {
   const sent = await sendPrompt(app, 'chatgpt', conversationId, prompt, options);
-  return sent.turn ? { ...sent, ...(await withPageReply(app, page, conversationId, sent.turn)) } : sent;
+  return sent.turn
+    ? { ...sent, ...(await withPageReply(app, page, conversationId, sent.turn, options.deadline)) }
+    : sent;
 }
 
 /**
@@ -68,14 +70,16 @@ export async function createGpt(
   const conversationId = await page.run(async () => {
     const known = chatgptThreads(await app.listThreads());
     if (!known.length) throw new AcbError('WINDOW', 'Start one ChatGPT conversation in the desktop app first');
-    await app.show(known[0].id);
-    await page.startChat(prompt);
+    await page.keepingForeground(async () => {
+      await app.show(known[0].id);
+      await page.startChat(prompt);
+    });
     return recognize(app, new Set(known.map((thread) => thread.id)), prompt);
   });
   const turn = await waitForTurn(app, conversationId, prompt, { after: undefined }, options);
   // ChatGPT names a new conversation after its first reply, so the title is set afterwards.
   if (request.title) await setTitle(app, conversationId, request.title);
-  const read = await withPageReply(app, page, conversationId, turn);
+  const read = await withPageReply(app, page, conversationId, turn, options.deadline);
   const { title } = await app.readThread(conversationId, { outputs: false });
   return { conversationId, title, ...read };
 }
@@ -130,10 +134,11 @@ async function withPageReply(
   page: Page,
   conversationId: string,
   turn: Turn,
+  deadline: number,
 ): Promise<{ turn: Turn } & PageRead> {
   if (!turn.replyOnPage) return { turn };
   try {
-    return { turn: { ...turn, reply: await pageReply(app, page, conversationId, turn), replyOnPage: false } };
+    return { turn: { ...turn, reply: await pageReply(app, page, conversationId, turn, deadline), replyOnPage: false } };
   } catch (error) {
     if (!(error instanceof AcbError)) throw error;
     return { turn, pageError: `${error.message}. Read the reply later with acb_gpt_read and page: true.` };
@@ -141,26 +146,51 @@ async function withPageReply(
 }
 
 /**
- * Reads the reply of `turn` from the page. The turn must be the conversation's newest,
- * finished one before and after reading, and the page's newest message must be its prompt.
+ * Reads the reply of `turn` from the page, within `deadline`. The page shows no conversation
+ * ID, so the conversation is recognized by its title and the turn by its prompt: the title
+ * must be unique among the app's ChatGPT conversations, the prompt must differ from the one
+ * before it, and the turn must be the newest, finished one before and after reading.
  */
-async function pageReply(app: App, page: Page, conversationId: string, turn: Turn): Promise<string> {
+async function pageReply(app: App, page: Page, conversationId: string, turn: Turn, deadline: number): Promise<string> {
   if (!turn.prompt || turn.truncated) {
     throw new AcbError('WINDOW', 'This prompt is too long to be matched on the page', { conversationId });
   }
   const prompt = turn.prompt;
+  const read = await app.readThread(conversationId, { turns: 2 });
+  const previous = read.turns[1] && promptOf(read.turns[1]);
+  if (previous?.text === prompt) {
+    throw new AcbError('WINDOW', 'The same prompt was sent twice in a row; the page cannot tell its replies apart', {
+      conversationId,
+    });
+  }
+  const namesakes = chatgptThreads(await app.listThreads()).filter(
+    (thread) => thread.title === read.title && thread.id !== conversationId,
+  );
+  if (namesakes.length) {
+    throw new AcbError(
+      'WINDOW',
+      'Another ChatGPT conversation has the same title; rename one to read replies from the page',
+      {
+        conversationId,
+      },
+    );
+  }
   const newest = async () => {
-    const read = await app.readThread(conversationId, { outputs: false });
-    const current = read.turns[0];
+    const current = (await app.readThread(conversationId, { outputs: false })).turns[0];
     if (current?.id !== turn.turnId || current.status !== 'completed') {
       throw new AcbError('BUSY', 'The conversation has moved on; read it again', { conversationId });
     }
-    return read.title;
   };
-  return page.run(async () => {
-    await app.show(conversationId);
-    const reply = await page.readReply(await newest(), prompt);
-    await newest();
-    return reply;
-  });
+  return page.run(() =>
+    page.keepingForeground(async () => {
+      const left = Math.min(READ_TIMEOUT_MS, deadline - Date.now());
+      if (left < 1000)
+        throw new AcbError('TIMEOUT', 'No time was left to read the reply from the page', { conversationId });
+      await app.show(conversationId);
+      await newest();
+      const reply = await page.readReply(read.title, prompt, left);
+      await newest();
+      return reply;
+    }),
+  );
 }

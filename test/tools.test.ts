@@ -6,7 +6,13 @@ import { AcbError } from '../src/errors.ts';
 import { WindowsHelper } from '../src/helper.ts';
 import { CODEX, FakeApp, type FakeThread, GPT, userTurn } from './fake-app.ts';
 
-const fast = { timeoutMs: 2000, pollMs: 1 };
+/** Options waiting up to two seconds from the moment they are used. */
+const fast = {
+  get deadline() {
+    return Date.now() + 2000;
+  },
+  pollMs: 1,
+};
 const PAGE_REPLY = '::chatgpt-content-reference{index="0" source_message_id="m1"}';
 const code = (expected: string) => (error: unknown) => error instanceof AcbError && error.code === expected;
 
@@ -26,6 +32,7 @@ function fakePage(app: FakeApp, reply = 'reply from the page'): FakePage {
     reads: [],
     chats: [],
     run: (task) => queue.run(task),
+    keepingForeground: (task) => task(),
     async readReply(title, prompt) {
       this.reads.push({ title, prompt });
       if (!app.shown.length) throw new AcbError('WINDOW', 'nothing shown');
@@ -161,4 +168,18 @@ test('concurrent creations with the same prompt each get their own conversation'
     createGpt(app, page, { prompt: 'Same' }, fast),
   ]);
   assert.notEqual(first.conversationId, second.conversationId);
+});
+
+test('a page cannot tell apart conversations with the same title', async () => {
+  const app = new FakeApp();
+  app.add({ id: GPT, kind: 'chatgpt', title: 'Same', turns: [userTurn('t1', 'Q', PAGE_REPLY)] });
+  app.add({ id: '6adc9087-70c4-83e8-8f06-a3c84ccaa86d', kind: 'chatgpt', title: 'Same' });
+  await assert.rejects(readGpt(app, fakePage(app), GPT, { fromPage: true }), code('WINDOW'));
+  assert.deepEqual(app.shown, []);
+});
+
+test('a page cannot tell apart the replies to the same prompt sent twice in a row', async () => {
+  const app = new FakeApp();
+  app.add({ id: GPT, kind: 'chatgpt', turns: [userTurn('t2', 'Q', PAGE_REPLY), userTurn('t1', 'Q', PAGE_REPLY)] });
+  await assert.rejects(readGpt(app, fakePage(app), GPT, { fromPage: true }), code('WINDOW'));
 });

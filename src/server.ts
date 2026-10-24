@@ -37,7 +37,9 @@ const CREATE = { readOnlyHint: false, destructiveHint: false, idempotentHint: fa
 
 export function createServer({ app, page, version, timeoutMs }: Services): McpServer {
   const server = new McpServer({ name: 'agent-control-bridge', version }, { instructions: INSTRUCTIONS });
-  const waiting = (wait: boolean | undefined) => ({ wait: wait ?? true, timeoutMs });
+  // A send waits for its reply until this deadline; reading the reply from the page fits in it too.
+  const deadline = () => Date.now() + timeoutMs;
+  const waiting = (wait: boolean | undefined) => ({ wait: wait ?? true, deadline: deadline() });
 
   server.registerTool(
     'acb_status',
@@ -75,7 +77,7 @@ export function createServer({ app, page, version, timeoutMs }: Services): McpSe
     },
     (args) =>
       answer(async () => {
-        await page.run(() => app.show(args.id));
+        await page.run(() => page.keepingForeground(() => app.show(args.id)));
         return { shown: args.id };
       }),
   );
@@ -123,7 +125,7 @@ export function createServer({ app, page, version, timeoutMs }: Services): McpSe
       },
       annotations: CREATE,
     },
-    (args) => answer(() => createCodex(app, { ...args, wait: args.wait ?? true }, { timeoutMs })),
+    (args) => answer(() => createCodex(app, { ...args, wait: args.wait ?? true }, { deadline: deadline() })),
   );
 
   server.registerTool(
@@ -172,7 +174,7 @@ export function createServer({ app, page, version, timeoutMs }: Services): McpSe
       inputSchema: { prompt, title: title.optional() },
       annotations: CREATE,
     },
-    (args) => answer(() => createGpt(app, page, args, { timeoutMs })),
+    (args) => answer(() => createGpt(app, page, args, { deadline: deadline() })),
   );
 
   server.registerTool(

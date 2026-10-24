@@ -11,7 +11,7 @@
 An MCP server that lets AI agents use the ChatGPT and Codex conversations of the **ChatGPT desktop app** on your computer: list, read and start conversations, send a message and get the reply.
 
 - **Conversations stay in the app**: the desktop app runs every message itself, so you see each conversation and its progress live in the sidebar.
-- **Hardly in your way**: only "start a ChatGPT conversation" brings the ChatGPT window to the front; ACB never simulates keyboard or mouse input.
+- **Hardly in your way**: only "start a ChatGPT conversation" brings the ChatGPT window to the front, briefly, and ACB hands the foreground back as soon as the message is sent; ACB never simulates keyboard or mouse input.
 - **One tool, one job**: reading, starting and sending are independent and combine as needed.
 - **No duplicate messages**: calling again with the same message after a timeout returns the reply instead of sending it twice.
 
@@ -48,9 +48,10 @@ flowchart LR
 | `acb_gpt_send` | No: the message is sent in the background | Yes: once answered, the conversation is shown to read the reply text |
 | `acb_gpt_read` with `page: true` | No | Yes: the conversation is shown to read the reply text |
 | `acb_open` | No | Yes |
-| **`acb_gpt_create`** | **Yes**: the app activates the ChatGPT window when it opens a new chat. ACB sends no keystrokes, but keys you press during those one or two seconds can land in ChatGPT's composer | Yes |
+| **`acb_gpt_create`** | **Yes, for a second or two**: the app activates the ChatGPT window when it opens a new chat; ACB gives the foreground back to your window as soon as the message is sent. ACB sends no keystrokes, but keys you press during those seconds can land in ChatGPT's composer | Yes |
 
-When the page must be read and the ChatGPT window is minimized, ACB restores it without activating it; the window you are using stays in front.
+- The app occasionally brings its window to the front when it switches pages. ACB then gives the foreground back to your window at once; if you have switched to another program yourself, ACB leaves it alone.
+- When the page must be read and the ChatGPT window is minimized, ACB restores it without activating it; the window you are using stays in front.
 
 ## Requirements
 
@@ -112,6 +113,7 @@ A send waits up to 240 seconds by default. Set the client's tool timeout to 300 
 
 - ChatGPT shows your messages as ordinary user messages.
 - The app's record of a conversation usually keeps only a placeholder for each reply; the text is read from the page. Reading the page needs the ChatGPT window **visible on screen**: behind other windows or partly covered is fine, fully covered (say, by a full-screen video) is not. If the page cannot be read, the send still succeeds; the result marks `replyOnPage` with the reason, and `acb_gpt_read` with `page: true` reads it later.
+- The page shows no conversation ID, so ACB recognizes the turn to read by the conversation's title and the prompt. Two cases therefore cannot be read from the page (`WINDOW`): another ChatGPT conversation has the same title (rename one), or the same prompt was sent twice in a row in this conversation.
 - After the ChatGPT window has been fully covered or minimized for a long time, the app slows down its background page, and a message can take about a minute to go out.
 - If the new-chat page holds a draft you have not sent, starting a ChatGPT conversation is refused rather than overwriting it.
 

@@ -48,6 +48,10 @@ export class FakeApp implements App {
   unavailable: string[] = [];
   /** How long an accepted message takes to appear as a turn. */
   listAfterMs = 0;
+  /** The app refuses the next messages with this error (nothing is sent). */
+  refuse: AcbError | null = null;
+  /** The app takes the next messages but its answer is lost with this error. */
+  lostAnswer: AcbError | null = null;
   answerAfterReads = 1;
   answer: string | ((thread: FakeThread) => void) = 'ok';
   #pending: { thread: FakeThread; reads: number }[] = [];
@@ -103,10 +107,12 @@ export class FakeApp implements App {
 
   async sendMessage(id: string, prompt: string, caller?: string): Promise<void> {
     const thread = this.#get(id);
-    if (thread.archived) throw new AcbError('FAILED', `session ${id} is archived`, { archived: true });
+    if (thread.archived) throw new AcbError('FAILED', `session ${id} is archived`, { refused: true, archived: true });
+    if (this.refuse) throw this.refuse;
     this.sent.push({ id, prompt, ...(caller ? { caller } : {}) });
-    if (!this.listAfterMs) return this.#start(thread, prompt);
-    void delay(this.listAfterMs).then(() => this.#start(thread, prompt));
+    if (!this.listAfterMs) this.#start(thread, prompt);
+    else void delay(this.listAfterMs).then(() => this.#start(thread, prompt));
+    if (this.lostAnswer) throw this.lostAnswer;
   }
 
   async createThread(args: { prompt: string; title?: string; target: CreateTarget }): Promise<string> {
