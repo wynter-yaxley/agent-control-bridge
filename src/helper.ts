@@ -62,15 +62,26 @@ function textOf(nodes: PageNode[]): string {
 }
 
 /**
- * Whether a message reads the same as one shown on the page. The page shows the `inline code`
- * of a user message without its backticks and may lay out whitespace differently.
+ * Whether a message reads the same as one shown on the page, which keeps a user message as
+ * written except for the backticks around its `inline code`.
  */
 export function samePrompt(shown: string, message: string): boolean {
-  const plain = (text: string) =>
-    normalize(text)
-      .replace(/`([^`\n]+)`/g, '$1')
-      .replace(/\s+/g, ' ');
+  const plain = (text: string) => normalize(text).replace(/`([^`\n]+)`/g, '$1');
   return plain(shown) === plain(message);
+}
+
+/**
+ * The messages the page shows after `known`, the newest messages known to be in the
+ * conversation; undefined when the page does not show `known` exactly once.
+ */
+export function shownAfter(state: PageState, known: string[]): string[] | undefined {
+  if (!known.length) return undefined;
+  const ends: number[] = [];
+  for (let end = known.length; end <= state.prompts.length; end++) {
+    const window = { ...state, prompts: state.prompts.slice(0, end) };
+    if (showsPrompts(window, known)) ends.push(end);
+  }
+  return ends.length === 1 ? state.prompts.slice(ends[0]) : undefined;
 }
 
 /** Whether the page's user messages end with `prompts` (are exactly `prompts` with `whole`). */
@@ -162,14 +173,17 @@ export class WindowsHelper {
 
   /**
    * The reply after `prompts` from the page showing `title`, once ChatGPT has finished it. The
-   * page's user messages must end with `prompts` (see replyTo).
+   * page's user messages must end with `prompts` (see replyTo) on two reads in a row: a page
+   * just asked to show a conversation can show what it kept of it for a moment.
    */
   async readReply(title: string, prompts: string[], timeoutMs = READ_TIMEOUT_MS): Promise<string> {
     const deadline = Date.now() + timeoutMs;
+    let previous: string | null = null;
     for (;;) {
       const state = await this.pageState(title);
       const reply = replyTo(state, prompts);
-      if (reply !== null) return reply;
+      if (reply !== null && reply === previous) return reply;
+      previous = reply;
       if (Date.now() >= deadline) throw new AcbError('WINDOW', missing(state, prompts));
       await delay(500);
     }

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { type PageNode, readPage, replyTo, samePrompt } from '../src/helper.ts';
+import { type PageNode, readPage, replyTo, samePrompt, shownAfter } from '../src/helper.ts';
 
 const text = (name: string): PageNode => ({ type: 'Text', name });
 const label = (name: string): PageNode => ({ type: 'Text', name, label: true });
@@ -76,10 +76,21 @@ test('message text that equals a role heading is still message text', () => {
   });
 });
 
-test('a prompt matches the page despite its inline code and line breaks, not despite other changes', () => {
-  assert.ok(samePrompt('Use ls -a, then\nstop.', 'Use `ls -a`, then stop.'));
+test('a prompt matches the page despite the backticks of its inline code, not despite other changes', () => {
+  assert.ok(samePrompt('Use ls -a, then\nstop.\r\n', 'Use `ls -a`, then\nstop.'));
   assert.ok(!samePrompt('Use ls -a, then stop.', 'Use `ls -l`, then stop.'));
   assert.ok(!samePrompt('ab', 'a b'));
+  assert.ok(!samePrompt('print("a b")', 'print("a  b")'));
+  assert.ok(!samePrompt('a b', 'a\nb'));
+});
+
+test('the messages after the known ones are found only where the page shows them once', () => {
+  const page = { busy: false, prompts: ['X', 'Q', 'R'], reply: '', complete: false };
+  assert.deepEqual(shownAfter(page, ['X']), ['Q', 'R']);
+  assert.deepEqual(shownAfter(page, ['Q', 'R']), []);
+  assert.equal(shownAfter(page, ['Y']), undefined);
+  assert.equal(shownAfter(page, []), undefined);
+  assert.equal(shownAfter({ ...page, prompts: ['Q', 'R', 'Q', 'R'] }, ['Q', 'R']), undefined, 'twice');
 });
 
 test('a reply is taken only from a finished page ending with the expected prompts', () => {

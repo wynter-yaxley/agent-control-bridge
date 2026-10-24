@@ -169,28 +169,38 @@ async function decide(app: App, kind: Kind, threadId: string, text: string, opti
 
 /**
  * The turns of messages ACB sent that were answered on the page but that the app does not list
- * yet, oldest first, provided the app's newest turn is still `newest`, the one before them.
+ * yet, oldest first, and the turn they follow; undefined when there are none.
  */
-export function unlistedAnswers(app: App, threadId: string, newest: string | undefined): Promise<Turn[]> {
+export function unlistedAnswers(
+  app: App,
+  threadId: string,
+): Promise<{ after: string | undefined; answers: Turn[] } | undefined> {
   return exclusive(app, threadId, async () => {
     await reconcile(app, threadId);
     const chain = stateOf(app).chains.get(threadId);
-    if (!chain || chain.after !== newest) return [];
-    return chain.messages.flatMap((message) => (message.answer ? [message.answer] : []));
+    const answers = chain?.messages.flatMap((message) => (message.answer ? [message.answer] : [])) ?? [];
+    return chain && answers.length ? { after: chain.after, answers } : undefined;
   });
 }
 
 /**
  * Drops the messages the app now lists: its turns after the chain's start are matched to the
- * messages in order, skipping turns of other senders. Whether any was dropped.
+ * messages in order, skipping turns of other senders. When the app no longer returns the
+ * chain's start, more turns followed it than the app returns and the whole chain is dropped:
+ * its messages can no longer be told apart. Whether any was dropped.
  */
 async function reconcile(app: App, threadId: string): Promise<boolean> {
   const { chains } = stateOf(app);
   const chain = chains.get(threadId);
   if (!chain) return false;
+  const turns = await turnsAfter(app, threadId, chain.after);
+  if (!turns) {
+    chains.delete(threadId);
+    return true;
+  }
   let listed = 0;
   let through: string | undefined;
-  for (const turn of await turnsAfter(app, threadId, chain.after)) {
+  for (const turn of turns) {
     const message = chain.messages[listed];
     if (message && opensWith(turn, message.prompt)) {
       listed++;
@@ -247,18 +257,18 @@ async function deliver(
 }
 
 /**
- * The turns after turn `after` (all when undefined), oldest first, read in full. It looks at
- * most ten turns back.
+ * The turns after turn `after` (all when undefined), oldest first, read in full; undefined when
+ * the app does not return turn `after` among the newest ten (for ChatGPT, it returns five).
  */
-async function turnsAfter(app: App, threadId: string, after: string | undefined): Promise<AppTurn[]> {
+async function turnsAfter(app: App, threadId: string, after: string | undefined): Promise<AppTurn[] | undefined> {
   const read = async (turns: number) => {
     const page = await app.readThread(threadId, { turns });
-    const end = after === undefined ? -1 : page.turns.findIndex((turn) => turn.id === after);
+    const end = after === undefined ? page.turns.length : page.turns.findIndex((turn) => turn.id === after);
     return { page, end };
   };
   let { page, end } = await read(3);
-  if (end < 0 && page.nextCursor) ({ page, end } = await read(10));
-  return (end < 0 ? page.turns : page.turns.slice(0, end)).reverse();
+  if ((after === undefined || end < 0) && page.nextCursor) ({ page, end } = await read(10));
+  return end < 0 ? undefined : page.turns.slice(0, end).reverse();
 }
 
 /** Turn `turnId`, read in full. It looks at most ten turns back. */
@@ -286,7 +296,7 @@ export async function waitForTurn(
     'turnId' in match
       ? () => turnById(app, threadId, match.turnId)
       : async () =>
-          (await turnsAfter(app, threadId, match.after)).filter((turn) => opensWith(turn, prompt))[match.occurrence];
+          (await turnsAfter(app, threadId, match.after))?.filter((turn) => opensWith(turn, prompt))[match.occurrence];
   for (let poll = 0; ; poll++) {
     const confirmed = await early?.();
     if (confirmed) return confirmed;

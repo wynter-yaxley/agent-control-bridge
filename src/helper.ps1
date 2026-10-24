@@ -4,6 +4,7 @@
 #   {"op":"foreground"}                        -> {"ok":true,"window":handle}
 #   {"op":"give-back","window":handle}         -> {"ok":true,"taken":bool,"restored":bool}
 #   {"op":"transcript","title":"..."}          -> {"ok":true,"found":bool,"busy":bool,"nodes":[{"type","name","label"}]}
+#     (found only in a window that shows on screen)
 #     (the text between two buttons or role headings comes as one Text, with its line breaks)
 #   {"op":"compose","prompt":"..."}            -> {"ok":true}
 #   failure                                    -> {"ok":false,"code":"WINDOW|BUSY|UNAVAILABLE|INPUT","message":"..."}
@@ -24,6 +25,82 @@ public static extern bool GetNamedPipeServerProcessId(Microsoft.Win32.SafeHandle
 [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
 [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint from, uint to, bool attach);
 [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+'@
+
+# Whether a window shows on screen. Chromium stops updating the page of a window that is
+# minimized, cloaked (another virtual desktop) or fully covered; this follows its occlusion
+# rules: only visible, opaque, rectangular windows above it in z-order cover it.
+Add-Type -Language CSharp -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+namespace Acb {
+  public static class Screen {
+    [StructLayout(LayoutKind.Sequential)] struct Rect { public int Left, Top, Right, Bottom; }
+    [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr window, uint command);
+    [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr window);
+    [DllImport("user32.dll")] static extern bool IsIconic(IntPtr window);
+    [DllImport("user32.dll")] static extern int GetWindowLong(IntPtr window, int index);
+    [DllImport("user32.dll")] static extern bool GetLayeredWindowAttributes(IntPtr window, out uint key, out byte alpha, out uint flags);
+    [DllImport("user32.dll")] static extern int GetWindowRgn(IntPtr window, IntPtr region);
+    [DllImport("user32.dll")] static extern int GetSystemMetrics(int index);
+    [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr window, int attribute, out int value, int size);
+    [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr window, int attribute, out Rect value, int size);
+    [DllImport("gdi32.dll")] static extern IntPtr CreateRectRgn(int left, int top, int right, int bottom);
+    [DllImport("gdi32.dll")] static extern int CombineRgn(IntPtr target, IntPtr first, IntPtr second, int mode);
+    [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr handle);
+    const uint Above = 3;
+    const int And = 1, Diff = 4, Empty = 1, Error = 0;
+
+    public static bool Shows(IntPtr window) {
+      Rect bounds;
+      if (!Showing(window) || !Bounds(window, out bounds)) return false;
+      IntPtr visible = CreateRectRgn(bounds.Left, bounds.Top, bounds.Right, bounds.Bottom);
+      int x = GetSystemMetrics(76), y = GetSystemMetrics(77);
+      int left = Clip(visible, x, y, x + GetSystemMetrics(78), y + GetSystemMetrics(79), And);
+      for (IntPtr other = GetWindow(window, Above); other != IntPtr.Zero && left != Empty && left != Error; other = GetWindow(other, Above)) {
+        Rect cover;
+        if (Covers(other) && Bounds(other, out cover)) left = Clip(visible, cover.Left, cover.Top, cover.Right, cover.Bottom, Diff);
+      }
+      DeleteObject(visible);
+      return left != Empty && left != Error;
+    }
+
+    static int Clip(IntPtr visible, int left, int top, int right, int bottom, int mode) {
+      IntPtr region = CreateRectRgn(left, top, right, bottom);
+      int result = CombineRgn(visible, visible, region, mode);
+      DeleteObject(region);
+      return result;
+    }
+
+    static bool Showing(IntPtr window) {
+      int cloaked;
+      return IsWindowVisible(window) && !IsIconic(window) &&
+        !(DwmGetWindowAttribute(window, 14, out cloaked, 4) == 0 && cloaked != 0);
+    }
+
+    static bool Covers(IntPtr window) {
+      if (!Showing(window)) return false;
+      int style = GetWindowLong(window, -20);
+      // Click-through and tool windows, and layered windows that are not opaque, do not cover.
+      if ((style & 0x20) != 0 || (style & 0x80) != 0) return false;
+      if ((style & 0x80000) != 0) {
+        uint key, flags;
+        byte alpha;
+        if (!GetLayeredWindowAttributes(window, out key, out alpha, out flags)) return false;
+        if (((flags & 2) != 0 && alpha < 255) || (flags & 1) != 0) return false;
+      }
+      IntPtr shape = CreateRectRgn(0, 0, 0, 0);
+      int shaped = GetWindowRgn(window, shape);
+      DeleteObject(shape);
+      return shaped == Error;
+    }
+
+    static bool Bounds(IntPtr window, out Rect rect) {
+      return DwmGetWindowAttribute(window, 9, out rect, Marshal.SizeOf(typeof(Rect))) == 0 &&
+        rect.Right > rect.Left && rect.Bottom > rect.Top;
+    }
+  }
+}
 '@
 
 $Names = @{
@@ -147,10 +224,13 @@ function ComposerText($composer) {
 function Transcript($request) {
   $pages = @(foreach ($window in AppWindows) {
     $document = Find $window 'Document'
-    if ($document -and $document.Current.Name -eq $request.title) { $document }
+    if ($document -and $document.Current.Name -eq $request.title) { @{ Window = $window; Document = $document } }
   })
   if ($pages.Count -eq 0) { return @{ ok = $true; found = $false } }
   if ($pages.Count -gt 1) { Fail 'WINDOW' 'Several windows show a conversation with this title' }
+  # The page of a window that does not show on screen may be out of date.
+  if (-not [Acb.Screen]::Shows([IntPtr]$pages[0].Window.Current.NativeWindowHandle)) { return @{ ok = $true; found = $false } }
+  $pages = @($pages[0].Document)
   $scope = Find $pages[0] 'Group' $Names.Conversation
   if (-not $scope) { $scope = $pages[0] }
   $cache = [Windows.Automation.CacheRequest]::new()

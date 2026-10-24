@@ -303,6 +303,18 @@ test('a page busy with a message the app does not list yet refuses a new one', a
   assert.deepEqual(app.sent, []);
 });
 
+test('a page two messages ahead of the app still tells that ChatGPT is busy, or that the prompt was sent', async () => {
+  const app = new FakeApp();
+  app.add({ id: GPT, kind: 'chatgpt', title: 'Chat', turns: [userTurn('t1', 'X', PAGE_REPLY)] });
+  const page = fakePage(app);
+  page.view = () => ({ busy: true, prompts: ['X', 'Q', 'R'], reply: '', complete: false });
+  await assert.rejects(sendGpt(app, page, GPT, 'Other', { ...fast, wait: true }), code('BUSY'));
+  page.view = () => showing(['X', 'Q', 'R'], 'reply to R');
+  const sent = await sendGpt(app, page, GPT, 'R', { ...fast, wait: true });
+  assert.deepEqual([sent.alreadySent, sent.turn?.reply], [true, 'reply to R']);
+  assert.deepEqual(app.sent, []);
+});
+
 test('a prompt the page shows as its newest message is not sent again', async () => {
   const app = new FakeApp();
   app.add({ id: GPT, kind: 'chatgpt', title: 'Chat', turns: [userTurn('t1', 'Earlier', PAGE_REPLY)] });
@@ -327,4 +339,28 @@ test('a reply confirmed on the page is read back before the app lists it', async
     ],
   );
   assert.equal(page.reads.length, 0);
+});
+
+test('answers confirmed on the page follow the turns the app lists, also once it lists some of them', async () => {
+  const app = lateConversation();
+  const thread = app.threads.get(GPT) as FakeThread;
+  const page = fakePage(app);
+  answeringPage(app, page, 'A', 'reply to A');
+  await sendGpt(app, page, GPT, 'A', { ...fast, wait: true });
+  answeringPage(app, page, 'B', 'reply to B');
+  await sendGpt(app, page, GPT, 'B', { ...fast, wait: true });
+  // The app lists A, but only right after the first read of acb_gpt_read.
+  app.afterRead = () => {
+    app.afterRead = null;
+    thread.turns.unshift(userTurn('a', 'A', PAGE_REPLY));
+  };
+  const read = await readGpt(app, page, GPT, { turns: 3 });
+  assert.deepEqual(
+    read.turns.map((turn) => [turn.turnId, turn.prompt]),
+    [
+      ['t1', 'Earlier'],
+      ['a', 'A'],
+      [null, 'B'],
+    ],
+  );
 });

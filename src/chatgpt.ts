@@ -2,7 +2,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { type Live, type Sent, sendPrompt, unlistedAnswers, type WaitOptions, waitForTurn } from './conversation.ts';
 import type { App, AppTurn, Inventory, ThreadSummary } from './desktop.ts';
 import { AcbError } from './errors.ts';
-import { READ_TIMEOUT_MS, replyTo, samePrompt, showsPrompts, type WindowsHelper } from './helper.ts';
+import { READ_TIMEOUT_MS, replyTo, samePrompt, shownAfter, type WindowsHelper } from './helper.ts';
 import { type Conversation, normalize, opensWith, promptOf, type Turn, toConversation } from './turns.ts';
 
 /** How long the page may take to show a conversation it was asked to show. */
@@ -22,8 +22,8 @@ export async function listGpt(app: App, options: { limit?: number } = {}): Promi
 
 /**
  * The app keeps most ChatGPT replies only on the page. With `fromPage`, the newest reply is
- * read there: the conversation is shown in the app (the window is not activated). A turn sent
- * through ACB and answered on the page comes last until the app lists it.
+ * read there: the conversation is shown in the app (the window is not activated). Turns sent
+ * through ACB and answered on the page come last until the app lists them.
  */
 export async function readGpt(
   app: App,
@@ -31,16 +31,38 @@ export async function readGpt(
   conversationId: string,
   options: { turns?: number; cursor?: string; fromPage?: boolean } = {},
 ): Promise<Conversation> {
-  const read = await app.readThread(conversationId, options);
-  if (read.kind !== 'chatgpt') throw new AcbError('INPUT', 'This is a Codex conversation: use acb_codex_read');
-  const conversation = toConversation(read);
-  if (!options.cursor) conversation.turns.push(...(await unlistedAnswers(app, conversationId, read.turns[0]?.id)));
+  const conversation = await withUnlisted(app, conversationId, options);
   const newest = conversation.turns.at(-1);
   if (options.fromPage && !options.cursor && newest?.replyOnPage && newest.status === 'completed') {
     newest.reply = await pageReply(app, page, conversationId, newest, Date.now() + READ_TIMEOUT_MS);
     newest.replyOnPage = false;
   }
   return conversation;
+}
+
+/**
+ * The conversation as the app lists it, followed by the answered turns it does not list yet
+ * when it still ends with the turn they follow. The answers are taken first: matching them to
+ * the app's list can find that it has moved on, and the conversation is then read again.
+ */
+async function withUnlisted(
+  app: App,
+  conversationId: string,
+  options: { turns?: number; cursor?: string },
+): Promise<Conversation> {
+  for (let attempt = 1; ; attempt++) {
+    const unlisted = options.cursor ? undefined : await unlistedAnswers(app, conversationId);
+    const read = await app.readThread(conversationId, options);
+    if (read.kind !== 'chatgpt') throw new AcbError('INPUT', 'This is a Codex conversation: use acb_codex_read');
+    const conversation = toConversation(read);
+    if (!unlisted) return conversation;
+    if (read.turns[0]?.id === unlisted.after) {
+      conversation.turns.push(...unlisted.answers);
+      return conversation;
+    }
+    // The app has listed more since; another sender's turn can keep it from ending there.
+    if (attempt === 3) return conversation;
+  }
 }
 
 export async function sendGpt(
@@ -64,11 +86,12 @@ export async function sendGpt(
  * user messages are exactly those it showed before, plus `prompt` unless that was the newest
  * already, and the reply is finished: a page that is not current cannot come to show that.
  *
- * Whether ChatGPT is busy, or the prompt already sent, is taken from the page only when it is
- * one message ahead of what is known: the prompts the app lists, then `unlisted`, the messages
- * ACB sent that it does not list yet. Undefined when the page cannot serve: the window does not
- * show the conversation, or another conversation has the same title. The app's list remains
- * the fallback.
+ * The page also tells what the app does not list yet: the messages it shows after what is
+ * known (the prompts the app lists, then `unlisted`, the messages ACB sent that the app does
+ * not list yet). If there are any, ChatGPT being busy, or the newest being `prompt`, is taken
+ * from the page; a page that does not show what is known exactly once tells nothing. Undefined
+ * when the page cannot serve: the window does not show the conversation on screen, or another
+ * conversation has the same title. The app's list remains the fallback.
  */
 async function watchPage(
   app: App,
@@ -85,14 +108,9 @@ async function watchPage(
       return page.pageState(read.title, SHOW_MS);
     });
     if (!before) return undefined;
-    const known = [...listedPrompts(read.turns), ...unlisted];
-    const newest = before.prompts.at(-1);
-    const ahead =
-      known.length > 0 &&
-      newest !== undefined &&
-      showsPrompts({ ...before, prompts: before.prompts.slice(0, -1) }, known) &&
-      !repeats([...known, newest]);
-    const shown = ahead && samePrompt(newest, prompt);
+    const newer = shownAfter(before, [...listedPrompts(read.turns), ...unlisted]) ?? [];
+    const ahead = newer.length > 0;
+    const shown = ahead && samePrompt(newer[newer.length - 1], prompt);
     const expected = shown ? before.prompts : [...before.prompts, prompt];
     const reply = () =>
       page

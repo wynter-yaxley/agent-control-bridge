@@ -260,3 +260,17 @@ test('a prompt sent again is matched to its own turn, not to the earlier one', a
   assert.deepEqual([again.alreadySent, again.turn?.reply], [true, 'reply to the second A']);
   assert.equal(app.sent.length, 3);
 });
+
+test('a turn is not looked for among turns that may not follow the one it was sent after', async () => {
+  const app = new FakeApp();
+  const thread = app.add({ id: GPT, kind: 'chatgpt', turns: [userTurn('t0', 'X')] });
+  app.listAfterMs = 60_000;
+  const sending = sendPrompt(app, 'chatgpt', GPT, 'Q', { ...fast, deadline: Date.now() + 300 });
+  while (!app.sent.length) await delay(1);
+  // Q, then ten more turns, the last of them Q again: t0 is no longer among the newest ten.
+  const later = ['Q', ...Array.from({ length: 9 }, (_, index) => `other ${index}`), 'Q'];
+  thread.turns.unshift(
+    ...later.map((prompt, index) => userTurn(`t${index + 1}`, prompt, `reply of t${index + 1}`)).reverse(),
+  );
+  await assert.rejects(sending, code('TIMEOUT'));
+});
