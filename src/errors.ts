@@ -1,17 +1,40 @@
-export type ErrorCode = 'FOCUS_REQUIRED' | 'AUTH' | 'INPUT' | 'CONFIG' | 'IPC_CONFIG' | 'OWNER' | 'PROVENANCE' | 'STATE' | 'CONFLICT' | 'DEPENDENCY' | 'UNSUPPORTED' | 'TIMEOUT' | 'EXECUTION' | 'IO';
-export const ERROR_CODES: readonly string[] = ['FOCUS_REQUIRED', 'AUTH', 'INPUT', 'CONFIG', 'IPC_CONFIG', 'OWNER', 'PROVENANCE', 'STATE', 'CONFLICT', 'DEPENDENCY', 'UNSUPPORTED', 'TIMEOUT', 'EXECUTION', 'IO'];
-export class BridgeError extends Error {
+/**
+ * Error codes returned to MCP clients. Each code has one meaning and one remedy,
+ * documented in the README and the agent skill.
+ */
+export type ErrorCode =
+  /** An argument is invalid. Fix the call. */
+  | 'INPUT'
+  /** The desktop app is not running or not reachable, or this is not Windows. */
+  | 'UNAVAILABLE'
+  /** The conversation does not exist. */
+  | 'NOT_FOUND'
+  /** The conversation is answering another message. Wait, then read it. */
+  | 'BUSY'
+  /** Codex waits for an approval or an answer from the user in the desktop app. */
+  | 'NEEDS_USER'
+  /** The reply is still pending. Read the conversation later; do not resend. */
+  | 'TIMEOUT'
+  /** The turn failed or was interrupted in the app. */
+  | 'FAILED'
+  /** The ChatGPT window could not be found, read or used. */
+  | 'WINDOW'
+  /** The app answered in an unexpected way, usually after an app update. */
+  | 'PROTOCOL';
+
+export class AcbError extends Error {
   readonly code: ErrorCode;
-  readonly details?: Record<string, unknown>;
-  constructor(code: ErrorCode, message: string, details?: Record<string, unknown>) { super(message); this.name = 'BridgeError'; this.code = code; this.details = details; }
+  readonly details: Record<string, unknown>;
+
+  constructor(code: ErrorCode, message: string, details: Record<string, unknown> = {}) {
+    super(message);
+    this.name = 'AcbError';
+    this.code = code;
+    this.details = details;
+  }
 }
-export const asBridgeError = (error: unknown): BridgeError => error instanceof BridgeError ? error : new BridgeError('IO', error instanceof Error ? error.message.slice(0, 300) : 'Operation failed');
-/** OS runtime variables only for helper processes; no tokens or arbitrary user variables. */
-export function controlledProcessEnv(): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const key of ['PATH', 'Path', 'SystemRoot', 'WINDIR', 'ComSpec', 'TEMP', 'TMP', 'HOME', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'APPDATA', 'LOCALAPPDATA', 'XDG_CONFIG_HOME', 'ProgramFiles', 'ProgramFiles(x86)', 'ProgramW6432', 'ProgramData', 'ALLUSERSPROFILE', 'USERNAME', 'USERDOMAIN'])
-    if (process.env[key] !== undefined) env[key] = process.env[key]!;
-  // Built-in cmdlets must resolve from OS-owned modules.
-  if (process.platform === 'win32') env.PSModulePath = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\Modules';
-  return env;
+
+export function toAcbError(error: unknown): AcbError {
+  if (error instanceof AcbError) return error;
+  return new AcbError('PROTOCOL', error instanceof Error ? error.message : String(error));
 }

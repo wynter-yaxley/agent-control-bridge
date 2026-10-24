@@ -8,131 +8,167 @@
 
 [中文](README.md)
 
-An MCP server that lets an AI agent use the ChatGPT and Codex conversations of the **ChatGPT desktop app** on your PC: list, search, read and create conversations, send a message and get the real reply.
+An MCP server that lets AI agents use the ChatGPT and Codex conversations of the **ChatGPT desktop app** on your computer: list, read and start conversations, send a message and get the reply.
 
-- **One tool, one job**: reading, searching, creating and sending are independent. There is no fixed workflow.
-- **Background whenever possible**: every Codex operation and every ChatGPT read leaves your windows alone.
-- **Never sends twice**: calling again with the same message after a timeout returns the reply instead of resending.
-- **Runs locally**: ACB itself uploads nothing (messages you send are handled by ChatGPT/Codex under their own terms), reads no credentials, and never grants Codex approvals for you.
+- **Conversations stay in the app**: the desktop app runs every message itself, so you see each conversation and its progress live in the sidebar.
+- **Hardly in your way**: only "start a ChatGPT conversation" brings the ChatGPT window to the front; ACB never simulates keyboard or mouse input.
+- **One tool, one job**: reading, starting and sending are independent and combine as needed.
+- **No duplicate messages**: calling again with the same message after a timeout returns the reply instead of sending it twice.
 
-![Architecture](docs/images/architecture.svg)
+```mermaid
+flowchart LR
+  agent["AI agent<br/>(MCP client)"] -- MCP --> acb[agent-control-bridge]
+  acb -- "the app's tool interface<br/>(local named pipe)" --> app[ChatGPT desktop app]
+  acb -. "reads page text<br/>(UI Automation)" .-> app
+  app --> chatgpt[ChatGPT conversations]
+  app --> codex[Codex conversations]
+```
 
-## What it can do
+## Tools
 
-| Tool | Does | Disturbs you? |
+| Tool | What it does |
+|---|---|
+| `acb_codex_list` | List recent Codex conversations, optionally of one folder |
+| `acb_codex_read` | Read the prompts and replies of a Codex conversation's newest turns |
+| `acb_codex_create` | Start a Codex conversation (in a project or a new folder) with a first message |
+| `acb_codex_send` | Message a Codex conversation, wait until it is done and return the reply |
+| `acb_gpt_list` | List recent ChatGPT conversations |
+| `acb_gpt_read` | Read the prompts and replies of a ChatGPT conversation's newest turns |
+| `acb_gpt_create` | Start a ChatGPT conversation with a first message and return the reply |
+| `acb_gpt_send` | Message a ChatGPT conversation and return the reply |
+| `acb_projects` | List the app's projects |
+| `acb_open` | Show a conversation in the app so you can watch it |
+| `acb_status` | Check that the app can be reached |
+
+## What affects you
+
+| Operation | Takes the foreground and keyboard focus | Switches the page the app shows |
 |---|---|---|
-| `acb_codex_list` | List recent Codex conversations (optionally of one folder) | No |
-| `acb_codex_find` | Search Codex conversations | No |
-| `acb_codex_read` | Read the latest turns of a Codex conversation | No |
-| `acb_codex_create` | Start a Codex conversation in a folder | No |
-| `acb_codex_send` | Send a message to Codex and return its reply | No |
-| `acb_workspace_create` | Create a folder and register it as a Codex project | No |
-| `acb_gpt_list` | List ChatGPT conversations | No |
-| `acb_gpt_read` | Read the latest turns of a ChatGPT conversation | No (opens it to read a reply body) |
-| `acb_gpt_open` | Show a ChatGPT conversation in the app | Switches the shown chat |
-| `acb_gpt_create` | Create and name a ChatGPT conversation | Activates the window and types |
-| `acb_gpt_send` | Send a message to ChatGPT and return its reply | Activates the window and types |
-| `acb_threads` / `acb_projects` | List all sidebar conversations / projects | No |
-| `acb_status` | Self-check: what is missing and how to fix it | No |
+| All Codex tools; listing and reading; `acb_projects`, `acb_status` | No | No |
+| `acb_gpt_send` | No: the message is sent in the background | Yes: once answered, the conversation is shown to read the reply text |
+| `acb_gpt_read` with `page: true` | No | Yes: the conversation is shown to read the reply text |
+| `acb_open` | No | Yes |
+| **`acb_gpt_create`** | **Yes**: the app activates the ChatGPT window when it opens a new chat. ACB sends no keystrokes, but keys you press during those one or two seconds can land in ChatGPT's composer | Yes |
+
+When the page must be read and the ChatGPT window is minimized, ACB restores it without activating it; the window you are using stays in front.
 
 ## Requirements
 
-Windows 10/11, [Node.js](https://nodejs.org/) 24.19+ on Windows, the ChatGPT desktop app (Microsoft Store, includes Codex) signed in and with Codex used at least once, and an MCP client such as Hermes or Claude Desktop. The Codex tools may also work on macOS/Linux with the `codex` command installed (untested).
+- Windows 10 or 11
+- [Node.js](https://nodejs.org/) 24.19 or later, installed on Windows
+- The ChatGPT desktop app (Microsoft Store, includes Codex, October 2026 or later), signed in
+- The app's language set to **Simplified Chinese**: reading the ChatGPT page and starting ChatGPT conversations rely on its control names
+- At least one Codex and one ChatGPT conversation in the app
+- An MCP client such as Claude Desktop, Claude Code or Hermes
 
 ## Install
+
+In PowerShell:
 
 ```powershell
 git clone https://github.com/wynter-yaxley/agent-control-bridge.git
 cd agent-control-bridge
-npm install        # installs and builds
-npm run check      # self-check; prints the client configuration for this machine
+npm install
 ```
+
+`npm install` also builds the server.
 
 ## Connect an MCP client
 
-Add this to your MCP client (with your paths; `npm run check` prints it filled in):
+Add to the client's MCP configuration (use your actual paths):
 
 ```json
 {
   "mcpServers": {
     "acb": {
       "command": "C:\\Program Files\\nodejs\\node.exe",
-      "args": ["D:\\agent-control-bridge\\dist\\mcp.js", "--allow-foreground-input"]
+      "args": ["D:\\agent-control-bridge\\dist\\mcp.js"]
     }
   }
 }
 ```
 
-**Hermes** users can run the `hermes mcp add ...` command printed by `npm run check` and copy [skills/agent-control-bridge](skills/agent-control-bridge/SKILL.md) into Hermes' skills folder (also printed). The skill tells the agent how to use each tool and what to watch out for; other clients can use it as a system prompt.
+Hermes:
 
-Set the client's tool timeout to 300 s or more: a send waits up to 240 s.
+```powershell
+hermes mcp add acb --command "C:\Program Files\nodejs\node.exe" --args "D:\agent-control-bridge\dist\mcp.js"
+```
+
+Then copy [skills/agent-control-bridge](skills/agent-control-bridge/SKILL.md) into Hermes' skills folder. The skill explains every tool and its caveats; other clients can use it as instructions for the agent.
+
+A send waits up to 240 seconds by default. Set the client's tool timeout to 300 seconds or more.
 
 ## Good to know
 
-**`--allow-foreground-input`** lets ACB bring the ChatGPT window to the front and type when you send to or create a ChatGPT conversation.
+**Codex conversations**
 
-- Don't use the keyboard or mouse while it types. If you switch away, ACB stops at once, never takes focus back and never sends the partial text (it may remain in the input box).
-- A minimized window is restored first and checked to be ChatGPT before anything is typed.
-- Without the flag ACB never activates or types; it only submits an identical draft that is already in the input box while ChatGPT is in front.
-- Read tools and Codex tools don't need the flag.
+- Messages run in the app with the permissions the app has for that conversation or project. When Codex needs your approval, the tool returns `NEEDS_USER`: handle it in the app, then check the result with `acb_codex_read`.
+- The app shows messages sent through its tools as delegated messages: a message to an existing conversation as delegated by that conversation itself; the first message of a new conversation as delegated by the caller conversation (see below).
+- Without a project, a new conversation is created under `Documents\Codex\<date>\<folder>`.
+- Archived conversations are restored when you message them.
+- For long tasks, pass `wait: false` to return at once, then follow progress and the result with `acb_codex_read`.
 
 **ChatGPT conversations**
 
-- The window must be in **ChatGPT mode** (not Codex mode); ACB does not switch modes.
-- Titles of new conversations must be unique so they can be found reliably.
-- ACB only types into a conversation it can identify: it is shown, or it has exactly one sidebar entry with that title. Duplicate titles are refused.
-- The app gives ACB the latest 50 conversations (plus pinned ones); open older ones in the app first.
-- The app's transcript usually doesn't keep the text of ChatGPT replies. `acb_gpt_read` then marks the reply `replyInWindowOnly`; read again with `window: true` (opens the chat).
+- ChatGPT shows your messages as ordinary user messages.
+- The app's record of a conversation usually keeps only a placeholder for each reply; the text is read from the page. Reading the page needs the ChatGPT window **visible on screen**: behind other windows or partly covered is fine, fully covered (say, by a full-screen video) is not. If the page cannot be read, the send still succeeds; the result marks `replyOnPage` with the reason, and `acb_gpt_read` with `page: true` reads it later.
+- After the ChatGPT window has been fully covered or minimized for a long time, the app slows down its background page, and a message can take about a minute to go out.
+- If the new-chat page holds a draft you have not sent, starting a ChatGPT conversation is refused rather than overwriting it.
 
-**Codex conversations**
+**In general**
 
-- Command and file approvals are always declined and counted in the result. Approve in the app, or change the conversation's approval settings.
-- Archived conversations are unarchived when you send to them.
-- A task longer than 240 s returns `TIMEOUT` while it keeps running. Call again later with the **same message** to get the reply; it is not sent again.
+- **No duplicates**: if a conversation's newest message is exactly the one to send, ACB does not send it again and returns that turn's reply. To repeat the same text on purpose, change it slightly.
+- A conversation that is still answering refuses new messages (`BUSY`).
+- The app lists the 50 most recent conversations (plus pinned ones). Older ones can still be read by ID.
+- **Caller**: the app requires every call to be made on behalf of a Codex conversation. ACB uses the most recent one, or the one given with `--caller`. Nothing is recorded in that conversation; only the first message of a new Codex conversation is shown as delegated by it.
+- ACB talks only to the desktop app on this computer. It does not go online by itself and does not read account credentials.
 
-**Other**
+## Errors
 
-- Sends, creations and window operations run one at a time; reads always answer immediately.
-- App updates need no restart of ACB; after updating ACB itself, reload MCP in your client (`/reload-mcp` in Hermes).
-- ACB can't create ChatGPT projects or move chats into them.
+Ask the agent to call `acb_status` first. The `error` field of a failed result is one of:
 
-## Troubleshooting
-
-Ask the agent to call `acb_status` (or run `npm run check`) and follow its `fix`.
-
-| Code | Usually means | Do |
+| Code | Meaning | What to do |
 |---|---|---|
-| `TIMEOUT` | The reply isn't ready | Call again later with the same message |
-| `CONFLICT` | The conversation is busy, or you have a draft | Wait, or clear the input box |
-| `FOCUS_REQUIRED` | The window lost focus while typing, or Windows refused activation | Go back to ChatGPT and retry |
-| `AUTH` | `--allow-foreground-input` is not set | Add it to the configuration |
-| `OWNER` | The app isn't running, or no window is in ChatGPT mode | Open the app in ChatGPT mode |
-| `PROVENANCE` | The conversation can't be identified (duplicate title, not recent) | Open it in the app, or use a unique title |
-| `CONFIG` | Codex not found, or no Codex conversation yet | Install the app and use Codex once |
-| `DEPENDENCY` / `IO` | The app isn't responding, or ChatGPT isn't signed in | Follow `acb_status` |
-| `EXECUTION` | The Codex task failed, or an approval was declined | Read the reply; approve in the app |
+| `UNAVAILABLE` | The app is not running, or ACB does not run on Windows | Start the ChatGPT desktop app |
+| `NOT_FOUND` | The conversation does not exist | Check the ID, or list conversations first |
+| `BUSY` | The conversation is still answering | Wait, read it, then send |
+| `NEEDS_USER` | Codex waits for your approval or answer | Handle it in the app |
+| `TIMEOUT` | The reply is not ready yet | Read the conversation later; calling again with the same message does not resend it |
+| `FAILED` | The turn failed or was interrupted in the app | Read the message; send again if needed |
+| `WINDOW` | The ChatGPT window is missing, fully covered or cannot be used | Make the window visible and retry |
+| `INPUT` | An argument is invalid | Fix the argument as described |
+| `PROTOCOL` | The app answered unexpectedly, usually after an app update | Update ACB; open an issue if it persists |
 
-If creating a ChatGPT conversation fails half-way, the result includes the created conversation's ID (`status: "partial"`). Look at it before creating again.
+## Configuration
 
-## Configuration (optional)
+No configuration file. Optional command-line options and environment variables:
 
-| Option | Flag / environment | Default |
-|---|---|---|
-| Allow foreground input | `--allow-foreground-input` / `ACB_ALLOW_FOREGROUND_INPUT=1` | off |
-| Codex executable | `--codex` / `ACB_CODEX` | the app's bundled `codex.exe` |
-| Folder for new workspaces | `ACB_WORKSPACE_ROOT` | `%USERPROFILE%\acb-workspaces` |
-| Longest wait for one send | `timeoutMs` in a `--config` JSON file | 240000 ms |
-| Debug log | `--debug` / `ACB_DEBUG=1` | off |
+| Option | Environment variable | Purpose | Default |
+|---|---|---|---|
+| `--caller <conversation ID>` | `ACB_CALLER` | The caller conversation | The most recent Codex conversation |
+| `--timeout <seconds>` | `ACB_TIMEOUT` | How long a send waits for the reply | 240 |
 
 ## Development
 
 ```powershell
-npm ci; npm run typecheck; npm test     # mocks only, no real conversations
-npm run smoke -- --name ACB-smoke       # real Windows run: creates conversations and sends messages
+npm ci
+npm run lint; npm run typecheck; npm test   # unit tests use simulated data only
+npm run smoke                               # acceptance run: really starts conversations and sends messages
 ```
 
-See [AGENTS.md](AGENTS.md), [CONTRIBUTING.md](CONTRIBUTING.md) and [CHANGELOG.md](CHANGELOG.md).
+| File | Contents |
+|---|---|
+| `src/mcp.ts` | Command-line entry point |
+| `src/server.ts` | MCP tool definitions |
+| `src/pipe.ts` | Connection to the desktop app's named pipe |
+| `src/desktop.ts` | Client of the desktop app's tool interface |
+| `src/conversation.ts` | Sending, duplicate check, waiting for the reply |
+| `src/turns.ts` | Turns the app's records into prompts and replies |
+| `src/codex.ts`, `src/chatgpt.ts` | Operations of each kind of conversation |
+| `src/window.ts`, `src/window.ps1` | Reading the ChatGPT page, starting ChatGPT conversations |
+
+See [AGENTS.md](AGENTS.md) and [CONTRIBUTING.md](CONTRIBUTING.md) for development rules and [CHANGELOG.md](CHANGELOG.md) for changes.
 
 ## License
 
-[MIT](LICENSE) · third-party licenses in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)
+[MIT](LICENSE) · Dependency licenses: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)

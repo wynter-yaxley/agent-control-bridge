@@ -9,13 +9,9 @@
     "rewriteRelativeImportExtensions": true,
     "declaration": true,
     "skipLibCheck": true,
-    "types": [
-      "node"
-    ],
+    "types": ["node"],
     "erasableSyntaxOnly": true
   },
-  "include": [
-    "src/**/*.ts"
-  ],
+  "include": ["src/**/*.ts"],
   "exclude": []
 }

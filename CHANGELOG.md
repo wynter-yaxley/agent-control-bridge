@@ -2,7 +2,18 @@
 
 Versions follow Semantic Versioning. Desktop behavior is verified manually on Windows (`npm run smoke`); unit tests use mocks.
 
-## 0.5.0 (Unreleased)
+## 0.6.0 (Unreleased)
+
+Rebuilt on the tools the desktop app serves to its own agents. Every message now runs inside the app, so conversations and their progress appear live in its sidebar.
+
+- **Codex** conversations are created, messaged and read through the app (`create_thread`, `send_message_to_thread`, `read_thread`) instead of a separate `codex app-server`. ACB no longer looks for `codex.exe`. A Codex turn waiting for approval returns `NEEDS_USER` at once instead of being declined; approvals are left to the user in the app. `wait: false` returns right after sending.
+- **ChatGPT** messages are sent in the background through the app; the window is no longer activated and nothing is typed. The reply text is read from the page without activating the window. A page that cannot be read (window fully covered) no longer fails the send: the result keeps `replyOnPage` and says why. `acb_gpt_create` takes the first `prompt` (and an optional `title`) and returns the first reply; it is the only tool that brings the window to the front, and it writes the prompt through UI Automation instead of keystrokes.
+- Tools: `acb_gpt_open` became `acb_open` (any conversation); `acb_codex_create` takes `prompt`, `title`, `projectId` or `folder`; reads return `status` (`idle`, `running`, `needsUser`) and turns with `prompt`, `reply`, `replyOnPage`, `truncated`. Removed: `acb_threads` (use the list tools), `acb_codex_find` and `acb_workspace_create` (the app has no search, and creates folders itself), and the `--allow-foreground-input`, `--codex`, `--config` and `--debug` options (the first is still accepted and ignored).
+- Errors are `UNAVAILABLE`, `NOT_FOUND`, `BUSY`, `NEEDS_USER`, `TIMEOUT`, `FAILED`, `WINDOW`, `INPUT` and `PROTOCOL`.
+- Configuration is `--caller` / `ACB_CALLER` and `--timeout` / `ACB_TIMEOUT` (seconds). The caller defaults to the most recent Codex conversation the app accepts.
+- Smaller and faster: about 1,400 formatted lines instead of 1,900 densely packed ones (the UI Automation script shrank from 640 to 150 lines); the app is reached directly over its named pipe (reads take 20-30 ms), and the PowerShell helper is used only for the ChatGPT page. Formatting and lint by Biome.
+
+## 0.5.0
 
 - Independent tools instead of one workflow: new read-only `acb_codex_list` (thread/list, by `cwd`, with a cursor) and `acb_codex_read` (newest 1-20 turns through the App Server), `acb_gpt_list` and `acb_gpt_read` (newest 1-10 turns by ID through native IPC, `nextCursor` for older turns, no window). The server instructions, README and skill describe each tool and the safety rules; the Hermes → GPT → Codex roles and workflow diagram are removed. Existing tool names and arguments are unchanged.
 - Desktop app v26.1021: app tools (`tools/call`) moved from `codex-browser-use-<uuid>` (now ping and browser automation only, "No handler registered for method: tools/call") to `codex-app-tools-<uuid>`. The pipe worker prefers the new pipe and falls back to the old one; host verification is unchanged. `read_thread` accepts `turnLimit` 1-10 and an opaque `cursor`.
