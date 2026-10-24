@@ -251,16 +251,31 @@ test("a page that does not catch up leaves the reply to the app's list", async (
   assert.equal(sent.turn?.reply, 'ok');
 });
 
-test('a page stuck at an older state is not taken for the reply', async () => {
+test('a page behind the app is not taken for the reply, nor its newest prompt for one sent', async () => {
   const app = new FakeApp();
   const turns = ['R', 'Q', 'R'].map((prompt, index) => userTurn(`t${3 - index}`, prompt, 'listed reply'));
   app.add({ id: GPT, kind: 'chatgpt', title: 'Chat', turns });
   const page = fakePage(app);
-  // The window was covered after the first Q was answered.
+  // The page still shows the conversation as it was after the first Q.
   page.view = () => showing(['R', 'Q'], 'reply to the first Q');
-  const sent = await sendGpt(app, page, GPT, 'Q', { ...fast, wait: true });
-  assert.equal(app.sent.length, 1);
+  const sent = await sendGpt(app, page, GPT, 'S', { ...fast, wait: true });
   assert.equal(sent.turn?.reply, 'ok');
+  await assert.rejects(sendGpt(app, page, GPT, 'Q', { ...fast, wait: true }), code('BUSY'));
+  assert.deepEqual(
+    app.sent.map((entry) => entry.prompt),
+    ['S'],
+  );
+});
+
+test('a busy page refuses a new prompt even when it cannot be matched to the app', async () => {
+  const app = new FakeApp();
+  app.add({ id: GPT, kind: 'chatgpt', title: 'Chat', turns: [userTurn('t1', 'X', PAGE_REPLY)] });
+  const page = fakePage(app);
+  page.view = () => ({ busy: true, prompts: ['X', 'Q', 'X', 'R'], reply: '', complete: false });
+  await assert.rejects(sendGpt(app, page, GPT, 'R', { ...fast, wait: true }), code('BUSY'));
+  page.view = () => showing(['X', 'Q', 'X', 'R'], 'reply to R');
+  await assert.rejects(sendGpt(app, page, GPT, 'R', { ...fast, wait: true }), code('BUSY'));
+  assert.deepEqual(app.sent, []);
 });
 
 test('a reply confirmed on the page is returned again, and does not hold back the next message', async () => {

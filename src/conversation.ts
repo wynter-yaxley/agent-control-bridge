@@ -20,8 +20,8 @@ export interface WaitOptions {
  * is up to a minute ahead of the app's list.
  */
 export interface Live {
-  /** ChatGPT is writing a reply to a message the app does not list yet. */
-  busy: boolean;
+  /** Why the page says not to send the prompt now: ChatGPT is writing, for one. */
+  refuse?: string;
   /** The page's newest message, which the app does not list yet, is the prompt. */
   shown: boolean;
   /** The finished reply to the prompt, once the page shows it. */
@@ -68,13 +68,19 @@ interface Chain {
   messages: Message[];
 }
 
-/** Per app: sends to one conversation run one at a time, and the messages not listed yet. */
-const state = new WeakMap<App, { locks: Map<string, Promise<unknown>>; chains: Map<string, Chain> }>();
+/**
+ * Per app: sends to one conversation run one at a time, the messages not listed yet, and the
+ * messages that may have been delivered but can no longer be matched to a turn (see reconcile).
+ */
+const state = new WeakMap<
+  App,
+  { locks: Map<string, Promise<unknown>>; chains: Map<string, Chain>; unmatched: Map<string, Message[]> }
+>();
 
 function stateOf(app: App) {
   let current = state.get(app);
   if (!current) {
-    current = { locks: new Map(), chains: new Map() };
+    current = { locks: new Map(), chains: new Map(), unmatched: new Map() };
     state.set(app, current);
   }
   return current;
@@ -135,6 +141,16 @@ async function decide(app: App, kind: Kind, threadId: string, text: string, opti
   }
   if (await reconcile(app, threadId)) before = await app.readThread(threadId);
   const { title } = before;
+  const unmatched = stateOf(app)
+    .unmatched.get(threadId)
+    ?.find((message) => message.prompt === text);
+  if (unmatched) {
+    throw new AcbError(
+      'TIMEOUT',
+      `This prompt was sent at ${unmatched.sentAt} and may have arrived, but the conversation has since moved on further than ACB can follow, so it is not sent again: read the conversation, and change the prompt slightly to send it anyway`,
+      { threadId },
+    );
+  }
   const chain = stateOf(app).chains.get(threadId);
   const last = before.turns[0];
   const after = chain ? chain.after : last?.id;
@@ -158,7 +174,8 @@ async function decide(app: App, kind: Kind, threadId: string, text: string, opti
     (chain?.messages ?? []).map((message) => message.prompt),
   );
   if (live?.shown) return { title, alreadySent: true, match: { after, occurrence }, early: live.reply };
-  if (live?.busy || statusOf(before) !== 'idle') {
+  if (live?.refuse) throw new AcbError('BUSY', live.refuse, { threadId });
+  if (statusOf(before) !== 'idle') {
     throw new AcbError('BUSY', 'The conversation is still answering; read it, then send when it is idle', {
       threadId,
     });
@@ -186,15 +203,18 @@ export function unlistedAnswers(
 /**
  * Drops the messages the app now lists: its turns after the chain's start are matched to the
  * messages in order, skipping turns of other senders. When the app no longer returns the
- * chain's start, more turns followed it than the app returns and the whole chain is dropped:
- * its messages can no longer be told apart. Whether any was dropped.
+ * chain's start, more turns followed it than the app returns and its messages can no longer be
+ * matched: the chain is dropped, but those not confirmed on the page are kept as unmatched,
+ * never to be sent again on their own. Whether any was dropped.
  */
 async function reconcile(app: App, threadId: string): Promise<boolean> {
-  const { chains } = stateOf(app);
+  const { chains, unmatched } = stateOf(app);
   const chain = chains.get(threadId);
   if (!chain) return false;
   const turns = await turnsAfter(app, threadId, chain.after);
   if (!turns) {
+    const unknown = chain.messages.filter((message) => !message.answer);
+    if (unknown.length) unmatched.set(threadId, [...(unmatched.get(threadId) ?? []), ...unknown]);
     chains.delete(threadId);
     return true;
   }

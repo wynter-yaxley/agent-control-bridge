@@ -228,7 +228,6 @@ test('a turn named by its ID is found further back than the newest three', async
 const page =
   (confirms: boolean) =>
   async (prompt: string): Promise<Live> => ({
-    busy: false,
     shown: false,
     reply: async () =>
       confirms
@@ -273,4 +272,21 @@ test('a turn is not looked for among turns that may not follow the one it was se
     ...later.map((prompt, index) => userTurn(`t${index + 1}`, prompt, `reply of t${index + 1}`)).reverse(),
   );
   await assert.rejects(sending, code('TIMEOUT'));
+});
+
+test('a message of unknown outcome that can no longer be matched is never sent again on its own', async () => {
+  const app = new FakeApp();
+  const thread = app.add({ id: GPT, kind: 'chatgpt', turns: [userTurn('t0', 'X')] });
+  app.listAfterMs = 60_000;
+  app.lostAnswer = new AcbError('PROTOCOL', 'The connection to the desktop app broke');
+  await assert.rejects(sendPrompt(app, 'chatgpt', GPT, 'Q', fast), code('PROTOCOL'));
+  app.lostAnswer = null;
+  // The conversation goes on elsewhere, until t0 is older than the turns the app returns.
+  thread.turns.unshift(...Array.from({ length: 10 }, (_, index) => userTurn(`t${10 - index}`, `other ${10 - index}`)));
+  await assert.rejects(sendPrompt(app, 'chatgpt', GPT, 'Q', fast), code('TIMEOUT'));
+  await sendPrompt(app, 'chatgpt', GPT, 'Something else', { ...fast, wait: false });
+  assert.deepEqual(
+    app.sent.map((entry) => entry.prompt),
+    ['Q', 'Something else'],
+  );
 });
