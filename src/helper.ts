@@ -31,6 +31,26 @@ export interface PageMessages {
   complete: boolean;
 }
 
+/** A vertical scroll position: how far down, and how much of the height shows (percent). */
+export interface Scroll {
+  percent: number;
+  view: number;
+}
+
+/** How far from its end, in screens, a page still counts as at its end: scrolling is fractional. */
+const END_SCREENS = 0.05;
+
+/**
+ * Whether a conversation scrolled to `scroll` (null: it fits, so it does not scroll) shows its
+ * end. The page holds only the messages near what it shows, so its last one is the newest only
+ * at the end.
+ */
+export function atEnd(scroll: Scroll | null): boolean {
+  if (!scroll) return true;
+  if (!(scroll.view > 0)) return false;
+  return (100 / scroll.view - 1) * (1 - scroll.percent / 100) <= END_SCREENS;
+}
+
 /** Page labels of the Simplified Chinese app. */
 const LABELS = { you: ['你说：', '您说：'], assistant: ['ChatGPT 说：'], finished: '更多操作' };
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -182,8 +202,11 @@ export class WindowsHelper {
     const until = Date.now() + waitMs;
     for (;;) {
       const page = await this.#request({ op: 'transcript', title });
-      if (page.found)
-        return { busy: page.busy === true, atEnd: page.atEnd === true, ...readPage(page.nodes as PageNode[]) };
+      if (page.found) {
+        // Without the conversation's frame, where it is scrolled to is unknown.
+        const end = page.framed === true && atEnd((page.scroll as Scroll | null) ?? null);
+        return { busy: page.busy === true, atEnd: end, ...readPage(page.nodes as PageNode[]) };
+      }
       if (Date.now() >= until) return null;
       await delay(300);
     }

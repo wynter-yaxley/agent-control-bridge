@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { type PageNode, readPage, replyTo, samePrompt, shownAfter, showsPrompts } from '../src/helper.ts';
+import { atEnd, type PageNode, readPage, replyTo, samePrompt, shownAfter, showsPrompts } from '../src/helper.ts';
 
 const text = (name: string): PageNode => ({ type: 'Text', name });
 const label = (name: string): PageNode => ({ type: 'Text', name, label: true });
@@ -106,4 +106,13 @@ test('a reply is taken only from a finished page ending with the expected prompt
   assert.equal(replyTo({ ...state, busy: true }, ['Question']), null);
   assert.equal(replyTo({ ...state, complete: false }, ['Question']), null);
   assert.equal(replyTo({ ...state, atEnd: false }, ['Question']), null, 'scrolled up to older messages');
+});
+
+test('a page counts as at its end only within a small part of a screen from it', () => {
+  assert.ok(atEnd(null), 'a conversation that fits');
+  assert.ok(atEnd({ percent: 100, view: 4 }));
+  assert.ok(atEnd({ percent: 99.99, view: 4 }));
+  // 200,000 pixels of history, 800 showing, 1,500 above the end: 99.25 percent down.
+  assert.ok(!atEnd({ percent: 99.25, view: 0.4 }));
+  assert.ok(!atEnd({ percent: 50, view: 50 }));
 });
