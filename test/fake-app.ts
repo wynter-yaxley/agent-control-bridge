@@ -52,6 +52,9 @@ export class FakeApp implements App {
   refuse: AcbError | null = null;
   /** The app takes the next messages but its answer is lost with this error. */
   lostAnswer: AcbError | null = null;
+  /** Called after every read, with the number of reads so far. */
+  afterRead: ((reads: number) => void) | null = null;
+  #reads = 0;
   answerAfterReads = 1;
   answer: string | ((thread: FakeThread) => void) = 'ok';
   #pending: { thread: FakeThread; reads: number }[] = [];
@@ -87,13 +90,18 @@ export class FakeApp implements App {
     ];
   }
 
-  async readThread(id: string, options: { turns?: number; outputs?: boolean } = {}): Promise<ThreadPage> {
+  async readThread(
+    id: string,
+    options: { turns?: number; cursor?: string; outputs?: boolean } = {},
+  ): Promise<ThreadPage> {
     const thread = this.#get(id);
     if (options.outputs === false) this.#progress(thread);
+    const start = Number(options.cursor ?? 0);
+    const end = start + (options.turns ?? 1);
     const turns = thread.turns
-      .slice(0, options.turns ?? 1)
+      .slice(start, end)
       .map((turn) => (options.outputs === false ? withoutText(turn) : structuredClone(turn)));
-    return {
+    const page = {
       id,
       kind: thread.kind,
       title: thread.title,
@@ -101,8 +109,10 @@ export class FakeApp implements App {
       activeFlags: [...thread.activeFlags],
       cwd: thread.cwd,
       turns,
-      nextCursor: null,
+      nextCursor: end < thread.turns.length ? String(end) : null,
     };
+    this.afterRead?.(++this.#reads);
+    return page;
   }
 
   async sendMessage(id: string, prompt: string, caller?: string): Promise<void> {
@@ -111,7 +121,7 @@ export class FakeApp implements App {
     if (this.refuse) throw this.refuse;
     this.sent.push({ id, prompt, ...(caller ? { caller } : {}) });
     if (!this.listAfterMs) this.#start(thread, prompt);
-    else void delay(this.listAfterMs).then(() => this.#start(thread, prompt));
+    else void delay(this.listAfterMs, undefined, { ref: false }).then(() => this.#start(thread, prompt));
     if (this.lostAnswer) throw this.lostAnswer;
   }
 

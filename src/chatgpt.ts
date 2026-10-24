@@ -149,10 +149,13 @@ async function withPageReply(
 }
 
 /** How many turns the conversation has, counted page by page without message text. */
-async function turnCount(app: App, conversationId: string): Promise<number> {
+async function turnCount(app: App, conversationId: string, deadline: number): Promise<number> {
   let count = 0;
   let cursor: string | undefined;
   do {
+    if (Date.now() >= deadline) {
+      throw new AcbError('TIMEOUT', 'No time was left to read the reply from the page', { conversationId });
+    }
     const page = await app.readThread(conversationId, { turns: 10, outputs: false, ...(cursor ? { cursor } : {}) });
     count += page.turns.length;
     cursor = page.nextCursor ?? undefined;
@@ -185,7 +188,7 @@ async function pageReply(app: App, page: Page, conversationId: string, turn: Tur
       },
     );
   }
-  const messages = await turnCount(app, conversationId);
+  const messages = await turnCount(app, conversationId, deadline);
   const newest = async () => {
     const current = (await app.readThread(conversationId, { outputs: false })).turns[0];
     if (current?.id !== turn.turnId || current.status !== 'completed') {

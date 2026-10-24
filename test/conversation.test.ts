@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
-import { sendPrompt } from '../src/conversation.ts';
+import { sendPrompt, waitForTurn } from '../src/conversation.ts';
 import { AcbError } from '../src/errors.ts';
 import { CODEX, FakeApp, GPT, userTurn } from './fake-app.ts';
 
@@ -194,4 +194,32 @@ test('a message the app refused can be sent again', async () => {
   const again = await sendPrompt(app, 'chatgpt', GPT, 'Question', fast);
   assert.equal(again.alreadySent, false);
   assert.equal(app.sent.length, 1);
+});
+
+test('a message listed between two reads of a send is not sent again', async () => {
+  const app = new FakeApp();
+  const thread = app.add({ id: GPT, kind: 'chatgpt' });
+  app.listAfterMs = 60_000;
+  app.lostAnswer = new AcbError('PROTOCOL', 'The connection to the desktop app broke');
+  await assert.rejects(sendPrompt(app, 'chatgpt', GPT, 'Q', fast), code('PROTOCOL'));
+  app.lostAnswer = null;
+  // The app lists Q right after the next send has taken its first look at the conversation.
+  app.afterRead = (reads) => {
+    if (reads === 1) app.start(thread, 'Q');
+  };
+  const again = await sendPrompt(app, 'chatgpt', GPT, 'Q', fast);
+  assert.equal(app.sent.length, 1);
+  assert.equal(again.alreadySent, true);
+  assert.equal(again.turn?.reply, 'ok');
+});
+
+test('a turn named by its ID is found further back than the newest three', async () => {
+  const app = new FakeApp();
+  app.add({
+    id: GPT,
+    kind: 'chatgpt',
+    turns: ['t5', 't4', 't3', 't2', 't1'].map((id) => userTurn(id, id)),
+  });
+  const turn = await waitForTurn(app, GPT, 't1', { turnId: 't1' }, fast);
+  assert.equal(turn.turnId, 't1');
 });

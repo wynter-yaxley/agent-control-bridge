@@ -189,3 +189,23 @@ test('the page must show as many messages as the conversation has turns', async 
   await readGpt(app, page, GPT, { fromPage: true });
   assert.equal(page.reads[0].messages, 3, 'a page stuck at the first Q shows only one message');
 });
+
+test('counting a long conversation stops when no time is left for the page', async () => {
+  const app = new FakeApp();
+  const turns = Array.from({ length: 25 }, (_, index) => userTurn(`t${25 - index}`, `Q${25 - index}`, PAGE_REPLY));
+  app.add({ id: GPT, kind: 'chatgpt', turns });
+  const page = fakePage(app);
+  assert.equal((await readGpt(app, page, GPT, { fromPage: true })).turns[0].reply, 'reply from the page');
+  assert.equal(page.reads[0].messages, 25, 'every page of turns is counted');
+  // Once the reply is in, every read takes 200 ms: the page budget runs out while counting.
+  app.answer = (thread) => {
+    answerOnPage(thread);
+    app.afterRead = () => {
+      const until = Date.now() + 200;
+      while (Date.now() < until);
+    };
+  };
+  const sent = await sendGpt(app, page, GPT, 'One more', { deadline: Date.now() + 300, pollMs: 1, wait: true });
+  assert.equal(sent.turn?.replyOnPage, true);
+  assert.match(sent.pageError ?? '', /No time was left/);
+});

@@ -70,8 +70,8 @@ export async function sendPrompt(
   options: WaitOptions & { wait: boolean; caller?: string },
 ): Promise<Sent> {
   const text = normalize(prompt);
-  const { title, alreadySent, match } = await exclusive(app, threadId, async () => {
-    const before = await app.readThread(threadId);
+  const { title, alreadySent, match } = await exclusive(app, threadId, async (): Promise<Decision> => {
+    let before = await app.readThread(threadId);
     if (before.kind !== kind) {
       const tool = before.kind === 'codex' ? 'acb_codex_send' : 'acb_gpt_send';
       throw new AcbError(
@@ -79,16 +79,21 @@ export async function sendPrompt(
         `This is a ${before.kind === 'codex' ? 'Codex' : 'ChatGPT'} conversation: use ${tool}`,
       );
     }
-    const pending = await unlisted(app, threadId);
-    if (pending) {
-      if (pending.prompt !== text) {
+    const earlier = await sentBefore(app, threadId);
+    if (earlier) {
+      const { entry, turn } = earlier;
+      if (entry.prompt === text) {
+        return { title: before.title, alreadySent: true, match: turn ? { turnId: turn.id } : { after: entry.after } };
+      }
+      if (!turn) {
         throw new AcbError(
           'BUSY',
-          `A message ACB sent at ${pending.sentAt} has not appeared in the conversation yet; wait for it before sending another`,
+          `A message ACB sent at ${entry.sentAt} has not appeared in the conversation yet; wait for it before sending another`,
           { threadId },
         );
       }
-      return { title: before.title, alreadySent: true, match: { after: pending.after } };
+      // That message has just been listed: decide on the conversation as it is now.
+      before = await app.readThread(threadId);
     }
     const last = before.turns[0];
     if (last && opensWith(last, text)) return { title: before.title, alreadySent: true, match: { turnId: last.id } };
@@ -104,17 +109,23 @@ export async function sendPrompt(
   return { threadId, title, alreadySent, turn };
 }
 
+interface Decision {
+  title: string;
+  alreadySent: boolean;
+  match: Match;
+}
+
 /**
- * The message ACB sent (or may have sent) to `threadId` that the app does not list yet. It
- * counts as listed only once a turn it opened is found; other new turns prove nothing.
+ * The message ACB sent (or may have sent) to `threadId` before, with the turn it opened once
+ * the app lists one; the record is then dropped. Other new turns prove nothing about it.
  */
-async function unlisted(app: App, threadId: string): Promise<Accepted | undefined> {
+async function sentBefore(app: App, threadId: string): Promise<{ entry: Accepted; turn?: AppTurn } | undefined> {
   const { accepted } = stateOf(app);
   const entry = accepted.get(threadId);
   if (!entry) return undefined;
-  if (!(await findTurn(app, threadId, entry.after, (turn) => opensWith(turn, entry.prompt)))) return entry;
-  accepted.delete(threadId);
-  return undefined;
+  const turn = await findTurn(app, threadId, entry.after, (candidate) => opensWith(candidate, entry.prompt));
+  if (turn) accepted.delete(threadId);
+  return { entry, ...(turn ? { turn } : {}) };
 }
 
 /**
@@ -169,7 +180,7 @@ async function findTurn(
 ): Promise<AppTurn | undefined> {
   for (const turns of [3, 10]) {
     const page = await app.readThread(threadId, { turns });
-    const end = after === undefined ? page.turns.length : page.turns.findIndex((turn) => turn.id === after);
+    const end = after === undefined ? -1 : page.turns.findIndex((turn) => turn.id === after);
     const found = (end < 0 ? page.turns : page.turns.slice(0, end)).find(test);
     if (found || end >= 0 || !page.nextCursor) return found;
   }
