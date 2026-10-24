@@ -1,4 +1,10 @@
+<div align="center">
+
 # agent-control-bridge
+
+**让 AI Agent 使用 ChatGPT 桌面应用里的 ChatGPT 与 Codex 对话**
+
+列出 · 读取 · 新建 · 发送 · 几乎不打扰你
 
 [![CI](https://github.com/wynter-yaxley/agent-control-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/wynter-yaxley/agent-control-bridge/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -6,7 +12,9 @@
 [![Platform: Windows](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D6)](#准备)
 [![MCP](https://img.shields.io/badge/MCP-stdio%20server-6E56CF)](https://modelcontextprotocol.io/)
 
-[English](README_EN.md)
+简体中文 | [English](README_EN.md)
+
+</div>
 
 一个 MCP Server，让 AI agent 使用你电脑上 **ChatGPT 桌面应用** 里的 ChatGPT 对话和 Codex 对话：列出、读取、新建对话，发一条消息并拿回回复。
 
