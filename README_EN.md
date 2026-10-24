@@ -1,4 +1,10 @@
+<div align="center">
+
 # agent-control-bridge
+
+**Let AI agents use the ChatGPT and Codex conversations of the ChatGPT desktop app**
+
+List · Read · Start · Send · Hardly in your way
 
 [![CI](https://github.com/wynter-yaxley/agent-control-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/wynter-yaxley/agent-control-bridge/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -6,7 +12,9 @@
 [![Platform: Windows](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D6)](#requirements)
 [![MCP](https://img.shields.io/badge/MCP-stdio%20server-6E56CF)](https://modelcontextprotocol.io/)
 
-[中文](README.md)
+[简体中文](README.md) | English
+
+</div>
 
 An MCP server that lets AI agents use the ChatGPT and Codex conversations of the **ChatGPT desktop app** on your computer: list, read and start conversations, send a message and get the reply.
 
