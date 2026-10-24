@@ -100,11 +100,15 @@ function Transcript($request) {
 # Starts a ChatGPT conversation: the new-chat button of the ChatGPT-mode window, the prompt
 # written through ValuePattern and read back, then the send button.
 function Compose($request) {
-  $windows = @(AppWindows | Where-Object {
-    $mode = Find $_ 'Button' ($Names.ModePrefix + $Names.ChatGptMode)
-    $mode -and -not $mode.Current.IsOffscreen
-  })
-  if ($windows.Count -ne 1) { Fail 'WINDOW' "Expected one window in ChatGPT mode, found $($windows.Count)" }
+  # Showing a ChatGPT conversation puts the window in ChatGPT mode once the page updates.
+  $windows = Until 5000 {
+    $found = @(AppWindows | Where-Object {
+      $mode = Find $_ 'Button' ($Names.ModePrefix + $Names.ChatGptMode)
+      $mode -and -not $mode.Current.IsOffscreen
+    })
+    if ($found.Count -eq 1) { , $found }
+  }
+  if (-not $windows) { Fail 'WINDOW' 'No single ChatGPT window in ChatGPT mode; the app does not update a fully covered window, so keep part of it visible' }
   $window = $windows[0]
   $newChat = @(Visible $window 'Button' $Names.NewChat)
   if ($newChat.Count -ne 1) { Fail 'WINDOW' 'The new-chat button was not found' }

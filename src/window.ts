@@ -58,6 +58,7 @@ export class ChatGptWindow {
   #child: ChildProcess | undefined;
   #answer: ((line: string) => void) | undefined;
   #queue: Promise<unknown> = Promise.resolve();
+  #requests: Promise<unknown> = Promise.resolve();
 
   /** Runs `task` after the page operations already queued. */
   run<T>(task: () => Promise<T>): Promise<T> {
@@ -104,35 +105,44 @@ export class ChatGptWindow {
     await this.#request({ op: 'compose', prompt });
   }
 
-  async #request(message: Record<string, unknown>): Promise<Record<string, unknown>> {
+  /** One request at a time: the helper answers the lines it reads in order. */
+  #request(message: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const result = this.#requests.then(() => this.#exchange(message));
+    this.#requests = result.catch(() => undefined);
+    return result;
+  }
+
+  async #exchange(message: Record<string, unknown>): Promise<Record<string, unknown>> {
     if (process.platform !== 'win32')
       throw new AcbError('UNAVAILABLE', 'The ChatGPT window can only be used on Windows');
     if (!this.#child) this.#start();
     const child = this.#child as ChildProcess;
     const line = await new Promise<string>((resolve, reject) => {
-      const timer = setTimeout(
-        () => fail(new AcbError('WINDOW', 'The window helper did not answer in time')),
-        REQUEST_TIMEOUT_MS,
-      );
-      const exited = () => fail(new AcbError('WINDOW', 'The window helper stopped'));
-      const fail = (error: AcbError) => {
-        this.close();
+      const timer = setTimeout(() => fail('The window helper did not answer in time'), REQUEST_TIMEOUT_MS);
+      const stopped = () => fail('The window helper stopped');
+      const fail = (reason: string) => {
         done();
-        reject(error);
+        this.close();
+        reject(new AcbError('WINDOW', reason));
       };
       const done = () => {
         clearTimeout(timer);
-        child.off('exit', exited);
+        child.off('exit', stopped).off('error', stopped);
         this.#answer = undefined;
       };
       this.#answer = (text) => {
         done();
         resolve(text);
       };
-      child.once('exit', exited);
+      child.once('exit', stopped).once('error', stopped);
       child.stdin?.write(`${JSON.stringify(message)}\n`);
     });
-    const response = JSON.parse(line) as Record<string, unknown>;
+    let response: Record<string, unknown>;
+    try {
+      response = JSON.parse(line);
+    } catch {
+      throw new AcbError('PROTOCOL', 'The window helper sent an unreadable answer');
+    }
     if (response.ok !== true) throw new AcbError(response.code as ErrorCode, String(response.message));
     return response;
   }
@@ -156,10 +166,10 @@ export class ChatGptWindow {
         },
       },
     );
-    child.on('error', () => this.#child === child && this.close());
-    child.on('exit', () => {
+    const forget = () => {
       if (this.#child === child) this.#child = undefined;
-    });
+    };
+    child.on('error', forget).on('exit', forget);
     createInterface({ input: child.stdout as NodeJS.ReadableStream }).on('line', (line) => this.#answer?.(line));
     this.#child = child;
   }
