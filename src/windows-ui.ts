@@ -5,7 +5,7 @@ import type { BridgeConfig } from './config.ts';
 import { BridgeError, ERROR_CODES, controlledProcessEnv, type ErrorCode } from './errors.ts';
 
 export interface WindowsUiSnapshot { title: string; text: string; ordinaryComposer: boolean; pid: number; conversationId: string | null }
-export interface UiResult { inputMode?: 'drafted' | 'typed'; treeReadable?: boolean; ok: boolean; code?: string; stage?: string; errorType?: string; line?: number; snapshot?: WindowsUiSnapshot; body?: string; conversationId?: string | null; completionVerified?: boolean; identity?: 'uuid' | 'titleOnly'; project?: string | null; submission?: 'attempted' | 'sent' | null; diagnostics?: Record<string, unknown> | null }
+export interface UiResult { inputMode?: 'drafted' | 'typed'; treeReadable?: boolean; ok: boolean; code?: string; stage?: string; errorType?: string; line?: number; snapshot?: WindowsUiSnapshot; body?: string; conversationId?: string | null; completionVerified?: boolean; identity?: 'uuid' | 'titleOnly'; submission?: 'attempted' | 'sent' | null; diagnostics?: Record<string, unknown> | null }
 const UI_REPORT_GRACE_MS = 5000;
 
 /** Fixed UIA operations on the existing ChatGPT window (windows-native-worker.ps1). */
@@ -18,33 +18,38 @@ export class WindowsNativeUi {
   private lastStage = '';
   constructor(config: BridgeConfig) { this.config = config; }
   close(): void { this.child?.kill(); this.child=undefined; uiWorkers.delete(this); }
-  call(operation: 'snapshot' | 'chat-send' | 'chat-read-reply' | 'chat-open-title' | 'gpt-create', fields: { name: string; conversationId?: string; prompt?: string; project?: string }, signal: AbortSignal): Promise<UiResult> {
+  call(operation: 'snapshot' | 'chat-send' | 'chat-read-reply' | 'chat-open-title' | 'gpt-create', fields: { name: string; conversationId?: string; prompt?: string }, signal: AbortSignal): Promise<UiResult> {
     const pending=this.queue.then(()=>this.request(operation,fields,signal));
     // A failed operation is returned to its caller; subsequent requests are not replayed.
     this.queue=pending.then(()=>undefined,()=>undefined);
     return pending;
   }
+  /** Starts the worker without a request, so the first operation does not wait for it. */
+  warm(): void { if (process.platform === 'win32' && !this.child) this.start(); }
+  private start(): void {
+    const helper=fileURLToPath(new URL('./windows-native-worker.ps1',import.meta.url));
+    const script="& ([scriptblock]::Create([System.IO.File]::ReadAllText('"+helper.replaceAll("'","''")+"')))";
+    const executable=win32.join(process.env.SystemRoot ?? 'C:\\Windows','System32','WindowsPowerShell','v1.0','powershell.exe');
+    this.child=spawn(executable,['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(script,'utf16le').toString('base64')],{windowsHide:true,shell:false,env:controlledProcessEnv(),stdio:['pipe','pipe','pipe']});
+    this.child.stdout!.setEncoding('utf8');
+    const started=this.child;
+    const gone=()=>{if(this.child===started){this.child=undefined;uiWorkers.delete(this);}};
+    // A worker started ahead of any request must not crash the server if it fails to start.
+    started.once('close',gone);started.on('error',gone);
+    // Remember the last stage for error messages; forward stage lines only with ACB_DEBUG=1.
+    started.stderr!.setEncoding('utf8');
+    let partial='';
+    started.stderr!.on('data',(chunk:string)=>{
+      const lines=(partial+chunk).split(/\r?\n/);partial=lines.pop()!.slice(-65536);
+      for(const line of lines){if(!line.startsWith('ACB_UI_'))continue;if(line.startsWith('ACB_UI_STAGE='))this.lastStage=line.slice(13,160);if(this.config.debug)process.stderr.write(line+'\n');}
+    });
+    uiWorkers.add(this);
+  }
   private async request(operation: string, fields: Record<string,unknown>, signal: AbortSignal): Promise<UiResult> {
     if (process.platform !== 'win32') throw new BridgeError('UNSUPPORTED', 'Native UI controls require Windows');
     if (signal.aborted) throw new BridgeError('TIMEOUT','Native UI request cancelled before dispatch');
-    if (!this.child) {
-      const helper=fileURLToPath(new URL('./windows-native-worker.ps1',import.meta.url));
-      const script="& ([scriptblock]::Create([System.IO.File]::ReadAllText('"+helper.replaceAll("'","''")+"')))";
-      const executable=win32.join(process.env.SystemRoot ?? 'C:\\Windows','System32','WindowsPowerShell','v1.0','powershell.exe');
-      this.child=spawn(executable,['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(script,'utf16le').toString('base64')],{windowsHide:true,shell:false,env:controlledProcessEnv(),stdio:['pipe','pipe','pipe']});
-      this.child.stdout!.setEncoding('utf8');
-      const started=this.child;
-      started.once('close',()=>{if(this.child===started){this.child=undefined;uiWorkers.delete(this);}});
-      // Remember the last stage for error messages; forward stage lines only with ACB_DEBUG=1.
-      started.stderr!.setEncoding('utf8');
-      let partial='';
-      started.stderr!.on('data',(chunk:string)=>{
-        const lines=(partial+chunk).split(/\r?\n/);partial=lines.pop()!.slice(-65536);
-        for(const line of lines){if(!line.startsWith('ACB_UI_'))continue;if(line.startsWith('ACB_UI_STAGE='))this.lastStage=line.slice(13,160);if(this.config.debug)process.stderr.write(line+'\n');}
-      });
-      uiWorkers.add(this);
-    }
-    const child=this.child;
+    if (!this.child) this.start();
+    const child=this.child!;
     this.lastStage='';
     return new Promise((resolve,reject)=>{
       let output='';
@@ -63,7 +68,7 @@ export class WindowsNativeUi {
         if(!output.includes('\n'))return;
         try {
           const result=JSON.parse(output) as UiResult;
-          if(!result.ok)throw new BridgeError(ERROR_CODES.includes(result.code ?? '')?result.code as ErrorCode:'EXECUTION',`Native UI operation failed at ${result.stage}${result.treeReadable === false ? ' (UIA tree was unreadable)' : ''} (${result.errorType}, line ${result.line})${result.code === 'FOCUS_REQUIRED' ? '; Windows refused activation or the foreground/composer focus changed; no further input was sent' : ''}${result.stage === 'chatgpt-window' ? '; no single app window could be identified as ChatGPT (a minimized window cannot be read): show the ChatGPT window in ChatGPT mode and call again' : ''}${result.stage === 'gpt-project' ? '; the blank chat shows no project picker (更改项目) to confirm the project; nothing was typed or sent' : ''}`, { stage: result.stage, ...(result.submission ? { submission: result.submission } : {}), ...(result.diagnostics ? { diagnostics: result.diagnostics } : {}) });
+          if(!result.ok)throw new BridgeError(ERROR_CODES.includes(result.code ?? '')?result.code as ErrorCode:'EXECUTION',`Native UI operation failed at ${result.stage}${result.treeReadable === false ? ' (UIA tree was unreadable)' : ''} (${result.errorType}, line ${result.line})${result.code === 'FOCUS_REQUIRED' ? '; Windows refused activation or the foreground/composer focus changed; no further input was sent' : ''}${result.stage === 'chatgpt-window' ? '; no single app window could be identified as ChatGPT (a minimized window cannot be read): show the ChatGPT window in ChatGPT mode and call again' : ''}`, { stage: result.stage, ...(result.submission ? { submission: result.submission } : {}), ...(result.diagnostics ? { diagnostics: result.diagnostics } : {}) });
           finish(undefined,result);
         }catch(error){finish(error instanceof BridgeError?error:new BridgeError('IO','Windows UI worker returned an unreadable result'));}
       };

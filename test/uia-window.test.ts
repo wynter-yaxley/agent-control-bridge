@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 
-// Window choice, the GPT new-chat check and the project selection run as the real worker
+// Window choice and the GPT new-chat check run as the real worker
 // functions against mocks; no desktop is touched.
 const shell = process.platform === 'win32' ? 'powershell.exe' : 'pwsh';
 const available = spawnSync(shell, ['-NoProfile', '-NonInteractive', '-Command', '$PSVersionTable.PSVersion.Major'], { encoding: 'utf8', windowsHide: true }).status === 0;
@@ -64,34 +64,6 @@ function Case($mode,$composer,$messages,[switch]$strict) {$script:mode=$mode;$sc
   // The mode switch may disappear after sidebar navigation; the window was
   // already proven to be ChatGPT before navigation, so this is still a blank page.
   assert.deepEqual(result, { gpt: true, codex: false, noSwitchStrict: true, noSwitchBeforeSend: true, hasMessage: false, hasReply: false, noComposer: false });
-});
-
-test('project: only the menu item that appeared is chosen, and success needs the button to read the project back', { skip: !available }, () => {
-  const result = pwsh(`${fn('Within')}${fn('ChooseProject')}
-$request=[pscustomobject]@{timeoutMs=300;pollMs=50}
-function Prefixed($scope,[string]$prefix) {@($script:button)}
-function ProjectItems([string]$name) {@($script:items | Where-Object {$_.Name -eq $name -and ($_.Sidebar -or $script:open)})}
-function ElementKey($e) {$e.Key}
-function Expand($b) {$script:expanded++;$script:open=$true}
-function Choose($i) {$script:chosen+=$i.Key;if ($script:selects) {$script:button.Current.Name="更改项目：$($i.Name)"}}
-function Item([string]$key,[string]$name,[switch]$sidebar) {[pscustomobject]@{Key=$key;Name=$name;Sidebar=[bool]$sidebar}}
-function Case([string]$current,$items,[bool]$selects) {
- $script:button=[pscustomobject]@{Current=[pscustomobject]@{Name="更改项目：$current"}};$script:items=$items;$script:selects=$selects;$script:open=$false;$script:expanded=0;$script:chosen=@()
- $outcome=${attempt("ChooseProject 'ACB项目';'ok'")}
- @{outcome=$outcome;chosen=($script:chosen -join ',');expanded=$script:expanded;label=$script:button.Current.Name}
-}
-@{
- picked=(Case '无' @((Item 'side' 'ACB项目' -sidebar),(Item 'menu' 'ACB项目'),(Item 'other' '别的')) $true)
- notReadBack=(Case '无' @((Item 'menu' 'ACB项目')) $false)
- onlySidebar=(Case '无' @((Item 'side' 'ACB项目' -sidebar)) $true)
- twoInMenu=(Case '无' @((Item 'm1' 'ACB项目'),(Item 'm2' 'ACB项目')) $true)
- already=(Case 'ACB项目' @() $true)
-} | ConvertTo-Json -Compress -Depth 4`);
-  assert.deepEqual(result.picked, { outcome: 'ok', chosen: 'menu', expanded: 1, label: '更改项目：ACB项目' });
-  assert.equal(result.notReadBack.outcome, 'ERR:PROVENANCE'); assert.equal(result.notReadBack.chosen, 'menu');
-  assert.deepEqual([result.onlySidebar.outcome, result.onlySidebar.chosen], ['ERR:PROVENANCE', '']);
-  assert.deepEqual([result.twoInMenu.outcome, result.twoInMenu.chosen], ['ERR:PROVENANCE', '']);
-  assert.deepEqual([result.already.outcome, result.already.expanded], ['ok', 0]);
 });
 
 test('foreground: one verified UIA focus request waits for restore and never retries after denial or focus loss', { skip: !available }, () => {

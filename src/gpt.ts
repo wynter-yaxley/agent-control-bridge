@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { BridgeError, asBridgeError } from './errors.ts';
-import type { NativeChatPage, NativeProject, NativeThread } from './native.ts';
+import type { NativeChatPage, NativeThread } from './native.ts';
 import type { UiResult } from './windows-ui.ts';
 import { turnText, type TurnText } from './turns.ts';
 
@@ -10,9 +10,8 @@ export interface GptDeps {
     readThread(id: string, page?: { turnLimit?: number; cursor?: string; outputs?: boolean }): Promise<NativeChatPage>;
     listThreads(): Promise<NativeThread[]>;
     setThreadTitle(id: string, source: 'chatgpt', title: string): Promise<void>;
-    listProjects?(): Promise<NativeProject[]>;
   };
-  ui: { call(operation: 'snapshot' | 'chat-open-title' | 'chat-send' | 'chat-read-reply' | 'gpt-create', fields: { name: string; conversationId?: string; prompt?: string; project?: string }, signal: AbortSignal): Promise<UiResult> };
+  ui: { call(operation: 'snapshot' | 'chat-open-title' | 'chat-send' | 'chat-read-reply' | 'gpt-create', fields: { name: string; conversationId?: string; prompt?: string }, signal: AbortSignal): Promise<UiResult> };
   timeoutMs: number;
   pollMs: number;
 }
@@ -145,15 +144,13 @@ export async function sendGpt(deps: GptDeps, conversationId: string, text: strin
 
 /** Starts a new ordinary ChatGPT chat with a one-time identity marker, finds its exact
  * UUID in the native inventory, then names it natively. Titles must be unique so later
- * location stays unambiguous. With `project`, the chat is started in that existing
- * ChatGPT project; the UI must read the project back before anything is sent. */
+ * location stays unambiguous. */
 const oneLine = (value: unknown, field: string) => {
   if (typeof value !== 'string' || !value.trim() || value.length > 200 || /[\r\n]/.test(value)) throw new BridgeError('INPUT', `${field} must be one line of 1..200 characters`);
 };
 
-export async function createGpt(deps: GptDeps, title: string, project?: string): Promise<{ conversationId: string; title: string; project?: { name: string; confirmedBy: 'ui' | 'ui+native'; projectId: string | null } }> {
+export async function createGpt(deps: GptDeps, title: string): Promise<{ conversationId: string; title: string }> {
   oneLine(title, 'Title');
-  if (project !== undefined) oneLine(project, 'Project');
   const deadline = Date.now() + deps.timeoutMs;
   const budget = (cap: number) => Math.max(0, Math.min(cap, deadline - Date.now()));
   const inventory = await deps.native.listThreads();
@@ -163,12 +160,11 @@ export async function createGpt(deps: GptDeps, title: string, project?: string):
   let id: string | null = null, actualTitle: string | null = null, stage = 'initialization', submitted = false, identityVerified = false;
   let verification: Record<string, unknown> | undefined;
   try {
-    const sent = await deps.ui.call('gpt-create', project ? { name: '', prompt, project } : { name: '', prompt }, signal(deps));
+    const sent = await deps.ui.call('gpt-create', { name: '', prompt }, signal(deps));
     submitted = true;
     id = sent.conversationId ?? null;
-    if (project && sent.project !== project) throw new BridgeError('PROVENANCE', 'The project selection was not confirmed by the app');
     stage = 'identity';
-    const row = await until(async () => {
+    const found = await until(async () => {
       const rows = await deps.native.listThreads();
       // A public UI UUID can be read directly even when manual sorting keeps it
       // outside the host's bounded list. It is still verified by the exact marker.
@@ -181,11 +177,11 @@ export async function createGpt(deps: GptDeps, title: string, project?: string):
         if (page.turns[0].error || ['failed', 'interrupted'].includes(page.turns[0].status)) throw new BridgeError('EXECUTION', 'The initialization turn failed');
         // Wait until auto-titling and the initial turn finish before renaming.
         if (!done(page, page.turns[0])) return undefined;
-        return rows.find(t => t.id === candidate) ?? { id: candidate, kind: 'chatgpt', title: page.thread.title, projectId: null, cwd: null };
+        return true;
       }
       return undefined;
     }, budget(120000), deps.pollMs);
-    if (!row || !id) throw new BridgeError('TIMEOUT', 'The marker was submitted but its completed conversation could not be confirmed in the native inventory');
+    if (!found || !id) throw new BridgeError('TIMEOUT', 'The marker was submitted but its completed conversation could not be confirmed in the native inventory');
     const createdId = id;
     stage = 'title';
     // No new write once the create budget is spent.
@@ -217,10 +213,7 @@ export async function createGpt(deps: GptDeps, title: string, project?: string):
       return stable >= 2 ? true : undefined;
     }, budget(120000), deps.pollMs);
     if (!confirmed) throw new BridgeError(stage === 'title' ? 'STATE' : 'PROVENANCE', 'The created chat title, persisted identity and ChatGPT page did not agree');
-    if (!project) return { conversationId: createdId, title };
-    const native = row.projectId ? (await deps.native.listProjects?.())?.find(item => item.projectId === row.projectId) : undefined;
-    if (native && native.label !== project) throw new BridgeError('PROVENANCE', `Chat ${createdId} was created in another project (${native.label})`);
-    return { conversationId: createdId, title, project: { name: project, confirmedBy: native ? 'ui+native' : 'ui', projectId: row.projectId } };
+    return { conversationId: createdId, title };
   } catch (error) {
     const failure = asBridgeError(error);
     if (!submitted && !failure.details?.submission) throw error;

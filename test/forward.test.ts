@@ -5,7 +5,7 @@ import { PassThrough, Writable } from 'node:stream';
 import type { spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createGpt, readGptWithWindow, sendGpt } from '../src/gpt.ts';
-import { createCodex, listCodex, readCodex, sendCodex } from '../src/codex.ts';
+import { closeCodex, createCodex, listCodex, readCodex, sendCodex } from '../src/codex.ts';
 import { createWorkspace } from '../src/workspace.ts';
 import { BridgeError } from '../src/errors.ts';
 import type { NativeChatPage, NativeThread } from '../src/native.ts';
@@ -85,33 +85,6 @@ test('gpt: a new chat is identified by its own marker turn, never by title, then
   assert.deepEqual(await createGpt(deps, 'ACB 测试'), { conversationId: 'new-id', title: 'ACB 测试' });
   assert.match(marker, /ACB_INIT_[a-f0-9-]{36}$/);
   await assert.rejects(createGpt(deps, 'old'), { code: 'CONFLICT' });
-});
-
-test('gpt: a chat started in a project counts only when the app read the project back; a wrong window sends nothing', async () => {
-  function setup(echo: string | undefined, projectId: string | null, label = 'ACB项目', fail?: string) {
-    const inventory: NativeThread[] = [row('old-id', 'old')];
-    let marker = '', titled = '', renamed = false, sentProject: string | undefined;
-    const { deps } = gpt([]);
-    Object.assign(deps.native, { listThreads: async () => inventory, setThreadTitle: async (_id: string, _source: string, title: string) => { titled = title; renamed = true; inventory.find(t => t.id === 'new-id')!.title = title; },
-      listProjects: async () => [{ projectId: 'p-1', projectKind: 'chatgpt', label, path: '', hostId: '' }],
-      readThread: async (id: string) => idleChat(id, titled || '新聊天', id === 'new-id' ? [answered('t', marker)] : []) });
-    deps.ui.call = (async (operation: string, fields: { prompt?: string; project?: string }) => {
-      if (operation !== 'gpt-create') return { ok: true, snapshot: { title: titled, text: '', ordinaryComposer: true, pid: 1, conversationId: null } };
-      if (fail) throw Object.assign(new Error(fail), { code: fail });
-      marker = fields.prompt!; sentProject = fields.project; inventory.push({ ...row('new-id', '新聊天'), projectId });
-      return { ok: true, project: echo };
-    }) as typeof deps.ui.call;
-    return { deps, renamed: () => renamed, sentProject: () => sentProject };
-  }
-  const ok = setup('ACB项目', 'p-1');
-  assert.deepEqual(await createGpt(ok.deps, 'ACB 项目对话', 'ACB项目'), { conversationId: 'new-id', title: 'ACB 项目对话', project: { name: 'ACB项目', confirmedBy: 'ui+native', projectId: 'p-1' } });
-  assert.equal(ok.sentProject(), 'ACB项目');
-  assert.deepEqual((await createGpt(setup('ACB项目', null).deps, 'ACB 项目对话', 'ACB项目')).project, { name: 'ACB项目', confirmedBy: 'ui', projectId: null });
-  // Not read back by the UI, or a native project of another name, or the worker refused the window.
-  for (const [blocked, code, renamed] of [[setup(undefined, 'p-1'), 'PROVENANCE', false], [setup('ACB项目', 'p-1', '别的项目'), 'PROVENANCE', true], [setup('ACB项目', 'p-1', 'ACB项目', 'OWNER'), 'OWNER', false]] as const) {
-    await assert.rejects(createGpt(blocked.deps, 'ACB 项目对话', 'ACB项目'), { code });
-    assert.equal(blocked.renamed(), renamed);
-  }
 });
 
 test('gpt: create reports partial completion and its ID when title or persistence verification fails, without repeating the marker', async () => {
@@ -236,11 +209,15 @@ function appServer(threads: Record<string, { turns: Record<string, unknown>[]; a
         const message = JSON.parse(line), params = message.params ?? {}; seen.push(message);
         if (message.id === undefined || !message.method) continue;
         if (message.method === 'thread/start') { threads['new-thread'] = { turns: [] }; reply({ id: message.id, result: { thread: { id: 'new-thread' } } }); }
-        else if (message.method === 'thread/read' && failing > 0) { failing--; reply({ id: message.id, error: { code: -32603, message: 'thread store internal error' } }); }
-        else if (message.method === 'thread/read') reply({ id: message.id, result: { thread: { id: params.threadId, name: `name of ${params.threadId}`, cwd: 'D:\\ws', updatedAt: 1792800000, status: { type: 'idle' }, turns: threads[params.threadId].turns } } });
+        else if (message.method === 'thread/turns/list' && failing > 0) { failing--; reply({ id: message.id, error: { code: -32603, message: 'thread store internal error' } }); }
+        // Like the real App Server: newest first, a cursor while older turns remain.
+        else if (message.method === 'thread/turns/list') { const all = [...threads[params.threadId].turns].reverse(); reply({ id: message.id, result: { data: all.slice(0, params.limit), nextCursor: all.length > params.limit ? 'older' : null } }); }
+        else if (message.method === 'thread/read') reply({ id: message.id, result: { thread: { id: params.threadId, name: `name of ${params.threadId}`, cwd: 'D:\\ws', updatedAt: 1792800000, status: { type: 'idle' }, turns: params.includeTurns ? threads[params.threadId].turns : [] } } });
         else if (message.method === 'thread/list' && listShape === 'changed') reply({ id: message.id, result: { threads: [] } });
         else if (message.method === 'thread/list') reply({ id: message.id, result: { data: Object.keys(threads).map(id => ({ id, name: null, preview: 'p'.repeat(300), cwd: 'D:\\ws', updatedAt: 1792800000, status: { type: 'notLoaded' }, turns: [] })), nextCursor: 'next' } });
         else if (message.method === 'thread/unarchive') { threads[params.threadId].archived = false; reply({ id: message.id, result: {} }); }
+        // Like the real App Server, an archived thread cannot be resumed.
+        else if (message.method === 'thread/resume' && threads[params.threadId].archived) reply({ id: message.id, error: { code: -32600, message: 'session is archived' } });
         else if (message.method === 'turn/start') {
           const thread = threads[params.threadId];
           if (thread.archived) { reply({ id: message.id, error: { code: -32600, message: 'thread is archived' } }); continue; }
@@ -269,8 +246,8 @@ test('codex: sends one turn, declines approvals, recovers an archived thread onc
   const result = await sendCodex(options(first.spawnFn), 'codex-id', prompt);
   assert.deepEqual({ ...result }, { threadId: 'codex-id', turnId: 'turn-2', reply: 'OK', messageIds: ['m2'], alreadySent: false, approvalsDeclined: 1 });
   assert.deepEqual(first.seen.find(message => message.id === 'approval-1')?.result, { decision: 'decline' });
-  assert.deepEqual(first.seen.filter(message => message.method).map(message => message.method).filter(method => method !== 'thread/read' && method !== 'initialize' && method !== 'initialized'),
-    ['thread/resume', 'turn/start', 'thread/unarchive', 'thread/resume', 'turn/start']);
+  assert.deepEqual(first.seen.filter(message => message.method).map(message => message.method).filter(method => !['thread/read', 'thread/turns/list', 'initialize', 'initialized'].includes(method)),
+    ['thread/resume', 'thread/unarchive', 'thread/resume', 'turn/start']);
   const again = appServer(threads);
   assert.equal((await sendCodex(options(again.spawnFn), 'codex-id', prompt)).alreadySent, true);
   assert.equal(again.seen.filter(message => message.method === 'turn/start').length, 0);
@@ -301,6 +278,20 @@ test('codex: a new conversation starts in the workspace, is persisted by its fir
   await assert.rejects(createCodex(options(appServer({}, 4).spawnFn), 'D:\\ws', 'ACB Codex', 'hi'), (error: any) => error.code === 'EXECUTION');
 });
 
+test('codex: overlapping reads leave one idle timer, which never closes the App Server under a running send', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const server = appServer({ 'codex-id': { turns: [] } }, 0, true);
+  const overlap = { executable: 'codex-overlap', timeoutMs: 1_000_000, pollMs: 1000, spawnFn: server.spawnFn };
+  await Promise.all([listCodex(overlap), listCodex(overlap)]);
+  const sending = sendCodex(overlap, 'codex-id', 'hello');
+  for (let i = 0; i < 20; i++) await new Promise(resolve => setImmediate(resolve));
+  // The turn completes at +20 ms; an idle timer left by either read would fire at +10 min.
+  t.mock.timers.tick(600_000);
+  assert.equal((await sending).reply, 'OK');
+  assert.equal(server.seen.filter(message => message.method === 'initialize').length, 1);
+  closeCodex();
+});
+
 test('codex read: lists and reads conversations through the App Server without sending, resuming or starting anything', async () => {
   const turn = (n: number, extra: Record<string, unknown>[] = []) => ({ id: `turn-${n}`, status: 'completed', items: [{ type: 'userMessage', content: [{ type: 'text', text: `ask ${n}` }] }, ...extra, { type: 'agentMessage', id: `m${n}`, text: `reply ${n}` }] });
   const server = appServer({ 'codex-id': { turns: [turn(1), turn(2, [{ type: 'agentMessage', phase: 'commentary', text: 'thinking' }, { type: 'commandExecution', command: 'ls' }]), turn(3)] } });
@@ -308,9 +299,11 @@ test('codex read: lists and reads conversations through the App Server without s
   assert.deepEqual(listed, { threads: [{ threadId: 'codex-id', name: null, preview: 'p'.repeat(200), cwd: 'D:\\ws', status: 'notLoaded', updatedAt: '2026-10-24T00:00:00.000Z' }], nextCursor: 'next' });
   assert.deepEqual(server.seen.find(message => message.method === 'thread/list')!.params, { limit: 5, sortKey: 'updated_at', cwd: 'D:\\ws' });
   const read = await readCodex(options(server.spawnFn), 'codex-id', 2);
-  assert.equal(read.name, 'name of codex-id'); assert.equal(read.turnCount, 3);
+  assert.equal(read.name, 'name of codex-id'); assert.equal(read.hasMore, true);
   assert.deepEqual(read.turns, [{ turnId: 'turn-2', status: 'completed', prompt: 'ask 2', reply: 'reply 2', truncated: false, error: null }, { turnId: 'turn-3', status: 'completed', prompt: 'ask 3', reply: 'reply 3', truncated: false, error: null }]);
-  assert.deepEqual(server.seen.filter(message => message.method).map(message => message.method).filter(method => !['initialize', 'initialized'].includes(method)), ['thread/list', 'thread/read']);
+  // Metadata plus the newest turns only: the whole history is never loaded.
+  assert.deepEqual(server.seen.filter(message => message.method).map(message => [message.method, message.params.includeTurns ?? message.params.limit ?? null]).filter(([method]) => !['initialize', 'initialized'].includes(method)),
+    [['thread/list', 5], ['thread/read', null], ['thread/turns/list', 2]]);
   await assert.rejects(readCodex(options(server.spawnFn), 'bad id'), { code: 'INPUT' });
   await assert.rejects(readCodex(options(server.spawnFn), 'codex-id', 21), { code: 'INPUT' });
   await assert.rejects(listCodex(options(server.spawnFn), { limit: 0 }), { code: 'INPUT' });

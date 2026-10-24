@@ -1,91 +1,138 @@
-# agent-control-bridge (ACB)
+# agent-control-bridge
 
 [![CI](https://github.com/wynter-yaxley/agent-control-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/wynter-yaxley/agent-control-bridge/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D24.19-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org/)
 [![Platform: Windows](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D6)](#requirements)
 [![MCP](https://img.shields.io/badge/MCP-stdio%20server-6E56CF)](https://modelcontextprotocol.io/)
-[![Hermes Skill](https://img.shields.io/badge/Hermes-skill%20included-F59E0B)](skills/agent-control-bridge/SKILL.md)
 
 [中文](README.md)
 
-Agent Control Bridge (ACB) is an MCP server that splits the ChatGPT / Codex desktop app into **independent tools**: list, find and read Codex conversations; list and read ChatGPT conversations; create a conversation; send one prompt to a conversation and return its real reply. Each tool does one thing. The caller (Hermes or any MCP client) picks and combines them as the task requires; ACB prescribes no workflow.
+An MCP server that lets an AI agent use the ChatGPT and Codex conversations of the **ChatGPT desktop app** on your PC: list, search, read and create conversations, send a message and get the real reply.
+
+- **One tool, one job**: reading, searching, creating and sending are independent. There is no fixed workflow.
+- **Background whenever possible**: every Codex operation and every ChatGPT read leaves your windows alone.
+- **Never sends twice**: calling again with the same message after a timeout returns the reply instead of resending.
+- **Runs locally**: ACB itself uploads nothing (messages you send are handled by ChatGPT/Codex under their own terms), reads no credentials, and never grants Codex approvals for you.
 
 ![Architecture](docs/images/architecture.svg)
 
+## What it can do
+
+| Tool | Does | Disturbs you? |
+|---|---|---|
+| `acb_codex_list` | List recent Codex conversations (optionally of one folder) | No |
+| `acb_codex_find` | Search Codex conversations | No |
+| `acb_codex_read` | Read the latest turns of a Codex conversation | No |
+| `acb_codex_create` | Start a Codex conversation in a folder | No |
+| `acb_codex_send` | Send a message to Codex and return its reply | No |
+| `acb_workspace_create` | Create a folder and register it as a Codex project | No |
+| `acb_gpt_list` | List ChatGPT conversations | No |
+| `acb_gpt_read` | Read the latest turns of a ChatGPT conversation | No (opens it to read a reply body) |
+| `acb_gpt_open` | Show a ChatGPT conversation in the app | Switches the shown chat |
+| `acb_gpt_create` | Create and name a ChatGPT conversation | Activates the window and types |
+| `acb_gpt_send` | Send a message to ChatGPT and return its reply | Activates the window and types |
+| `acb_threads` / `acb_projects` | List all sidebar conversations / projects | No |
+| `acb_status` | Self-check: what is missing and how to fix it | No |
+
 ## Requirements
 
-Windows 10/11 (ChatGPT tools are Windows-only), Node.js 24.19+ on Windows, the ChatGPT / Codex desktop app (signed in; current builds ship as "ChatGPT", Store package `OpenAI.Codex`, main program `app\ChatGPT.exe`, and host both ChatGPT chats and Codex tasks; its bundled `codex.exe` is found automatically) and an MCP client such as Hermes on Windows or in WSL. The Codex tools only need `codex app-server` and may work on macOS/Linux, untested.
+Windows 10/11, [Node.js](https://nodejs.org/) 24.19+ on Windows, the ChatGPT desktop app (Microsoft Store, includes Codex) signed in and with Codex used at least once, and an MCP client such as Hermes or Claude Desktop. The Codex tools may also work on macOS/Linux with the `codex` command installed (untested).
 
-## Install and connect Hermes
+## Install
 
 ```powershell
 git clone https://github.com/wynter-yaxley/agent-control-bridge.git
 cd agent-control-bridge
-npm install        # installs and builds dist/
-npm run check      # read-only self-check; prints the Hermes commands for this machine
+npm install        # installs and builds
+npm run check      # self-check; prints the client configuration for this machine
 ```
 
-Run the `hermes` commands printed by `npm run check` (one MCP registration and one skill copy, for Hermes on Windows or in WSL), for example:
+## Connect an MCP client
 
-```bash
-hermes mcp add acb --command '/mnt/c/Program Files/nodejs/node.exe' --args 'D:\agent-control-bridge\dist\mcp.js' --allow-foreground-input
-cp -r '/mnt/d/agent-control-bridge/skills/agent-control-bridge' ~/.hermes/skills/
+Add this to your MCP client (with your paths; `npm run check` prints it filled in):
+
+```json
+{
+  "mcpServers": {
+    "acb": {
+      "command": "C:\\Program Files\\nodejs\\node.exe",
+      "args": ["D:\\agent-control-bridge\\dist\\mcp.js", "--allow-foreground-input"]
+    }
+  }
+}
 ```
 
-Then start a new Hermes session (or `/reload-mcp`). Keep the server name `acb`. `--allow-foreground-input` authorizes restoring/activating the verified ChatGPT window and typing; without it ACB never activates or types and can only submit an identical draft while ChatGPT is already in front. A manual alternative is [config/hermes-mcp.example.yaml](config/hermes-mcp.example.yaml).
+**Hermes** users can run the `hermes mcp add ...` command printed by `npm run check` and copy [skills/agent-control-bridge](skills/agent-control-bridge/SKILL.md) into Hermes' skills folder (also printed). The skill tells the agent how to use each tool and what to watch out for; other clients can use it as a system prompt.
 
-The skill [skills/agent-control-bridge/SKILL.md](skills/agent-control-bridge/SKILL.md) describes what each tool does, when a read tool is enough, and the safety rules that must not be weakened (no resend, no approvals, stop on focus loss, act on the error code). It assigns no roles and prescribes no workflow. Hermes lists skills in every prompt and loads matching ones; check with `hermes skills list` or load it with `/agent-control-bridge`.
+Set the client's tool timeout to 300 s or more: a send waits up to 240 s.
 
-Configuration is optional: options, then `ACB_CODEX`, `ACB_CARRIER_THREAD`, `ACB_WORKSPACE_ROOT`, `ACB_ALLOW_FOREGROUND_INPUT=1`, `ACB_DEBUG=1`, `ACB_CONFIG`, then a JSON file ([config/config.example.json](config/config.example.json)), then discovery. Defaults: newest desktop `codex.exe`, the most recent Codex conversation as desktop context, `%USERPROFILE%\acb-workspaces`, a 240 s send timeout (below Hermes' 300 s tool timeout), no logs.
+## Good to know
 
-## Tools
+**`--allow-foreground-input`** lets ACB bring the ChatGPT window to the front and type when you send to or create a ChatGPT conversation.
 
-The tools are independent: reading a Codex conversation needs only the Codex group; reading a ChatGPT reply needs only `acb_gpt_read`.
+- Don't use the keyboard or mouse while it types. If you switch away, ACB stops at once, never takes focus back and never sends the partial text (it may remain in the input box).
+- A minimized window is restored first and checked to be ChatGPT before anything is typed.
+- Without the flag ACB never activates or types; it only submits an identical draft that is already in the input box while ChatGPT is in front.
+- Read tools and Codex tools don't need the flag.
 
-| Group | Tool | Arguments | Mode |
-|---|---|---|---|
-| Codex (`codex app-server`, background, no window) | `acb_codex_list` | `limit?` (1-100), `cwd?`, `cursor?` | read-only: recently updated conversations, `nextCursor` |
-| | `acb_codex_find` | `searchTerm` | read-only full-text search |
-| | `acb_codex_read` | `threadId`, `turns?` (1-20) | read-only: prompt/reply text of the newest turns, oldest first |
-| | `acb_codex_create` | `cwd`, `title`, `prompt?` | creates and answers a first turn |
-| | `acb_codex_send` | `threadId`, `prompt` | sends one prompt |
-| | `acb_workspace_create` | `name`, `path?` | directory + Codex project, idempotent |
-| ChatGPT | `acb_gpt_list` | — | read-only native inventory, no window |
-| | `acb_gpt_read` | `conversationId`, `turns?` (1-10), `cursor?`, `window?` | read by ID, no window; `nextCursor` reads older turns. The desktop transcript often keeps a reply only as a content reference (`replyInWindowOnly: true`); `window: true` shows the chat (as `acb_gpt_open`) and reads the newest reply through UIA. Never types or sends |
-| | `acb_gpt_open` | `conversationId` | clicks in the ChatGPT window |
-| | `acb_gpt_create` | `title`, `project?` (an existing ChatGPT project) | foreground typing |
-| | `acb_gpt_send` | `conversationId`, `prompt` | foreground typing |
-| Desktop | `acb_threads`, `acb_projects` | — | read-only sidebar inventory (both kinds) and projects |
-| | `acb_status` | — | read-only self-check with diagnostics |
+**ChatGPT conversations**
 
-Errors are `{"ok":false,"code","message"}`, with `fix` and diagnostics where known. A repeated prompt is never resent: after `TIMEOUT`, call again with the same prompt to read the reply. Tools are never chained automatically: to pass a ChatGPT reply to Codex, read it, then send it.
+- The window must be in **ChatGPT mode** (not Codex mode); ACB does not switch modes.
+- Titles of new conversations must be unique so they can be found reliably.
+- ACB only types into a conversation it can identify: it is shown, or it has exactly one sidebar entry with that title. Duplicate titles are refused.
+- The app gives ACB the latest 50 conversations (plus pinned ones); open older ones in the app first.
+- The app's transcript usually doesn't keep the text of ChatGPT replies. `acb_gpt_read` then marks the reply `replyInWindowOnly`; read again with `window: true` (opens the chat).
 
-## After a desktop app update
+**Codex conversations**
 
-- The auto-discovered `codex.exe` is discovered again before every use, so a long-running server follows the app's version folder after an update instead of failing with `DEPENDENCY`. A configured path is used as given; if that file is gone, the error says so.
-- Since v26.1021 the app serves its app tools (`tools/call`: inventory, read, rename) on a dedicated `codex-app-tools-<uuid>` pipe; `codex-browser-use-<uuid>` only answers browser automation and `ping`. ACB prefers the new pipe and falls back to the old one for older builds; host verification (same session and user, OpenAI signature, one process) is unchanged. After a failed request the helper rediscovers the pipe, so an app restart needs no server restart.
-- A rejected request keeps the host's code and message (`nativeError`, e.g. `[-1] No handler registered for method: tools/call`). `acb_status` reports `server.pid/startedAt`, the Codex path, `nativeIpc.host.appVersion/pipe` and the pipe counts.
-- If the app-server warns that `computer_use.windows.always_allowed_app_ids` is ignored, remove that deprecated key from `~/.codex/config.toml` (ACB does not edit it).
+- Command and file approvals are always declined and counted in the result. Approve in the app, or change the conversation's approval settings.
+- Archived conversations are unarchived when you send to them.
+- A task longer than 240 s returns `TIMEOUT` while it keeps running. Call again later with the **same message** to get the reply; it is not sent again.
 
-## Foreground and background
+**Other**
 
-Codex, list and read tools run in the background. `--allow-foreground-input` explicitly authorizes ACB to restore a minimized, verified ChatGPT window and try to activate it once before GPT navigation/typing. It waits for restoration to complete, then requests focus once on the sole usable composer inside that verified window, without writing or clearing its draft. It checks the actual Windows foreground handle and composer focus. If Windows refuses or the user changes windows/focus during input, ACB stops with `FOCUS_REQUIRED`, never repeatedly takes focus, and never submits the partial text. Without authorization it never activates or types; an identical draft can only be submitted while ChatGPT is already in front. No mouse, clipboard or focus-lock workaround is used. A Codex or unidentified window is refused. A minimized window exposes no UI tree; when it is the app's only window and input is authorized, ACB restores it once (no focus, no typing) and then identifies it as usual. The user still approves Codex commands, creates ChatGPT projects, moves existing chats into projects and opens chats missing from the sidebar.
+- Sends, creations and window operations run one at a time; reads always answer immediately.
+- App updates need no restart of ACB; after updating ACB itself, reload MCP in your client (`/reload-mcp` in Hermes).
+- ACB can't create ChatGPT projects or move chats into them.
 
-Single-line input uses SendInput. The editor collapses consecutive Shift+Enter breaks, so multiline input uses the verified composer's supported UIA ValuePattern in chunks, replacing only the exact prefix written by this operation and checking its text, foreground and focus after every write. Blank lines must read back exactly before submission.
+## Troubleshooting
 
-Focus errors include `diagnostics.focusReason`: `activationDenied`, `foregroundChanged`, `composerFocusLost`, or `foregroundNotAuthorized`. They also include the actual `targetHandle`, `foregroundHandle`, and `typedLength` of the completed prefix in UTF-16 units, without prompt text. Foreground checks run immediately before writes, submission and failure cleanup; a focus loss leaves the draft untouched.
+Ask the agent to call `acb_status` (or run `npm run check`) and follow its `fix`.
 
-After an activation attempt, focus errors also include `diagnostics.activation`: `method`, restore-request acceptance (`restoreAccepted`), UIA request completion (`requestCompleted`), and an exception's `hresult`, as applicable. A completed request does not prove that the window became foreground.
+| Code | Usually means | Do |
+|---|---|---|
+| `TIMEOUT` | The reply isn't ready | Call again later with the same message |
+| `CONFLICT` | The conversation is busy, or you have a draft | Wait, or clear the input box |
+| `FOCUS_REQUIRED` | The window lost focus while typing, or Windows refused activation | Go back to ChatGPT and retry |
+| `AUTH` | `--allow-foreground-input` is not set | Add it to the configuration |
+| `OWNER` | The app isn't running, or no window is in ChatGPT mode | Open the app in ChatGPT mode |
+| `PROVENANCE` | The conversation can't be identified (duplicate title, not recent) | Open it in the app, or use a unique title |
+| `CONFIG` | Codex not found, or no Codex conversation yet | Install the app and use Codex once |
+| `DEPENDENCY` / `IO` | The app isn't responding, or ChatGPT isn't signed in | Follow `acb_status` |
+| `EXECUTION` | The Codex task failed, or an approval was declined | Read the reply; approve in the app |
 
-## Limits
+If creating a ChatGPT conversation fails half-way, the result includes the created conversation's ID (`status: "partial"`). Look at it before creating again.
 
-ChatGPT projects cannot be created and existing chats cannot be moved into one (the project list is invisible to UIA); a new chat can start in an existing project. Known issue: desktop app v26.1021 shows no project picker on the blank chat page, so `acb_gpt_create` with `project` stops with `PROVENANCE` at `gpt-project` before typing; creation without `project` works. ChatGPT exposes no conversation UUID in the window, so identity is "unique title + desktop inventory" (`uiIdentity: "titleOnly"`).
+## Configuration (optional)
 
-The native host returns at most 50 non-pinned chats plus pinned chats, uses sidebar sorting and has no pagination parameter. Missing inventory entries are never treated as proven identities. Creation uses only the left-sidebar New chat button, checks the blank page, sends one initialization marker, verifies its real ID and completion, then renames and checks native readback, the inventory entry for the same ID and the app page twice; a correct page UUID does not replace the inventory check. The sidebar can lag by about a minute; creation waits within its original timeout budget for agreement and writes no title once that budget is spent. Failure after submission returns `status: "partial"`, the known `conversationId` (null if unknown), actual `title`, `requestedTitle`, `identityVerified`, `stage` and relevant title verification results. Read that chat before further action; never create a replacement or resend the marker. `STATE` covers blank-page/composer verification; `PROVENANCE` covers conversation identity/persistence; `FOCUS_REQUIRED` covers activation/focus.
+| Option | Flag / environment | Default |
+|---|---|---|
+| Allow foreground input | `--allow-foreground-input` / `ACB_ALLOW_FOREGROUND_INPUT=1` | off |
+| Codex executable | `--codex` / `ACB_CODEX` | the app's bundled `codex.exe` |
+| Folder for new workspaces | `ACB_WORKSPACE_ROOT` | `%USERPROFILE%\acb-workspaces` |
+| Longest wait for one send | `timeoutMs` in a `--config` JSON file | 240000 ms |
+| Debug log | `--debug` / `ACB_DEBUG=1` | off |
 
 ## Development
 
-`npm ci`, `npm run typecheck`, `npm test` (mocks only), `npm run smoke -- --name ACB-smoke --path C:\temp\acb-smoke` (real Windows run, sends real messages). `--scope codex|gpt` limits the smoke run to one group. The PowerShell workers must stay UTF-8 with BOM; the build checks it. MIT licensed. Upgrading from 0.4: tool names and arguments are unchanged; `acb_codex_list`, `acb_codex_read`, `acb_gpt_list` and `acb_gpt_read` are new; the `codex-app-tools` pipe is supported; the skill no longer prescribes a Hermes → GPT → Codex workflow. Upgrading from 0.3: `--carrier-thread` and `--codex` are optional, the default timeout is 240 s, `acb_status` is new, `scripts/acceptance.mjs` is now `npm run smoke`; existing tool names and arguments are unchanged.
+```powershell
+npm ci; npm run typecheck; npm test     # mocks only, no real conversations
+npm run smoke -- --name ACB-smoke       # real Windows run: creates conversations and sends messages
+```
 
-After a smoke failure, `--gpt-conversation <known ID> --codex-thread <known ID>` resumes those isolated chats without recreating them or resending initialization markers. The optional project test is skipped without `--gpt-project`.
+See [AGENTS.md](AGENTS.md), [CONTRIBUTING.md](CONTRIBUTING.md) and [CHANGELOG.md](CHANGELOG.md).
+
+## License
+
+[MIT](LICENSE) · third-party licenses in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)

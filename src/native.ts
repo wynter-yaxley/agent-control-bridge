@@ -42,6 +42,8 @@ export class NativeReadWorker {
     const child = this.child; this.child = undefined;
     if (child?.exitCode === null) child.kill();
   }
+  /** Replaces the worker once the requests already queued have finished. */
+  reset(): void { this.queue = this.queue.then(() => this.close()); }
   request(input: JsonObject, timeoutMs: number, signal?: AbortSignal): Promise<JsonObject> {
     const deadline = Date.now() + timeoutMs;
     const pending = this.queue.then(() => this.run(input, deadline - Date.now(), signal));
@@ -127,7 +129,7 @@ export class NativeClient {
     if (envelope.ok !== true) {
       // The worker keeps the pipe it verified; after the desktop app restarts or updates,
       // that pipe is gone. A fresh worker discovers and verifies the host again next time.
-      this.worker.close();
+      this.worker.reset();
       throw new BridgeError(envelope.code === 'TIMEOUT' ? 'TIMEOUT' : envelope.code === 'OWNER' ? 'OWNER' : 'IO', `Native worker refused the request at ${brief(envelope.stage, 40)}`, { stage: brief(envelope.stage, 40) });
     }
     const peer = object(envelope.peer);
@@ -143,7 +145,7 @@ export class NativeClient {
       // The pipe the worker kept may be one that no longer serves app tools (e.g. found
       // before the host opened its app-tools pipe): discover again on the next call. The
       // request itself is not repeated.
-      this.worker.close();
+      this.worker.reset();
       throw new BridgeError(code === -32602 ? 'IPC_CONFIG' : 'IO', `Native request was rejected: [${code ?? '?'}] ${message || 'no message'}`, { nativeError: { code, message }, pipe: this.verified.pipe });
     }
     const result = object(response.result);

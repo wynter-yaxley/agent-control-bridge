@@ -485,45 +485,7 @@ try {
   $doc=Document
   return ($doc -and $null -ne (FindComposer $doc) -and -not (Find $doc 'Text' '你说：') -and -not (Find $doc 'Text' '您说：') -and -not (Find $doc 'Text' 'ChatGPT 说：'))
  }
- function Expand($element) {
-  if (-not [AcbFolderControls]::Interactive()) {throw 'OWNER'}
-  $pattern=$null
-  if ($null -eq $element -or -not $element.Current.IsEnabled -or $element.Current.IsOffscreen) {throw 'STATE'}
-  if (-not $element.TryGetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern,[ref]$pattern)) {Invoke $element;return}
-  AssertForeground
-  # Radix menus may report Collapsed while open; Expand then refuses, which means open.
-  try {([System.Windows.Automation.ExpandCollapsePattern]$pattern).Expand()} catch [InvalidOperationException] {}
- }
- function Choose($item) {
-  $pattern=$null
-  if ($item.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern,[ref]$pattern)) {Invoke $item;return}
-  if (-not [AcbFolderControls]::Interactive()) {throw 'OWNER'}
-  if ($item.Current.IsOffscreen -or -not $item.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern,[ref]$pattern)) {throw 'STATE'}
-  AssertForeground
-  ([System.Windows.Automation.SelectionItemPattern]$pattern).Select()
- }
- function ProjectItems([string]$name) {
-  return @($script:root.FindAll([System.Windows.Automation.TreeScope]::Descendants,[System.Windows.Automation.AndCondition]::new([System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::ListItem),[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::NameProperty,$name))))
- }
  function ElementKey($element) {return ($element.GetRuntimeId() -join '.')}
- # Puts the blank new chat into an existing ChatGPT project via "更改项目". The sidebar
- # lists projects too, so only an item that appeared with the menu counts, and the
- # button must read the project back; otherwise nothing is typed or sent.
- function ChooseProject([string]$project) {
-  $script:stage='gpt-project';[Console]::Error.WriteLine("ACB_UI_STAGE=$script:stage")
-  $label='更改项目：'
-  $button=@(Prefixed $script:root $label)
-  if ($button.Count -ne 1) {throw 'PROVENANCE'}
-  if ($button[0].Current.Name -eq "$label$project") {return}
-  $before=@(ProjectItems $project | ForEach-Object {ElementKey $_})
-  Expand $button[0]
-  $script:stage='gpt-project-list'
-  $items=@(Within 5000 {@(ProjectItems $project | Where-Object {(ElementKey $_) -notin $before})} | Where-Object {$_})
-  if ($items.Count -ne 1) {throw 'PROVENANCE'}
-  Choose $items[0]
-  $script:stage='gpt-project-confirm'
-  if (-not (Within 5000 {$now=@(Prefixed $script:root $label);if ($now.Count -eq 1 -and $now[0].Current.Name -eq "$label$project") {$true}})) {throw 'PROVENANCE'}
- }
  function AssertConversation([string]$id) {
   $script:stage='conversation-identity'
   if (-not $id) {throw 'PROVENANCE'}
@@ -617,8 +579,7 @@ try {
   $script:landing=$true
   if (-not (Within 10000 {AssertForeground;GptLanding -strict})) {throw 'STATE'}
   if ((ComposerText (FindComposer (Document)))) {throw 'CONFLICT'}
-  if ($request.project) {ChooseProject $request.project;$script:stage='gpt-blank';if (-not (Within 10000 {AssertForeground;GptLanding -strict})) {throw 'STATE'}}
-  try {Compose (Normalize $request.prompt)} catch {ClearTyped;throw}
+   try {Compose (Normalize $request.prompt)} catch {ClearTyped;throw}
   # Still the blank GPT page of this window right before the identity marker is sent.
   $script:stage='gpt-send-button'
   if (-not (GptLanding)) {ClearTyped;throw 'PROVENANCE'}
@@ -626,7 +587,7 @@ try {
   if (-not $send) {ClearTyped;throw 'TIMEOUT'}
   VerifyComposed (Normalize $request.prompt)
   $script:submission='attempted';Invoke $send;$script:submission='sent';$script:typed=$null
-  Respond @{ok=$true;conversationId=(ConversationId);project=$request.project;submission=$script:submission};return
+  Respond @{ok=$true;conversationId=(ConversationId);submission=$script:submission};return
  }
  $script:stage='chat-open'
  OpenChat $request.name

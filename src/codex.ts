@@ -87,10 +87,11 @@ const checkPrompt = (prompt: unknown) => {
   if (typeof prompt !== 'string' || !prompt.trim() || prompt.length > 65536) throw new BridgeError('INPUT', 'Prompt must be 1..65536 characters');
   return prompt.replace(/\r\n/g, '\n').trim();
 };
-/** One App Server process is kept and reused across calls (calls are serialized by the
- * MCP server); it is replaced after it fails and closed after 10 idle minutes. */
+/** One App Server process is kept and reused across calls, which may overlap (reads run
+ * beside a send); it is replaced after it fails and closed after 10 minutes without any
+ * call in progress. */
 const IDLE_MS = 600000;
-let shared: { executable: string; spawnFn: typeof nodeSpawn; server: AppServer; ready: Promise<void>; idle?: ReturnType<typeof setTimeout> } | undefined;
+let shared: { executable: string; spawnFn: typeof nodeSpawn; server: AppServer; ready: Promise<void>; active: number; idle?: ReturnType<typeof setTimeout> } | undefined;
 export function closeCodex(): void {
   const current = shared; shared = undefined;
   if (current) { clearTimeout(current.idle); current.server.close(); }
@@ -98,31 +99,46 @@ export function closeCodex(): void {
 async function session<T>(options: CodexOptions, run: (server: AppServer, declined: () => number) => Promise<T>): Promise<T> {
   const spawnFn = options.spawnFn ?? nodeSpawn;
   if (shared && (!shared.server.alive || shared.executable !== options.executable || shared.spawnFn !== spawnFn)) closeCodex();
-  if (!shared) { const server = new AppServer(options.executable, spawnFn); shared = { executable: options.executable, spawnFn, server, ready: server.initialize() }; }
+  if (!shared) { const server = new AppServer(options.executable, spawnFn); shared = { executable: options.executable, spawnFn, server, ready: server.initialize(), active: 0 }; }
   const current = shared;
-  clearTimeout(current.idle);
-  try { await current.ready; } catch (error) { if (shared === current) closeCodex(); throw error; }
-  const before = current.server.declined;
-  try { return await run(current.server, () => current.server.declined - before); }
-  finally { if (shared === current) { current.idle = setTimeout(closeCodex, IDLE_MS); current.idle.unref?.(); } }
+  current.active++; clearTimeout(current.idle);
+  try {
+    try { await current.ready; } catch (error) { if (shared === current) closeCodex(); throw error; }
+    const before = current.server.declined;
+    return await run(current.server, () => current.server.declined - before);
+  } finally {
+    // One idle timer, armed only when no call is left; it checks again before closing.
+    if (--current.active === 0 && shared === current) {
+      current.idle = setTimeout(() => { if (shared === current && current.active === 0) closeCodex(); }, IDLE_MS);
+      current.idle.unref?.();
+    }
+  }
 }
+/** Thread metadata and status only: the history is not loaded. */
 async function readThread(server: AppServer, threadId: string): Promise<Row> {
-  const thread = (await server.request('thread/read', { threadId, includeTurns: true })).thread;
-  if (thread?.id !== threadId || !Array.isArray(thread.turns)) throw new BridgeError('PROVENANCE', 'Codex thread readback differs');
+  const thread = (await server.request('thread/read', { threadId })).thread;
+  if (thread?.id !== threadId) throw new BridgeError('PROVENANCE', 'Codex thread readback differs');
   return thread;
+}
+/** The newest `limit` turns with their items, newest first. A long history is never
+ * read whole: it is slow and can exceed the frame bound. */
+async function latestTurns(server: AppServer, threadId: string, limit: number): Promise<{ turns: Row[]; more: boolean }> {
+  const page = await server.request('thread/turns/list', { threadId, limit, sortDirection: 'desc', itemsView: 'full' });
+  if (!Array.isArray(page.data)) throw new BridgeError('PROVENANCE', 'Codex turn list readback differs');
+  return { turns: page.data, more: typeof page.nextCursor === 'string' };
 }
 async function waitTurn(server: AppServer, options: CodexOptions, threadId: string, turnId: string, declined: () => number): Promise<CodexReply> {
   const deadline = Date.now() + options.timeoutMs;
   for (let storeErrors = 0; ;) {
-    let thread: Row;
-    // While the rollout is being written, thread/read can fail briefly: back off, at most 3 times in a row.
-    try { thread = await readThread(server, threadId); storeErrors = 0; }
+    let turns: Row[];
+    // While the rollout is being written, reads can fail briefly: back off, at most 3 times in a row.
+    try { turns = (await latestTurns(server, threadId, 5)).turns; storeErrors = 0; }
     catch (error) {
       if (!(error instanceof BridgeError) || error.code !== 'EXECUTION' || ++storeErrors > 3) throw error;
       await delay(options.pollMs * storeErrors);
       continue;
     }
-    const turn = thread.turns.find((item: Row) => item?.id === turnId);
+    const turn = turns.find((item: Row) => item?.id === turnId);
     if (turn && turn.status !== 'inProgress') return replyOf(threadId, turn, false, declined());
     if (Date.now() >= deadline) throw new BridgeError('TIMEOUT', `Codex thread ${threadId}: reply is pending; call again with the same prompt to read it (it is not resent)`);
     await server.wait(Math.min(options.pollMs, Math.max(1, deadline - Date.now())));
@@ -141,21 +157,21 @@ export async function sendCodex(options: CodexOptions, threadId: string, text: s
   if (typeof threadId !== 'string' || !ID.test(threadId)) throw new BridgeError('INPUT', 'Invalid Codex thread ID');
   const prompt = checkPrompt(text);
   return session(options, async (server, declined) => {
-    const before = await readThread(server, threadId), latest = before.turns.at(-1);
+    const before = await readThread(server, threadId), latest = (await latestTurns(server, threadId, 1)).turns[0];
     if (asks(latest, prompt)) {
       if (latest.status === 'inProgress') throw new BridgeError('CONFLICT', 'This prompt was already sent and is still running; call again later to read the reply');
       return replyOf(threadId, latest, true, 0);
     }
     if (before.status?.type === 'active') throw new BridgeError('CONFLICT', 'Codex thread is busy');
-    await server.request('thread/resume', { threadId });
+    const begin = async () => { await server.request('thread/resume', { threadId }); return startTurn(server, threadId, prompt); };
     let turnId: string;
-    // A rejected turn/start created no turn, so one retry after unarchiving cannot duplicate it.
-    try { turnId = await startTurn(server, threadId, prompt); }
+    // An archived thread refuses thread/resume (and turn/start). A refused request created
+    // no turn, so one retry after unarchiving cannot duplicate the prompt.
+    try { turnId = await begin(); }
     catch (error) {
       if (!(error instanceof BridgeError) || error.code !== 'EXECUTION') throw error;
       await server.request('thread/unarchive', { threadId });
-      await server.request('thread/resume', { threadId });
-      turnId = await startTurn(server, threadId, prompt);
+      turnId = await begin();
     }
     return waitTurn(server, options, threadId, turnId, declined);
   });
@@ -217,12 +233,12 @@ export async function listCodex(options: CodexOptions, query: { limit?: number; 
 
 /** Reads one Codex conversation (thread/read): its metadata and the prompt and reply
  * text of its newest `turns` turns, oldest first. Nothing is sent or resumed. */
-export async function readCodex(options: CodexOptions, threadId: string, turns = 1): Promise<CodexThreadRow & { turnCount: number; turns: TurnText[] }> {
+export async function readCodex(options: CodexOptions, threadId: string, turns = 1): Promise<CodexThreadRow & { hasMore: boolean; turns: TurnText[] }> {
   if (typeof threadId !== 'string' || !ID.test(threadId)) throw new BridgeError('INPUT', 'Invalid Codex thread ID');
   if (!Number.isInteger(turns) || turns < 1 || turns > 20) throw new BridgeError('INPUT', 'Turns must be 1..20');
   return session(options, async server => {
-    const thread = await readThread(server, threadId);
-    return { ...rowOf(thread), turnCount: thread.turns.length, turns: thread.turns.slice(-turns).map(turnText) };
+    const thread = await readThread(server, threadId), page = await latestTurns(server, threadId, turns);
+    return { ...rowOf(thread), hasMore: page.more, turns: page.turns.slice(0, turns).reverse().map(turnText) };
   });
 }
 

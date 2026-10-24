@@ -57,6 +57,8 @@ test('native errors: the host\'s own code and message are kept, a refused reques
   // The worker refused (e.g. the verified pipe disappeared after an app update): restart it.
   const gone = host(() => ({ ok: false, code: 'IO', stage: 'connect' }));
   await assert.rejects(gone.native.listThreads(), { code: 'IO', message: /at connect/ });
+  // The worker is replaced once its queued requests are done, never under another call.
+  await new Promise(resolve => setImmediate(resolve));
   assert.equal(gone.closed(), 1);
   // A host rejection also drops the kept pipe, so the next call can find the app-tools pipe.
   assert.equal(moved.closed(), 1); assert.equal(invalid.closed(), 1); assert.equal(missing.closed(), 0);

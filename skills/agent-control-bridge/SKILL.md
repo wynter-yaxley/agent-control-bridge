@@ -1,6 +1,6 @@
 ---
 name: agent-control-bridge
-description: Read, find, create and message ChatGPT and Codex desktop conversations with the ACB MCP tools (mcp_acb_*). Each tool is independent - use only the ones the task needs. Load it for any task that involves ChatGPT, Codex, a workspace or ACB.
+description: Read, find, create and message ChatGPT and Codex conversations of the ChatGPT desktop app with the ACB MCP tools (mcp_acb_*). Each tool is independent - use only the ones the request needs. Load it for any task that involves ChatGPT, Codex, a workspace or ACB.
 version: 0.5.0
 license: MIT
 metadata:
@@ -10,56 +10,84 @@ metadata:
 
 # Agent Control Bridge
 
-ACB exposes the ChatGPT / Codex desktop app as independent tools. Each tool does one thing; there is no required order or workflow. Use exactly the tools the user's request needs: to look at a conversation, read it; to get work done in one, send to it. Do not write Python, PowerShell or Node scripts, or terminal commands, to drive ChatGPT or Codex: the tools already do it.
+ACB exposes the ChatGPT desktop app (ChatGPT chats and Codex tasks) as independent MCP tools. Each tool does one thing. There is no required order and no workflow: call exactly the tools the user's request needs. Never write scripts or terminal commands to drive ChatGPT or Codex; the tools already do it.
+
+## Pick the tool
+
+| The user wants to... | Call |
+|---|---|
+| know what a conversation said | `acb_codex_read` / `acb_gpt_read` |
+| find a conversation | `acb_codex_list` (by `cwd`), `acb_codex_find` (keyword), `acb_gpt_list`, `acb_threads` (both kinds) |
+| check whether Codex finished | `acb_codex_read` (look at `status` of the newest turn) |
+| ask Codex to do something | `acb_codex_send` |
+| ask ChatGPT something | `acb_gpt_send` |
+| start a new conversation | `acb_codex_create` (needs a folder; `acb_workspace_create` makes one), `acb_gpt_create` |
+| show a ChatGPT chat on screen | `acb_gpt_open` |
+| diagnose a failure | `acb_status` |
 
 ## Tools
 
-**Codex conversations** (background, no window; work without the ChatGPT window):
+**Codex** (background, no window, works without the ChatGPT window):
 
-- `acb_codex_list` (`limit?`, `cwd?`, `cursor?`): recently updated conversations. `acb_codex_find` (`searchTerm`): full-text search.
-- `acb_codex_read` (`threadId`, `turns?` 1-20): prompt and reply text of the newest turns. Read-only: nothing is sent or resumed.
-- `acb_codex_send` (`threadId`, `prompt`): send one prompt, get the final reply. `acb_codex_create` (`cwd`, `title`, `prompt?`): new conversation (its first prompt is answered). `acb_workspace_create` (`name`, `path?`): directory registered as a Codex project; repeating it is harmless.
+- `acb_codex_list(limit? 1-100, cwd?, cursor?)` -> `threads[{threadId, name, preview, cwd, status, updatedAt}]`, `nextCursor`.
+- `acb_codex_find(searchTerm)` -> `[{threadId, name, cwd}]`.
+- `acb_codex_read(threadId, turns? 1-20)` -> conversation info, `hasMore`, `turns[{turnId, status, prompt, reply, truncated, error}]` oldest first. Nothing is sent or resumed.
+- `acb_codex_send(threadId, prompt)` -> `{reply, turnId, alreadySent, approvalsDeclined}`. Waits up to 240 s for the final reply.
+- `acb_codex_create(cwd, title, prompt?)` -> new conversation; its first prompt (a short readiness check if omitted) is sent and answered so it is saved.
+- `acb_workspace_create(name, path?)` -> folder registered as a Codex project; repeating it returns the same project.
 
-**ChatGPT conversations**:
+**ChatGPT**:
 
-- `acb_gpt_list`: conversations of the desktop inventory. `acb_gpt_read` (`conversationId`, `turns?` 1-10, `cursor?`): prompt and reply text by ID; `nextCursor` reads older turns. Both touch no window. A reply the transcript keeps only as a reference comes back as `reply: null, replyInWindowOnly: true`; to get it, call `acb_gpt_read` with `window: true` (shows the chat like `acb_gpt_open`, then reads the newest reply; never types).
-- `acb_gpt_open`, `acb_gpt_create` (unique title; `project` = an existing ChatGPT project name), `acb_gpt_send`: use the ChatGPT window (see below).
+- `acb_gpt_list()` -> `[{conversationId, title, projectId}]`. No window.
+- `acb_gpt_read(conversationId, turns? 1-10, cursor?, window?)` -> `turns[{turnId, status, prompt, reply, replyInWindowOnly, ...}]` oldest first, `nextCursor` for older turns. Without `window` no window is touched.
+- `acb_gpt_open(conversationId)` -> shows the chat (`navigation`: `current` or `sidebar`). Clicks, never types.
+- `acb_gpt_create(title)` -> `{conversationId, title}`. Types into the window.
+- `acb_gpt_send(conversationId, prompt)` -> `{reply, turnId, alreadySent, uiIdentity, navigation}`. Types into the window, waits up to 240 s.
 
-**Desktop**: `acb_threads` (sidebar inventory of both kinds), `acb_projects`, `acb_status` (self-check).
+**Desktop**: `acb_threads()` (sidebar inventory of both kinds), `acb_projects()`, `acb_status()`.
 
 ## Rules
 
-- Prefer reading to sending. A question about what a conversation said is answered with a read tool, never by sending a prompt.
-- Reuse an existing conversation (list, find, read) before creating one. Create only when the user asks or nothing fits.
-- Send only what the user asked to send, to the conversation they meant. To pass one conversation's reply to another, read it, then send it verbatim; ACB never chains conversations by itself.
-- Report briefly: conversation IDs, the reply or result, open items. No long logs or raw tool output.
+1. **Read rather than send.** A question about what a conversation said, or whether a task is done, is answered with a read tool. Never send a prompt just to find something out.
+2. **Never resend.** After `TIMEOUT`, call the same send tool later with the **identical** prompt: ACB returns the reply and does not send again (`alreadySent: true`). Never reword, shorten or "nudge" a prompt that may already have been sent. To check progress meanwhile, use `acb_codex_read` / `acb_gpt_read`.
+3. **Send only what the user asked, to the conversation they meant.** To pass one conversation's reply to another, read it, then send it verbatim. ACB never chains conversations by itself.
+4. **Reuse before creating.** Find the existing conversation first; create one only when the user asks or nothing fits. ChatGPT titles must be unique (`CONFLICT` otherwise).
+5. **Partial creation.** If `acb_gpt_create` fails with `status: "partial"`, report `conversationId`, `requestedTitle`, `title` and `stage`, then read that conversation. Never call create again or send its initialization marker yourself, even if its title is still "New chat".
+6. **One send at a time.** Don't send to the same conversation twice in parallel. ACB serializes sends and window operations; reads may run any time.
+7. **Approvals are the user's.** ACB declines every Codex command or file approval. If `approvalsDeclined > 0` or the turn failed for lack of approval, tell the user to approve in the app; never try to work around it.
+8. **Don't modify ACB or write helper scripts.** Investigate only the direct cause of a failure. Anything beyond the user's task needs their approval.
 
-## Foreground and the user's keyboard
+## The ChatGPT window
 
-- `--allow-foreground-input` authorizes ACB to restore a minimized, verified ChatGPT window and try to activate it once before typing. ACB waits for restoration to complete, then requests focus once on the sole usable composer inside that verified window without writing or clearing its draft; it still requires the actual foreground handle to match. Tell the user that ChatGPT may come to the front and that switching away stops input. If the app's only window is minimized (its UI cannot be read), ACB first restores it once to identify it, and still refuses a Codex or unidentified window. Without this authorization, ACB never restores, activates or types; an identical draft can only be submitted while ChatGPT is already in front.
-- ACB verifies the actual Windows foreground handle and composer focus. On `FOCUS_REQUIRED` (Windows refused activation, or the user switched window/focus), stop. Do not loop or try to take focus back. Partial text may remain in the composer and is not submitted.
-- Report `diagnostics.focusReason` (`activationDenied`, `foregroundChanged`, `composerFocusLost`, or `foregroundNotAuthorized`), `targetHandle`, `foregroundHandle`, and `typedLength` when present. The length counts the completed input prefix in UTF-16 units. A nonzero length proves input started; activation denial before input is a different case. Do not clear the draft after focus loss or treat missing evidence as a successful interruption test.
-- Include `diagnostics.activation` when present. Its `requestCompleted` only means the UIA focus call returned, not that activation succeeded; `restoreAccepted` means the asynchronous restore was accepted, and `hresult` identifies an exception. Do not retry activation based on these fields.
-- GPT creation uses only the verified ChatGPT window's left-sidebar New chat button. Success requires the exact initialization marker's ID, completion, and the new title read back by ID, listed for that same ID in the inventory and shown on the app page. The native sidebar inventory can take about a minute to reflect a rename; ACB waits within the original timeout budget, so do not interrupt and repeat creation. If an error has `status: "partial"`, report `conversationId`, `requestedTitle`, `title` and `stage`; read that conversation before further action. Do not call create again or resend an initialization marker, even if its title is still New chat.
-- Codex tools and the list/find/read tools run in the background and do not disturb the user.
+- `acb_gpt_send`, `acb_gpt_create` (and `acb_gpt_open`, `acb_gpt_read` with `window: true`, when they must click) use the ChatGPT window. With `--allow-foreground-input` ACB brings it to the front once and types. **Tell the user before such a call** that ChatGPT will come to the front and that they should not type until it finishes.
+- A minimized window is restored first (without focus) and must then be identified as a ChatGPT-mode window; a Codex-mode or unidentified window is refused (`OWNER`). Ask the user to show the window in ChatGPT mode.
+- On `FOCUS_REQUIRED` stop. Never retry activation in a loop or try to take focus back. Report `diagnostics.focusReason` (`activationDenied`, `foregroundChanged`, `composerFocusLost`, `foregroundNotAuthorized`) and `typedLength`; a nonzero length means some text may remain in the input box, unsent. Do not clear it yourself.
+- `uiIdentity: "titleOnly"` means the page shows no ID and the chat was identified by its unique title plus the app's inventory. That is the normal case.
+- The app's transcript usually keeps a ChatGPT reply only as a reference. `replyInWindowOnly: true` with `reply: null` means: call `acb_gpt_read` again with `window: true` (newest turn only; it may switch the shown chat). Never report the reference text as the reply.
 
-## When a tool fails
+## Errors
 
-Read the `code`, act once, and stop if it fails again:
+Every failure is `{"ok": false, "code", "message", ...details}`. Act once on the code; if the same failure repeats, stop and report.
 
 | Code | Meaning | Do |
 |---|---|---|
-| `TIMEOUT` | The reply is not finished | Later call again with the **same** prompt: it returns the reply and is not resent. Never reword and resend. |
-| `CONFLICT` | The conversation is busy, or the user has a draft | Wait, or ask the user. |
-| `PROVENANCE` | Conversation identity, title uniqueness, persistence or project cannot be confirmed | Report the known ID and any partial completion. Do not guess or create a replacement. The native inventory has a host limit of 50 non-pinned chats and no pagination; sidebar sorting can keep a new chat outside it. |
-| `STATE` | Blank-page recognition or exact composer text verification failed | Report the stage and diagnostics; do not resend. |
-| `FOCUS_REQUIRED`, `AUTH` | Activation/focus failed, or foreground input is not authorized | Stop and tell the user; never repeatedly activate the window. |
-| `OWNER`, `DEPENDENCY`, `CONFIG`, `IO`, `IPC_CONFIG` | An app is not running or not found, or the desktop app refused the request | Call `acb_status` once and pass its `fix` (and `nativeError`, if any) to the user. |
-| `EXECUTION` with `approvalsDeclined` | Codex needed an approval | Tell the user to approve in the Codex app; the bridge never approves. |
-
-Investigate only the direct cause. Do not write diagnostic scripts, run broad tests or change ACB itself.
+| `TIMEOUT` | Reply not finished (the task continues) | Later, call again with the identical prompt; or read to check progress |
+| `CONFLICT` | Busy conversation, a user draft in the input box, duplicate title | Wait or ask the user; pick a unique title |
+| `PROVENANCE` | The target can't be identified (duplicate title, not in the latest 50, page changed) | Report it; ask the user to open the chat in the app. Never guess another ID |
+| `STATE` | The page didn't look as expected (blank chat, input text mismatch) | Report `stage` and diagnostics; don't resend |
+| `FOCUS_REQUIRED`, `AUTH` | Focus lost / activation refused, or foreground input not authorized | Stop and tell the user (see above) |
+| `OWNER` | App not running, or no ChatGPT-mode window | Ask the user to open the app in ChatGPT mode |
+| `CONFIG`, `DEPENDENCY`, `IO`, `IPC_CONFIG` | Codex not found, app not responding, ChatGPT signed out, or the app refused a request | Call `acb_status` once; pass its `fix` (and `nativeError` if present) to the user |
+| `EXECUTION` | Codex turn failed, or an approval was declined | Report the message and `approvalsDeclined` |
+| `INPUT` | Invalid argument (bad ID, too long, wrong conversation kind) | Fix the argument; `acb_gpt_read` is for ChatGPT, `acb_codex_read` for Codex |
 
 ## Limits
 
-- ChatGPT projects cannot be created, and existing chats cannot be moved into a project: ask the user to do it in ChatGPT. A new chat can start inside an existing project (`project` argument).
-- Developing anything beyond the user's task (new tools, changes to ACB, extra features) needs the user's approval first.
+- The app lists only the latest 50 conversations plus pinned ones; older chats can't be targeted until the user opens them.
+- ChatGPT has no navigation by ID: a chat is reached only if it is shown or has a unique sidebar title.
+- ACB can't create ChatGPT projects or move chats into them, switch the window's mode, or approve Codex actions.
+- Sends wait at most 240 s per call; Codex tasks may take longer (see `TIMEOUT`).
+
+## Reporting
+
+Keep it short: which conversation (ID and title), the reply or result, and anything the user must do. No raw tool output or long logs.
