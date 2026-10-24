@@ -2,7 +2,19 @@
 
 Versions follow Semantic Versioning. Desktop behavior is verified manually on Windows (`npm run smoke`); unit tests use mocks.
 
-## 0.4.0 (Unreleased)
+## 0.5.0 (Unreleased)
+
+- Independent tools instead of one workflow: new read-only `acb_codex_list` (thread/list, by `cwd`, with a cursor) and `acb_codex_read` (newest 1-20 turns through the App Server), `acb_gpt_list` and `acb_gpt_read` (newest 1-10 turns by ID through native IPC, `nextCursor` for older turns, no window). The server instructions, README and skill describe each tool and the safety rules; the Hermes → GPT → Codex roles and workflow diagram are removed. Existing tool names and arguments are unchanged.
+- Desktop app v26.1021: app tools (`tools/call`) moved from `codex-browser-use-<uuid>` (now ping and browser automation only, "No handler registered for method: tools/call") to `codex-app-tools-<uuid>`. The pipe worker prefers the new pipe and falls back to the old one; host verification is unchanged. `read_thread` accepts `turnLimit` 1-10 and an opaque `cursor`.
+- A rejected native request keeps the host's error code and message (`nativeError`), a failed tool keeps its text, and a refused request restarts the pipe worker so a restarted app is found again. A host that cannot list its ChatGPT chats is a `DEPENDENCY` error, not an empty inventory.
+- The auto-discovered `codex.exe` is discovered again before every use, so a server started before a desktop app update no longer fails with `DEPENDENCY` (2026-10-21 incident); a configured path that no longer exists fails fast with a fix.
+- `acb_gpt_read`: the host empties message text when outputs are excluded, so reads keep outputs on; a reply kept in the transcript only as `::chatgpt-content-reference{…}` is reported as `reply: null, replyInWindowOnly: true`, and `window: true` reads the newest reply from the shown chat through the same UIA path as `acb_gpt_send`.
+- A minimized ChatGPT window exposes no UI tree in the current app, so it could never be identified and the documented restore never happened (`OWNER` at `chatgpt-window`). With `--allow-foreground-input`, the app's only window is now restored once when minimized and unreadable, then identified as before; a Codex or unidentified window is still refused. Window-choice failures report window counts in `diagnostics` and a fix.
+- Known issue: desktop app v26.1021 shows no project picker (更改项目) on the blank chat page, so `acb_gpt_create` with `project` stops with `PROVENANCE` at `gpt-project` before anything is typed; creation without `project` works.
+- `acb_status` reports the server's pid and start time, the native host's app version and pipe type, and the pipe counts. `npm run smoke -- --scope codex|gpt` checks one group.
+- The repository and its folder are named `agent-control-bridge`.
+
+## 0.4.0
 
 - Housekeeping: the unused native tool catalog (`tools/list`) is removed from the client and the pipe worker's request allowlist; both configuration examples live in `config/`.
 - Installable MCP tool: `npm install` builds it, `npm run check` (or `--check`) runs a read-only self-check and prints the Hermes `mcp add` and skill commands for the machine. No configuration is required: `codex.exe` is discovered from the Codex desktop app (or PATH) and the desktop context thread from the most recent Codex conversation; options, `ACB_*` variables and an optional JSON file still override.
