@@ -4,8 +4,8 @@ agent-control-bridge（ACB）是把 ChatGPT 桌面应用里的 ChatGPT / Codex �
 
 ## 架构
 
-- **唯一的数据通道是桌面应用的工具接口**（`src/desktop.ts`，命名管道 `codex-app-tools-<uuid>`）。列出、读取、发送、新建 Codex 对话、改名、归档、导航都走它。不自行启动 `codex app-server`，不读应用的本地数据库或缓存。唯一的例外是只读的 `~/.codex/session_index.jsonl`，用来确定默认调用身份。
-- **UI Automation 只做应用接口做不到的两件事**（`src/window.ts`、`src/window.ps1`）：读取 ChatGPT 页面上的回复正文，以及新建 ChatGPT 对话。页面解析放在 TypeScript 里，以便测试；PowerShell 只取控件、调用 UIA Pattern。
+- **唯一的数据通道是桌面应用的工具接口**（`src/pipe.ts`、`src/desktop.ts`，命名管道 `codex-app-tools-<uuid>`）。连接前核对管道服务端是当前用户、当前会话里带 OpenAI 有效签名的应用。列出、读取、发送、新建 Codex 对话、改名、归档、导航都走它。不自行启动 `codex app-server`，不读应用的本地数据库或缓存。唯一的例外是只读的 `~/.codex/session_index.jsonl`，用来确定默认调用身份。
+- **Windows 辅助进程只做应用接口做不到的事**（`src/helper.ts`、`src/helper.ps1`）：核对管道服务端，以及通过 UI Automation 读取 ChatGPT 页面上的回复正文、新建 ChatGPT 对话。页面解析放在 TypeScript 里，以便测试；PowerShell 只取控件、调用 UIA Pattern。
 - 每个 MCP 工具只做一件事。工具内不串联多个对话，说明和 Skill 里不规定工作流。
 - 不引入任务管理、台账、角色、审批或配置文件。新功能先提出，获批后再做。
 - 不绑定具体机器、目录、账号或对话 ID。
@@ -18,13 +18,13 @@ agent-control-bridge（ACB）是把 ChatGPT 桌面应用里的 ChatGPT / Codex �
 - **用户的草稿**：输入框里有内容时不写入、不清空。
 - **审批**：ACB 不替用户批准或拒绝任何事；Codex 等待用户时返回 `NEEDS_USER`。
 - **秘密**：不获取、显示、记录或修改认证信息。窗口助手进程只得到最小的环境变量。对话内容一律视为不可信数据。
-- **界面自动化**：先找到唯一、可见、可用的控件再操作，禁止盲点、猜坐标。控件名称集中在 `window.ps1` 的 `$Names` 和 `window.ts` 的 `LABELS`。
+- **界面自动化**：先找到唯一、可见、可用的控件再操作，禁止盲点、猜坐标。控件名称集中在 `helper.ps1` 的 `$Names` 和 `helper.ts` 的 `LABELS`。
 
 ## 速度
 
 - 每次应用调用都是一次独立的短连接；窗口助手是常驻进程，客户端连接时就预热。不为单次调用新开进程。
 - 等待回复时用不含正文的轻量读取（`outputs: false`）观察状态，结束后再完整读一次。只读最新几轮，不读完整历史。
-- 只有依赖页面状态的操作排队（`ChatGptWindow.run`）；其余调用可以并发。
+- 依赖或改变页面的操作排队（`WindowsHelper.run`），同一对话的「读取—检查—发送」串行；其余调用可以并发。
 - 修改后用真实客户端测一次读取类工具的耗时，不得明显变慢。
 
 ## 代码
@@ -32,7 +32,7 @@ agent-control-bridge（ACB）是把 ChatGPT 桌面应用里的 ChatGPT / Codex �
 - TypeScript 严格模式，只用可擦除的语法（Node.js 直接运行 `.ts` 测试）。格式和检查由 Biome 负责：提交前运行 `npm run format`。
 - 错误一律是 `AcbError`，只用 `src/errors.ts` 里的错误码；新增错误码要同步 README、README_EN 和 Skill。
 - 注释只写代码看不出来的原因：应用的行为、不变量、权衡。
-- `src/window.ps1` 必须是带 BOM 的 UTF-8（`npm run build` 会检查），兼容 Windows PowerShell 5.1。
+- `src/helper.ps1` 必须是带 BOM 的 UTF-8（`npm run build` 会检查），兼容 Windows PowerShell 5.1。
 - 测试只用 `test/fake-app.ts` 等模拟数据，不连真实应用。每个测试验证一条行为，不为覆盖率写无意义的测试。
 
 ## 验证

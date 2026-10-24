@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { lastExchange, type PageNode } from '../src/window.ts';
+import { lastExchange, type PageNode } from '../src/helper.ts';
 
 const text = (name: string): PageNode => ({ type: 'Text', name });
 const button = (name: string): PageNode => ({ type: 'Button', name });
@@ -37,4 +37,19 @@ test('a reply without its action buttons is still being written', () => {
 
 test('a page without messages has no exchange', () => {
   assert.equal(lastExchange([text('ChatGPT 可能会出错。')]), null);
+});
+
+test('label text inside a message is content, not a new message', () => {
+  const quoted = [
+    text('你说：'),
+    text('What does 你说：mean?'),
+    text('ChatGPT 说：'),
+    text('It means "you said".'),
+    button('更多操作'),
+  ];
+  assert.deepEqual(lastExchange(quoted), {
+    prompt: 'What does 你说：mean?',
+    reply: 'It means "you said".',
+    complete: true,
+  });
 });

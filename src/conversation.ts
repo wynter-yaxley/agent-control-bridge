@@ -1,5 +1,5 @@
 import { setTimeout as delay } from 'node:timers/promises';
-import type { App, Kind } from './desktop.ts';
+import type { App, AppTurn, Kind } from './desktop.ts';
 import { AcbError } from './errors.ts';
 import { normalize, opensWith, statusOf, type Turn, toTurn } from './turns.ts';
 
@@ -12,17 +12,54 @@ export interface WaitOptions {
 export interface Sent {
   threadId: string;
   title: string;
-  /** The prompt was already the newest message, so it was not sent again. */
+  /** The prompt had already been sent, so it was not sent again. */
   alreadySent: boolean;
   /** The finished turn; null when the caller did not wait. */
   turn: Turn | null;
 }
 
+/** Which turn a sent prompt opens: turn `turnId`, or the first turn after `after`. */
+type Match = { turnId: string } | { after: string | undefined };
+
+/** A message the app accepted whose turn the app does not list yet. */
+interface Accepted {
+  prompt: string;
+  after: string | undefined;
+  until: number;
+}
+
+/** How long an accepted message may take to appear (a background page can be throttled for a minute). */
+const ACCEPTED_MS = 120_000;
+
+/** Per app: sends to one conversation run one at a time, and messages accepted but not yet listed. */
+const state = new WeakMap<App, { locks: Map<string, Promise<unknown>>; accepted: Map<string, Accepted> }>();
+
+function stateOf(app: App) {
+  let current = state.get(app);
+  if (!current) {
+    current = { locks: new Map(), accepted: new Map() };
+    state.set(app, current);
+  }
+  return current;
+}
+
+function exclusive<T>(app: App, threadId: string, task: () => Promise<T>): Promise<T> {
+  const { locks } = stateOf(app);
+  const result = (locks.get(threadId) ?? Promise.resolve()).then(task);
+  const tail = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  locks.set(threadId, tail);
+  void tail.then(() => locks.get(threadId) === tail && locks.delete(threadId));
+  return result;
+}
+
 /**
- * Sends one prompt to a conversation and, with `wait`, returns the turn it starts. A prompt
- * that is already the newest message is not sent again: its turn is returned instead, so a
- * call that timed out can be repeated safely. A conversation that is still answering
- * refuses a new prompt.
+ * Sends one prompt to a conversation and, with `wait`, returns the turn it opens. A prompt
+ * that is the conversation's newest message, or that ACB sent and the app has not listed
+ * yet, is not sent again: its turn is returned instead, so a call that timed out can be
+ * repeated safely. A conversation that is still answering refuses a new prompt.
  */
 export async function sendPrompt(
   app: App,
@@ -32,59 +69,76 @@ export async function sendPrompt(
   options: WaitOptions & { wait: boolean; caller?: string },
 ): Promise<Sent> {
   const text = normalize(prompt);
-  const before = await app.readThread(threadId);
-  if (before.kind !== kind) {
-    throw new AcbError(
-      'INPUT',
-      `This is a ${before.kind === 'codex' ? 'Codex' : 'ChatGPT'} conversation: use acb_${before.kind === 'codex' ? 'codex' : 'gpt'}_send`,
-    );
-  }
-  const last = before.turns[0];
-  const alreadySent = opensWith(last, text);
-  if (!alreadySent) {
-    if (statusOf(before) !== 'idle') {
-      throw new AcbError('BUSY', 'The conversation is still answering; read it, then send when it is idle', {
-        threadId,
-      });
+  const { title, alreadySent, match } = await exclusive(app, threadId, async () => {
+    const before = await app.readThread(threadId);
+    if (before.kind !== kind) {
+      const tool = before.kind === 'codex' ? 'acb_codex_send' : 'acb_gpt_send';
+      throw new AcbError(
+        'INPUT',
+        `This is a ${before.kind === 'codex' ? 'Codex' : 'ChatGPT'} conversation: use ${tool}`,
+      );
     }
-    await deliver(app, threadId, text, options.caller);
-  }
-  const match = alreadySent && last ? { turnId: last.id } : { after: last?.id };
+    const last = before.turns[0];
+    const accepted = pendingOf(app, threadId, last);
+    if (accepted) {
+      if (accepted.prompt !== text) throw busy(threadId);
+      return { title: before.title, alreadySent: true, match: { after: accepted.after } };
+    }
+    if (last && opensWith(last, text)) return { title: before.title, alreadySent: true, match: { turnId: last.id } };
+    if (statusOf(before) !== 'idle') throw busy(threadId);
+    await deliver(app, kind, threadId, text, options.caller);
+    stateOf(app).accepted.set(threadId, { prompt: text, after: last?.id, until: Date.now() + ACCEPTED_MS });
+    return { title: before.title, alreadySent: false, match: { after: last?.id } };
+  });
   const turn = options.wait ? await waitForTurn(app, threadId, text, match, options) : null;
-  return { threadId, title: before.title, alreadySent, turn };
+  return { threadId, title, alreadySent, turn };
+}
+
+/** The message ACB sent to `threadId` while the app still lists `newest` as the latest turn. */
+function pendingOf(app: App, threadId: string, newest: AppTurn | undefined): Accepted | undefined {
+  const { accepted } = stateOf(app);
+  const entry = accepted.get(threadId);
+  if (entry && entry.after === newest?.id && Date.now() < entry.until) return entry;
+  accepted.delete(threadId);
+  return undefined;
+}
+
+function busy(threadId: string): AcbError {
+  return new AcbError('BUSY', 'The conversation is still answering; read it, then send when it is idle', { threadId });
 }
 
 /** An archived conversation refuses messages; nothing was sent then, so one retry is safe. */
-async function deliver(app: App, threadId: string, prompt: string, caller: string | undefined): Promise<void> {
+async function deliver(app: App, kind: Kind, threadId: string, prompt: string, caller?: string): Promise<void> {
   try {
     await app.sendMessage(threadId, prompt, caller);
   } catch (error) {
     if (!(error instanceof AcbError && error.details.archived)) throw error;
-    await app.setArchived(threadId, false);
+    await app.setArchived(threadId, kind, false);
     await app.sendMessage(threadId, prompt, caller);
   }
 }
 
 /**
- * Waits for the turn opened by `prompt` to end: turn `turnId`, or the first turn after
- * `after` (any turn when both are absent). Status is watched without message text, which
- * is cheap; the finished turn is read in full once.
+ * Waits for the turn opened by `prompt` to end and returns it. Status is watched without
+ * message text, which is cheap; the turn is read in full once to confirm it is the one
+ * `prompt` opened.
  */
 export async function waitForTurn(
   app: App,
   threadId: string,
   prompt: string,
-  match: { turnId?: string; after?: string },
+  match: Match,
   { timeoutMs, pollMs = 1500 }: WaitOptions,
 ): Promise<Turn> {
   const deadline = Date.now() + timeoutMs;
   for (let poll = 0; ; poll++) {
     const page = await app.readThread(threadId, { outputs: false });
     const newest = page.turns[0];
-    const ours = newest !== undefined && (match.turnId ? newest.id === match.turnId : newest.id !== match.after);
+    const ours = newest !== undefined && ('turnId' in match ? newest.id === match.turnId : newest.id !== match.after);
     const status = statusOf(page);
     if (ours && newest.status !== 'inProgress' && status === 'idle') return finished(app, threadId, newest.id, prompt);
     if (ours && status === 'needsUser') {
+      await confirm(app, threadId, newest.id, prompt);
       throw new AcbError('NEEDS_USER', 'Codex is waiting for your approval or answer in the desktop app', {
         threadId,
         turnId: newest.id,
@@ -95,17 +149,15 @@ export async function waitForTurn(
       throw new AcbError(
         'TIMEOUT',
         'The reply is still pending: read the conversation later (sending the same prompt again does not resend it)',
-        {
-          threadId,
-          ...(ours ? { turnId: newest.id } : {}),
-        },
+        { threadId, ...(ours ? { turnId: newest.id } : {}) },
       );
     }
     await delay(Math.min(left, pollMs, 250 * 2 ** poll));
   }
 }
 
-async function finished(app: App, threadId: string, turnId: string, prompt: string): Promise<Turn> {
+/** Reads the newest turn in full and checks that it is `turnId`, opened by `prompt`. */
+async function confirm(app: App, threadId: string, turnId: string, prompt: string): Promise<AppTurn> {
   const newest = (await app.readThread(threadId)).turns[0];
   if (newest?.id !== turnId) {
     throw new AcbError('BUSY', 'Another message arrived in the conversation meanwhile; read the conversation', {
@@ -113,9 +165,16 @@ async function finished(app: App, threadId: string, turnId: string, prompt: stri
     });
   }
   if (!opensWith(newest, prompt)) {
-    throw new AcbError('PROTOCOL', 'The newest turn was not opened by the message just sent', { threadId, turnId });
+    throw new AcbError('BUSY', 'The conversation is answering another message; read the conversation', {
+      threadId,
+      turnId,
+    });
   }
-  const turn = toTurn(newest);
+  return newest;
+}
+
+async function finished(app: App, threadId: string, turnId: string, prompt: string): Promise<Turn> {
+  const turn = toTurn(await confirm(app, threadId, turnId, prompt));
   if (turn.status !== 'completed') {
     throw new AcbError('FAILED', `The turn ended as ${turn.status}${turn.error ? `: ${turn.error}` : ''}`, {
       threadId,

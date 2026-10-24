@@ -1,4 +1,5 @@
-import type { App, AppTurn, CreateTarget, Kind, Project, ThreadPage, ThreadSummary } from '../src/desktop.ts';
+import { setTimeout as delay } from 'node:timers/promises';
+import type { App, AppTurn, CreateTarget, Inventory, Kind, Project, ThreadPage } from '../src/desktop.ts';
 import { AcbError } from '../src/errors.ts';
 
 export interface FakeThread {
@@ -42,6 +43,11 @@ export class FakeApp implements App {
   created: { prompt: string; title?: string; target: CreateTarget }[] = [];
   shown: string[] = [];
   titles: { id: string; title: string }[] = [];
+  archiving: { id: string; kind: Kind; archived: boolean }[] = [];
+  /** Kinds the app cannot list, as with ChatGPT signed out. */
+  unavailable: string[] = [];
+  /** How long an accepted message takes to appear as a turn. */
+  listAfterMs = 0;
   answerAfterReads = 1;
   answer: string | ((thread: FakeThread) => void) = 'ok';
   #pending: { thread: FakeThread; reads: number }[] = [];
@@ -57,8 +63,8 @@ export class FakeApp implements App {
     return CALLER;
   }
 
-  async listThreads(): Promise<ThreadSummary[]> {
-    return [...this.threads.values()].map((thread) => ({
+  async listThreads(): Promise<Inventory> {
+    const threads = [...this.threads.values()].map((thread) => ({
       id: thread.id,
       kind: thread.kind,
       title: thread.title,
@@ -68,6 +74,7 @@ export class FakeApp implements App {
       updatedAt: null,
       pinned: false,
     }));
+    return { threads, unavailable: this.unavailable };
   }
 
   async listProjects(): Promise<Project[]> {
@@ -98,7 +105,8 @@ export class FakeApp implements App {
     const thread = this.#get(id);
     if (thread.archived) throw new AcbError('FAILED', `session ${id} is archived`, { archived: true });
     this.sent.push({ id, prompt, ...(caller ? { caller } : {}) });
-    this.#start(thread, prompt);
+    if (!this.listAfterMs) return this.#start(thread, prompt);
+    void delay(this.listAfterMs).then(() => this.#start(thread, prompt));
   }
 
   async createThread(args: { prompt: string; title?: string; target: CreateTarget }): Promise<string> {
@@ -118,7 +126,8 @@ export class FakeApp implements App {
     this.#get(id).title = title;
   }
 
-  async setArchived(id: string, archived: boolean): Promise<void> {
+  async setArchived(id: string, kind: Kind, archived: boolean): Promise<void> {
+    this.archiving.push({ id, kind, archived });
     this.#get(id).archived = archived;
   }
 

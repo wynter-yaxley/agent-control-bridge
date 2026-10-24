@@ -3,8 +3,9 @@ import { readFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { Desktop, UUID } from './desktop.ts';
+import { WindowsHelper } from './helper.ts';
+import { findPipe, pipeTransport } from './pipe.ts';
 import { createServer } from './server.ts';
-import { ChatGptWindow } from './window.ts';
 
 const HELP = `Usage: agent-control-bridge [--caller <threadId>] [--timeout <seconds>]
 
@@ -46,13 +47,13 @@ function exit(message: string, code: number): never {
 }
 
 const { caller, timeoutMs } = options();
-const app = new Desktop({ caller });
-const page = new ChatGptWindow();
-const server = createServer({ app, page, version, timeoutMs });
-// Load the window helper while the client is still connecting.
-server.server.oninitialized = () => page.warm();
+const helper = new WindowsHelper();
+const app = new Desktop({ caller, transport: pipeTransport(() => findPipe((path) => helper.isAppPipe(path))) });
+const server = createServer({ app, page: helper, version, timeoutMs });
+// Start the helper while the client is still connecting.
+server.server.oninitialized = () => helper.warm();
 const stop = () => {
-  page.close();
+  helper.close();
   process.exit(0);
 };
 process.stdin.once('end', stop);

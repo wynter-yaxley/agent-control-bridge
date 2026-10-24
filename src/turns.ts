@@ -74,11 +74,14 @@ export function promptOf(turn: AppTurn): Prompt | null {
   };
 }
 
-/** Whether the turn was opened by `text` (already normalized). */
+/**
+ * Whether the turn was opened by exactly `text` (already normalized). A shortened prompt
+ * proves nothing either way, so it never matches; ACB keeps its own prompts short enough to
+ * be read back whole.
+ */
 export function opensWith(turn: AppTurn | undefined, text: string): boolean {
   const prompt = turn && promptOf(turn);
-  if (!prompt) return false;
-  return prompt.complete ? prompt.text === text : prompt.text.length > 0 && text.startsWith(prompt.text);
+  return prompt?.complete === true && prompt.text === text;
 }
 
 export function toTurn(turn: AppTurn): Turn {

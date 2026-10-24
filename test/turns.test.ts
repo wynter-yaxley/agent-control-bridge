@@ -24,7 +24,7 @@ test('a delegated message is read from its delegation envelope', () => {
   assert.equal(opensWith(turn, 'a <b>'), false);
 });
 
-test('a shortened delegation is a prefix that matches only longer messages it starts', () => {
+test('a shortened delegation never counts as the same message', () => {
   const text = `<codex_delegation>\n  <source_thread_id>${CALLER}</source_thread_id>\n  <input>first part &am`;
   const turn = {
     id: 't1',
@@ -33,8 +33,8 @@ test('a shortened delegation is a prefix that matches only longer messages it st
     items: [{ type: 'functionCallOutput', output: { text, truncated: true } }],
   };
   assert.deepEqual(promptOf(turn), { text: 'first part', complete: false });
-  assert.equal(opensWith(turn, 'first part & more'), true);
-  assert.equal(opensWith(turn, 'other'), false);
+  assert.equal(opensWith(turn, 'first part'), false);
+  assert.equal(opensWith(turn, 'first part & more'), false);
   assert.equal(toTurn(turn).truncated, true);
 });
 

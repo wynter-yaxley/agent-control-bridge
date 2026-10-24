@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { AcbError } from './errors.ts';
-import { type Json, pipeTransport, type Transport } from './pipe.ts';
+import type { Json, Transport } from './pipe.ts';
 
 /**
  * Client for the tools the ChatGPT desktop app serves to its own agents (namespace
@@ -24,6 +24,12 @@ export interface ThreadSummary {
   cwd: string | null;
   updatedAt: string | null;
   pinned: boolean;
+}
+
+export interface Inventory {
+  threads: ThreadSummary[];
+  /** Kinds of conversations the app could not list. */
+  unavailable: string[];
 }
 
 export interface Project {
@@ -59,6 +65,7 @@ export type CreateTarget =
   | { type: 'projectless'; directoryName?: string };
 
 export const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 /** Codex conversations of `~/.codex/session_index.jsonl`, most recently updated first. */
 export async function recentCodexThreads(codexHome: string): Promise<string[]> {
   let index: string;
@@ -84,7 +91,7 @@ export async function recentCodexThreads(codexHome: string): Promise<string[]> {
 }
 
 export interface DesktopOptions {
-  transport?: Transport;
+  transport: Transport;
   /** The Codex conversation named as caller; found automatically when omitted. */
   caller?: string;
   codexHome?: string;
@@ -96,8 +103,8 @@ export class Desktop {
   readonly #codexHome: string;
   #caller: string | undefined;
 
-  constructor(options: DesktopOptions = {}) {
-    this.#send = options.transport ?? pipeTransport();
+  constructor(options: DesktopOptions) {
+    this.#send = options.transport;
     this.#caller = options.caller;
     this.#codexHome = options.codexHome ?? process.env.CODEX_HOME ?? join(homedir(), '.codex');
   }
@@ -125,9 +132,10 @@ export class Desktop {
   }
 
   async call(tool: string, args: Json, caller?: string): Promise<Json> {
+    const id = randomUUID();
     const response = await this.#send({
       jsonrpc: '2.0',
-      id: randomUUID(),
+      id,
       method: 'tools/call',
       params: {
         namespace: 'codex_app',
@@ -139,20 +147,29 @@ export class Desktop {
         callerSource: 'codex',
       },
     });
+    if (response.jsonrpc !== '2.0' || response.id !== id) {
+      throw new AcbError('PROTOCOL', 'The desktop app answered a different request');
+    }
     return toolResult(tool, response);
   }
 
-  async listThreads(): Promise<ThreadSummary[]> {
+  /**
+   * Pinned conversations, then the others in the app's sidebar order (most recently updated
+   * first unless the user sorts manually), at most 50. `unavailable` names the kinds the app
+   * could not list (e.g. `chatgpt` while signed out), so a missing kind is not an empty list.
+   */
+  async listThreads(): Promise<Inventory> {
     const result = await this.call('list_threads', { limit: 50 });
     // Other kinds the app may list (e.g. cloud Work tasks) are not conversations ACB handles.
-    return [
+    const threads = [
       ...rows(result.pinnedThreads).map((row) => summary(row, true)),
-      ...rows(result.threads).map((row) => summary(row, false)),
+      ...list(result.threads).map((row) => summary(row, false)),
     ].filter((row): row is ThreadSummary => row !== null);
+    return { threads, unavailable: sources(result.unavailableSources) };
   }
 
   async listProjects(): Promise<Project[]> {
-    return rows((await this.call('list_projects', {})).projects).map((row) => ({
+    return list((await this.call('list_projects', {})).projects).map((row) => ({
       projectId: String(row.projectId),
       label: String(row.label ?? ''),
       path: String(row.path ?? ''),
@@ -217,8 +234,8 @@ export class Desktop {
     await this.call('set_thread_title', { threadId: id, source: kind, title });
   }
 
-  async setArchived(id: string, archived: boolean): Promise<void> {
-    await this.call('set_thread_archived', { threadId: id, archived });
+  async setArchived(id: string, kind: Kind, archived: boolean): Promise<void> {
+    await this.call('set_thread_archived', { threadId: id, source: kind, archived });
   }
 
   /** Shows the conversation in the app's most recently focused window, without activating it. */
@@ -241,6 +258,9 @@ export type App = Pick<
   | 'show'
 >;
 
+/** Tools that may answer success in plain text rather than JSON. */
+const TEXT_RESULTS = new Set(['set_thread_title']);
+
 /** Unwraps a `tools/call` response: one text item holding JSON, or a failure message. */
 export function toolResult(tool: string, response: Json): Json {
   if (response.error !== undefined) {
@@ -256,7 +276,8 @@ export function toolResult(tool: string, response: Json): Json {
   try {
     return object(JSON.parse(text));
   } catch {
-    return { text };
+    if (TEXT_RESULTS.has(tool)) return { text };
+    throw new AcbError('PROTOCOL', `The desktop app sent an unreadable ${tool} result`);
   }
 }
 
@@ -290,6 +311,20 @@ function kindOf(value: unknown): Kind | null {
 function object(value: unknown): Json {
   if (value && typeof value === 'object' && !Array.isArray(value)) return value as Json;
   throw new AcbError('PROTOCOL', 'The desktop app sent an unexpected response');
+}
+
+/** A list the response must contain. */
+function list(value: unknown): Json[] {
+  if (!Array.isArray(value)) throw new AcbError('PROTOCOL', 'The desktop app sent an incomplete response');
+  return rows(value);
+}
+
+/** Source names, given as strings or as `{ source }` objects. */
+function sources(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((entry) => (typeof entry === 'string' ? entry : (entry as Json | null)?.source))
+    .filter((entry): entry is string => typeof entry === 'string');
 }
 
 function rows(value: unknown): Json[] {

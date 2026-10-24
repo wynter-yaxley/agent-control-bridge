@@ -20,7 +20,8 @@ Sending a prompt that is already the newest message of the conversation does not
 Only acb_gpt_create brings the ChatGPT window to the front; reading a ChatGPT reply from the page and acb_open switch the page the app shows.`;
 
 const id = (what: string) => z.string().regex(UUID, `Expected a ${what} ID`).describe(`${what} ID`);
-const prompt = z.string().trim().min(1).max(100_000).describe('Message to send');
+// The app reads back at most 20,000 characters of a message; ACB must read its own prompts back whole.
+const prompt = z.string().trim().min(1).max(20_000).describe('Message to send (up to 20,000 characters)');
 const title = z.string().trim().min(1).max(200).describe('Conversation title');
 const turns = z.number().int().min(1).max(10).optional().describe('Newest turns to return (1-10, default 1)');
 const cursor = z.string().min(1).max(4000).optional().describe('nextCursor of a previous read, for older turns');
@@ -74,7 +75,7 @@ export function createServer({ app, page, version, timeoutMs }: Services): McpSe
     },
     (args) =>
       answer(async () => {
-        await app.show(args.id);
+        await page.run(() => app.show(args.id));
         return { shown: args.id };
       }),
   );
@@ -83,7 +84,7 @@ export function createServer({ app, page, version, timeoutMs }: Services): McpSe
     'acb_codex_list',
     {
       description:
-        'List recent Codex conversations of the desktop app (id, title, status, cwd, projectId, updatedAt), most recent first.',
+        'List Codex conversations of the desktop app (id, title, status, cwd, projectId, updatedAt, pinned) in its sidebar order: pinned first, then most recently updated unless the user sorts manually.',
       inputSchema: { cwd: z.string().min(1).max(1000).optional().describe('Only conversations in this folder'), limit },
       annotations: READ,
     },
@@ -140,7 +141,7 @@ export function createServer({ app, page, version, timeoutMs }: Services): McpSe
     'acb_gpt_list',
     {
       description:
-        'List recent ChatGPT conversations of the desktop app (id, title, status, projectId, pinned), pinned first.',
+        'List ChatGPT conversations of the desktop app (id, title, status, projectId, updatedAt, pinned) in its sidebar order: pinned first, then most recently updated unless the user sorts manually.',
       inputSchema: { limit },
       annotations: READ,
     },

@@ -1,20 +1,22 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import { type Sent, sendPrompt, type WaitOptions, waitForTurn } from './conversation.ts';
-import type { App, ThreadSummary } from './desktop.ts';
+import type { App, Inventory, ThreadSummary } from './desktop.ts';
 import { AcbError } from './errors.ts';
+import type { WindowsHelper } from './helper.ts';
 import { type Conversation, normalize, opensWith, type Turn, toConversation } from './turns.ts';
-import type { ChatGptWindow } from './window.ts';
 
-/** The page operations of ChatGptWindow; tests substitute them. */
-export type Page = Pick<ChatGptWindow, 'run' | 'readReply' | 'startChat'>;
+/** The page operations of WindowsHelper; tests substitute them. */
+export type Page = Pick<WindowsHelper, 'run' | 'readReply' | 'startChat'>;
 
 /** A finished turn whose reply could not be read from the page keeps `replyOnPage` and says why. */
 export interface PageRead {
   pageError?: string;
 }
 
+const RECOGNIZE_MS = 30_000;
+
 export async function listGpt(app: App, options: { limit?: number } = {}): Promise<ThreadSummary[]> {
-  return (await app.listThreads()).filter((thread) => thread.kind === 'chatgpt').slice(0, options.limit ?? 20);
+  return chatgptThreads(await app.listThreads()).slice(0, options.limit ?? 20);
 }
 
 /**
@@ -50,10 +52,11 @@ export async function sendGpt(
 }
 
 /**
- * Starts a ChatGPT conversation with `prompt` and returns its first reply. The app offers no
+ * Starts a ChatGPT conversation with `prompt` and returns its first reply. The app has no
  * tool for this, so the window is used: it shows an existing ChatGPT conversation (which
  * puts it in ChatGPT mode), opens a new chat and sends the prompt. The new conversation is
- * then recognized in the app's list by its first message.
+ * then recognized in the app's list by its first message. Creations run one at a time, so
+ * each recognizes only its own conversation.
  */
 export async function createGpt(
   app: App,
@@ -62,15 +65,14 @@ export async function createGpt(
   options: WaitOptions,
 ): Promise<{ conversationId: string; title: string; turn: Turn } & PageRead> {
   const prompt = normalize(request.prompt);
-  const known = await app.listThreads();
-  const anchor = known.find((thread) => thread.kind === 'chatgpt');
-  if (!anchor) throw new AcbError('WINDOW', 'Start one ChatGPT conversation in the desktop app first');
-  await page.run(async () => {
-    await app.show(anchor.id);
+  const conversationId = await page.run(async () => {
+    const known = chatgptThreads(await app.listThreads());
+    if (!known.length) throw new AcbError('WINDOW', 'Start one ChatGPT conversation in the desktop app first');
+    await app.show(known[0].id);
     await page.startChat(prompt);
+    return recognize(app, new Set(known.map((thread) => thread.id)), prompt);
   });
-  const conversationId = await recognize(app, new Set(known.map((thread) => thread.id)), prompt);
-  const turn = await waitForTurn(app, conversationId, prompt, {}, options);
+  const turn = await waitForTurn(app, conversationId, prompt, { after: undefined }, options);
   // ChatGPT names a new conversation after its first reply, so the title is set afterwards.
   if (request.title) await setTitle(app, conversationId, request.title);
   const read = await withPageReply(app, page, conversationId, turn);
@@ -78,18 +80,33 @@ export async function createGpt(
   return { conversationId, title, ...read };
 }
 
+function chatgptThreads({ threads, unavailable }: Inventory): ThreadSummary[] {
+  if (unavailable.includes('chatgpt')) {
+    throw new AcbError(
+      'UNAVAILABLE',
+      'The desktop app could not list its ChatGPT conversations; is ChatGPT signed in?',
+    );
+  }
+  return threads.filter((thread) => thread.kind === 'chatgpt');
+}
+
+/** The one new conversation whose first message is `prompt`. */
 async function recognize(app: App, known: Set<string>, prompt: string): Promise<string> {
-  const deadline = Date.now() + 30_000;
+  const deadline = Date.now() + RECOGNIZE_MS;
   for (;;) {
-    for (const thread of await app.listThreads()) {
-      if (thread.kind !== 'chatgpt' || known.has(thread.id)) continue;
+    const matches: string[] = [];
+    for (const thread of chatgptThreads(await app.listThreads())) {
+      if (known.has(thread.id)) continue;
       // A conversation can be listed before its first message is readable; it is checked again.
-      const newest = await app.readThread(thread.id).then(
+      const first = await app.readThread(thread.id).then(
         (read) => read.turns[0],
         () => undefined,
       );
-      if (opensWith(newest, prompt)) return thread.id;
+      if (opensWith(first, prompt)) matches.push(thread.id);
     }
+    if (matches.length > 1)
+      throw new AcbError('WINDOW', 'Several new conversations start with this message', { matches });
+    if (matches.length === 1) return matches[0];
     if (Date.now() >= deadline) {
       throw new AcbError('WINDOW', 'The prompt was sent, but the new conversation did not appear in the app');
     }
@@ -123,10 +140,27 @@ async function withPageReply(
   }
 }
 
+/**
+ * Reads the reply of `turn` from the page. The turn must be the conversation's newest,
+ * finished one before and after reading, and the page's newest message must be its prompt.
+ */
 async function pageReply(app: App, page: Page, conversationId: string, turn: Turn): Promise<string> {
+  if (!turn.prompt || turn.truncated) {
+    throw new AcbError('WINDOW', 'This prompt is too long to be matched on the page', { conversationId });
+  }
+  const prompt = turn.prompt;
+  const newest = async () => {
+    const read = await app.readThread(conversationId, { outputs: false });
+    const current = read.turns[0];
+    if (current?.id !== turn.turnId || current.status !== 'completed') {
+      throw new AcbError('BUSY', 'The conversation has moved on; read it again', { conversationId });
+    }
+    return read.title;
+  };
   return page.run(async () => {
     await app.show(conversationId);
-    const { title } = await app.readThread(conversationId, { outputs: false });
-    return page.readReply(title, turn.prompt ?? '');
+    const reply = await page.readReply(await newest(), prompt);
+    await newest();
+    return reply;
   });
 }

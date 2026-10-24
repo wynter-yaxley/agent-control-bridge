@@ -101,3 +101,47 @@ test('a conversation of the other kind is refused before anything is sent', asyn
   await assert.rejects(sendPrompt(app, 'codex', GPT, 'Hi', fast), code('INPUT'));
   assert.deepEqual(app.sent, []);
 });
+
+test('concurrent sends of one prompt deliver it once', async () => {
+  const app = new FakeApp();
+  app.add({ id: GPT, kind: 'chatgpt' });
+  app.listAfterMs = 30;
+  const [first, second] = await Promise.all([
+    sendPrompt(app, 'chatgpt', GPT, 'Question', fast),
+    sendPrompt(app, 'chatgpt', GPT, 'Question', fast),
+  ]);
+  assert.equal(app.sent.length, 1);
+  assert.deepEqual([first.alreadySent, second.alreadySent], [false, true]);
+  assert.equal(second.turn?.turnId, first.turn?.turnId);
+});
+
+test('a different prompt sent before the first one is listed is refused', async () => {
+  const app = new FakeApp();
+  app.add({ id: GPT, kind: 'chatgpt' });
+  app.listAfterMs = 30;
+  const first = sendPrompt(app, 'chatgpt', GPT, 'Question', { ...fast, wait: false });
+  await assert.rejects(sendPrompt(app, 'chatgpt', GPT, 'Other question', fast), code('BUSY'));
+  await first;
+  assert.deepEqual(
+    app.sent.map((entry) => entry.prompt),
+    ['Question'],
+  );
+});
+
+test('a turn of another message waiting for approval is not reported as ours', async () => {
+  const app = new FakeApp();
+  const thread = app.add({ id: CODEX, kind: 'codex' });
+  app.answer = () => {
+    // Someone else's message takes over and waits for approval.
+    thread.turns.unshift(userTurn('foreign', 'Not ours', null, 'inProgress'));
+    thread.activeFlags = ['waitingOnApproval'];
+  };
+  await assert.rejects(sendPrompt(app, 'codex', CODEX, 'Ours', fast), code('BUSY'));
+});
+
+test('an archived ChatGPT conversation is restored as a ChatGPT conversation', async () => {
+  const app = new FakeApp();
+  app.add({ id: GPT, kind: 'chatgpt', archived: true });
+  await sendPrompt(app, 'chatgpt', GPT, 'Question', fast);
+  assert.deepEqual(app.archiving, [{ id: GPT, kind: 'chatgpt', archived: false }]);
+});

@@ -49,18 +49,21 @@ function textOf(nodes: PageNode[]): string {
 const squash = (text: string) => normalize(text).replace(/\s+/g, ' ');
 
 /**
- * The ChatGPT window, through a long-lived PowerShell UI Automation helper (window.ps1).
- * Reading a page never activates the window; starting a chat does, because the app focuses
- * the window when its new-chat button or composer is used. Page operations run one at a
- * time, since each depends on which conversation the window shows.
+ * A long-lived Windows PowerShell helper (helper.ps1) for what the app's tools do not offer:
+ * checking who serves the tool pipe, reading the ChatGPT page and starting a ChatGPT chat
+ * (UI Automation). Reading a page never activates the window; starting a chat does, because
+ * the app focuses the window when its new-chat button or composer is used.
  */
-export class ChatGptWindow {
+export class WindowsHelper {
   #child: ChildProcess | undefined;
   #answer: ((line: string) => void) | undefined;
   #queue: Promise<unknown> = Promise.resolve();
   #requests: Promise<unknown> = Promise.resolve();
 
-  /** Runs `task` after the page operations already queued. */
+  /**
+   * Runs `task` after the page operations already queued. Every operation that depends on,
+   * or changes, the conversation the window shows runs through here.
+   */
   run<T>(task: () => Promise<T>): Promise<T> {
     const result = this.#queue.then(task);
     this.#queue = result.catch(() => undefined);
@@ -77,9 +80,14 @@ export class ChatGptWindow {
     this.#child = undefined;
   }
 
+  /** Whether the server of the tool pipe at `path` is the signed app of this user session. */
+  async isAppPipe(path: string): Promise<boolean> {
+    return (await this.#request({ op: 'pipe-owner', path })).isApp === true;
+  }
+
   /**
    * The reply to `prompt` from the page showing `title`, once ChatGPT has finished it. The
-   * prompt is matched on the page, so the reply belongs to the message that was sent.
+   * page's newest message must be exactly `prompt`, so the reply belongs to it.
    */
   async readReply(title: string, prompt: string, timeoutMs = READ_TIMEOUT_MS): Promise<string> {
     const deadline = Date.now() + timeoutMs;
@@ -87,7 +95,7 @@ export class ChatGptWindow {
     for (;;) {
       const page = await this.#request({ op: 'transcript', title });
       const exchange = page.found && !page.busy ? lastExchange(page.nodes as PageNode[]) : null;
-      if (exchange?.complete && exchange.reply && squash(exchange.prompt).startsWith(expected)) return exchange.reply;
+      if (exchange?.complete && exchange.reply && squash(exchange.prompt) === expected) return exchange.reply;
       if (Date.now() >= deadline) {
         throw new AcbError(
           'WINDOW',
@@ -118,8 +126,8 @@ export class ChatGptWindow {
     if (!this.#child) this.#start();
     const child = this.#child as ChildProcess;
     const line = await new Promise<string>((resolve, reject) => {
-      const timer = setTimeout(() => fail('The window helper did not answer in time'), REQUEST_TIMEOUT_MS);
-      const stopped = () => fail('The window helper stopped');
+      const timer = setTimeout(() => fail('The Windows helper did not answer in time'), REQUEST_TIMEOUT_MS);
+      const stopped = () => fail('The Windows helper stopped');
       const fail = (reason: string) => {
         done();
         this.close();
@@ -141,14 +149,14 @@ export class ChatGptWindow {
     try {
       response = JSON.parse(line);
     } catch {
-      throw new AcbError('PROTOCOL', 'The window helper sent an unreadable answer');
+      throw new AcbError('PROTOCOL', 'The Windows helper sent an unreadable answer');
     }
     if (response.ok !== true) throw new AcbError(response.code as ErrorCode, String(response.message));
     return response;
   }
 
   #start(): void {
-    const script = fileURLToPath(new URL('./window.ps1', import.meta.url));
+    const script = fileURLToPath(new URL('./helper.ps1', import.meta.url));
     // A script block bypasses the execution policy, which -File would be subject to.
     const command = `& ([scriptblock]::Create([IO.File]::ReadAllText('${script.replaceAll("'", "''")}')))`;
     const system = process.env.SystemRoot ?? 'C:\\Windows';

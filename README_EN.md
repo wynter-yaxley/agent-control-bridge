@@ -117,11 +117,12 @@ A send waits up to 240 seconds by default. Set the client's tool timeout to 300 
 
 **In general**
 
-- **No duplicates**: if a conversation's newest message is exactly the one to send, ACB does not send it again and returns that turn's reply. To repeat the same text on purpose, change it slightly.
+- **No duplicates**: if the message to send is exactly the conversation's newest message, or the one ACB just sent and the app does not show yet, ACB does not send it again and returns that turn's reply. To repeat the same text on purpose, change it slightly.
+- A message can have up to 20,000 characters: the app reads back no more, and ACB must read a message back whole to know which reply belongs to it. Messages to Codex have `&`, `<` and `>` escaped, so many of those lower the limit a little. Put longer material in a file and refer to it.
 - A conversation that is still answering refuses new messages (`BUSY`).
-- The app lists the 50 most recent conversations (plus pinned ones). Older ones can still be read by ID.
+- Lists follow the app's sidebar: pinned first, then most recently updated by default. The app lists the 50 most recent conversations (plus pinned ones); older ones can still be read by ID.
 - **Caller**: the app requires every call to be made on behalf of a Codex conversation. ACB uses the most recent one, or the one given with `--caller`. Nothing is recorded in that conversation; only the first message of a new Codex conversation is shown as delegated by it.
-- ACB talks only to the desktop app on this computer. It does not go online by itself and does not read account credentials.
+- ACB talks only to the desktop app on this computer. It does not go online by itself and does not read account credentials. Before connecting, it checks the server of the app's pipe: the ChatGPT app with a valid OpenAI signature, run by the current user in the current Windows session.
 
 ## Errors
 
@@ -165,7 +166,7 @@ npm run smoke                               # acceptance run: really starts conv
 | `src/conversation.ts` | Sending, duplicate check, waiting for the reply |
 | `src/turns.ts` | Turns the app's records into prompts and replies |
 | `src/codex.ts`, `src/chatgpt.ts` | Operations of each kind of conversation |
-| `src/window.ts`, `src/window.ps1` | Reading the ChatGPT page, starting ChatGPT conversations |
+| `src/helper.ts`, `src/helper.ps1` | Windows helper: checking the pipe's server, reading the ChatGPT page, starting ChatGPT conversations |
 
 See [AGENTS.md](AGENTS.md) and [CONTRIBUTING.md](CONTRIBUTING.md) for development rules and [CHANGELOG.md](CHANGELOG.md) for changes.
 

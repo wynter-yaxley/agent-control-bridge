@@ -5,8 +5,15 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { createServer } from '../src/server.ts';
 import { CODEX, FakeApp, userTurn } from './fake-app.ts';
 
-async function connect(app = new FakeApp()) {
-  const page = { run: <T>(task: () => Promise<T>) => task(), readReply: async () => '', startChat: async () => {} };
+async function connect(app = new FakeApp(), queued: string[] = []) {
+  const page = {
+    run: <T>(task: () => Promise<T>) => {
+      queued.push('page');
+      return task();
+    },
+    readReply: async () => '',
+    startChat: async () => {},
+  };
   const server = createServer({ app, page, version: '0.0.0', timeoutMs: 1000 });
   const client = new Client({ name: 'test', version: '0' });
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
@@ -61,4 +68,12 @@ test('malformed arguments are rejected before any tool runs', async () => {
   const result = await (await connect()).callTool({ name: 'acb_codex_read', arguments: { threadId: 'nope' } });
   assert.equal(result.isError, true);
   assert.match((result.content as { text: string }[])[0].text, /Expected a Codex conversation ID/);
+});
+
+test('showing a conversation waits for the page operations already queued', async () => {
+  const app = new FakeApp();
+  const queued: string[] = [];
+  await (await connect(app, queued)).callTool({ name: 'acb_open', arguments: { id: CODEX } });
+  assert.deepEqual(queued, ['page']);
+  assert.deepEqual(app.shown, [CODEX]);
 });

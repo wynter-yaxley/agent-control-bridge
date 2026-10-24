@@ -1,10 +1,11 @@
-﻿# ChatGPT window helper for agent-control-bridge, driven by src/window.ts.
+﻿# Windows helper for agent-control-bridge, driven by src/helper.ts.
 # One JSON request per stdin line, one JSON response per stdout line:
-#   {"op":"transcript","title":"..."}  -> {"ok":true,"found":bool,"busy":bool,"nodes":[{"type","name"}]}
-#   {"op":"compose","prompt":"..."}    -> {"ok":true}
-#   failure                            -> {"ok":false,"code":"WINDOW|BUSY|UNAVAILABLE|INPUT","message":"..."}
-# It uses UI Automation patterns only: no keystrokes, no mouse, no clipboard.
-# Control names are those of the Simplified Chinese app.
+#   {"op":"pipe-owner","path":"\\.\pipe\..."} -> {"ok":true,"isApp":bool}
+#   {"op":"transcript","title":"..."}          -> {"ok":true,"found":bool,"busy":bool,"nodes":[{"type","name"}]}
+#   {"op":"compose","prompt":"..."}            -> {"ok":true}
+#   failure                                    -> {"ok":false,"code":"WINDOW|BUSY|UNAVAILABLE|INPUT","message":"..."}
+# The ChatGPT window is used through UI Automation patterns only: no keystrokes, no mouse,
+# no clipboard. Control names are those of the Simplified Chinese app.
 $ErrorActionPreference = 'Stop'
 [Console]::InputEncoding = [Text.UTF8Encoding]::new($false)
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
@@ -12,6 +13,8 @@ Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
 Add-Type -Namespace Acb -Name Win32 -MemberDefinition @'
 [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr window);
 [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr window, int command);
+[DllImport("kernel32.dll", SetLastError = true)]
+public static extern bool GetNamedPipeServerProcessId(Microsoft.Win32.SafeHandles.SafePipeHandle pipe, out uint processId);
 '@
 
 $Names = @{
@@ -53,6 +56,27 @@ function Until([int]$ms, [scriptblock]$probe) {
   return $null
 }
 
+# Whether the server of a tool pipe is the ChatGPT desktop app: signed by OpenAI and running
+# in this Windows session as this user.
+function PipeOwner($request) {
+  $pipe = [IO.Pipes.NamedPipeClientStream]::new('.', ($request.path -replace '^\\\\\.\\pipe\\', ''), [IO.Pipes.PipeDirection]::InOut)
+  [uint32]$id = 0
+  try {
+    $pipe.Connect(2000)
+    if (-not [Acb.Win32]::GetNamedPipeServerProcessId($pipe.SafePipeHandle, [ref]$id)) { return @{ ok = $true; isApp = $false } }
+  } finally {
+    $pipe.Dispose()
+  }
+  $server = Get-Process -Id $id
+  $signature = Get-AuthenticodeSignature -LiteralPath $server.Path
+  $owner = Invoke-CimMethod -InputObject (Get-CimInstance Win32_Process -Filter "ProcessId=$id") -MethodName GetOwnerSid
+  $isApp = $server.SessionId -eq (Get-Process -Id $PID).SessionId -and
+    $owner.Sid -eq [Security.Principal.WindowsIdentity]::GetCurrent().User.Value -and
+    $signature.Status -eq 'Valid' -and
+    $signature.SignerCertificate.Subject -match '(^|, )O=("OpenAI OpCo, LLC"|OpenAI)(,|$)'
+  return @{ ok = $true; isApp = [bool]$isApp }
+}
+
 # The app's top-level windows. A minimized window exposes no UI tree, so it is restored
 # without being activated (SW_SHOWNOACTIVATE): the user's active window keeps the focus.
 function AppWindows {
@@ -73,7 +97,8 @@ function AppWindows {
 }
 
 function ComposerText($composer) {
-  $text = $composer.GetCurrentPattern([Windows.Automation.TextPattern]::Pattern).DocumentRange.GetText(-1).Trim()
+  $text = $composer.GetCurrentPattern([Windows.Automation.TextPattern]::Pattern).DocumentRange.GetText(-1)
+  $text = ($text -replace "`r`n", "`n").Trim()
   # An empty composer reads as its placeholder.
   if ($text -eq $Names.Composer) { return '' }
   return $text
@@ -86,7 +111,7 @@ function Transcript($request) {
     if ($document -and $document.Current.Name -eq $request.title) { $document }
   })
   if ($pages.Count -eq 0) { return @{ ok = $true; found = $false } }
-  if ($pages.Count -gt 1) { Fail 'WINDOW' 'Several windows show this conversation' }
+  if ($pages.Count -gt 1) { Fail 'WINDOW' 'Several windows show a conversation with this title' }
   $scope = Find $pages[0] 'Group' $Names.Conversation
   if (-not $scope) { $scope = $pages[0] }
   $kinds = [Windows.Automation.OrCondition]::new((Condition 'Text'), (Condition 'Button'))
@@ -97,39 +122,46 @@ function Transcript($request) {
   return @{ ok = $true; found = $true; busy = [bool](Find $pages[0] 'Button' $Names.Stop); nodes = $nodes }
 }
 
+# A new, empty chat page of `window`: no message on it and exactly one usable composer.
+function BlankPage($window) {
+  $document = Find $window 'Document'
+  if (-not $document) { return $null }
+  if (@($Names.You | Where-Object { Find $document 'Text' $_ }).Count) { return $null }
+  $composers = @(Visible $document 'Edit' $Names.Composer)
+  if ($composers.Count -ne 1) { return $null }
+  return @{ Document = $document; Composer = $composers[0] }
+}
+
 # Starts a ChatGPT conversation: the new-chat button of the ChatGPT-mode window, the prompt
-# written through ValuePattern and read back, then the send button.
+# written through ValuePattern and read back, then the page's single send button. Whatever is
+# in the composer when something does not match is left for the user to see.
 function Compose($request) {
+  $expected = ($request.prompt -replace "`r`n", "`n").Trim()
   # Showing a ChatGPT conversation puts the window in ChatGPT mode once the page updates.
-  $windows = Until 5000 {
+  $window = Until 5000 {
     $found = @(AppWindows | Where-Object {
       $mode = Find $_ 'Button' ($Names.ModePrefix + $Names.ChatGptMode)
       $mode -and -not $mode.Current.IsOffscreen
     })
-    if ($found.Count -eq 1) { , $found }
+    if ($found.Count -eq 1) { $found[0] }
   }
-  if (-not $windows) { Fail 'WINDOW' 'No single ChatGPT window in ChatGPT mode; the app does not update a fully covered window, so keep part of it visible' }
-  $window = $windows[0]
+  if (-not $window) { Fail 'WINDOW' 'No single ChatGPT window in ChatGPT mode; the app does not update a fully covered window, so keep part of it visible' }
   $newChat = @(Visible $window 'Button' $Names.NewChat)
   if ($newChat.Count -ne 1) { Fail 'WINDOW' 'The new-chat button was not found' }
   Invoke $newChat[0]
-  $composer = Until 10000 {
-    $document = Find $window 'Document'
-    if (-not $document) { return $null }
-    $spoken = @($Names.You | Where-Object { Find $document 'Text' $_ })
-    $edits = @(Visible $document 'Edit' $Names.Composer)
-    if ($spoken.Count -eq 0 -and $edits.Count -eq 1) { $edits[0] }
+  $page = Until 10000 { BlankPage $window }
+  if (-not $page) { Fail 'WINDOW' 'The new chat page did not open' }
+  if (ComposerText $page.Composer) { Fail 'BUSY' 'The new chat page holds a draft' }
+  $page.Composer.GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern).SetValue($request.prompt)
+  if (-not (Until 5000 { (ComposerText $page.Composer) -ceq $expected })) {
+    Fail 'WINDOW' 'The composer does not hold exactly the prompt; nothing was sent'
   }
-  if (-not $composer) { Fail 'WINDOW' 'The new chat page did not open' }
-  if (ComposerText $composer) { Fail 'BUSY' 'The new chat page holds a draft' }
-  $composer.GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern).SetValue($request.prompt)
-  $expected = ($request.prompt -replace "`r`n", "`n").Trim()
-  if (-not (Until 5000 { ((ComposerText $composer) -replace "`r`n", "`n") -ceq $expected })) {
-    $composer.GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern).SetValue('')
-    Fail 'WINDOW' 'The prompt could not be written into the composer'
+  $send = Until 5000 { $buttons = @(Visible $page.Document 'Button' $Names.Send); if ($buttons.Count -eq 1) { $buttons[0] } }
+  if (-not $send) { Fail 'WINDOW' 'No single send button on the new chat page; nothing was sent' }
+  # The window is active now and the user may type: check once more right before sending.
+  if (-not (BlankPage $window) -or (ComposerText $page.Composer) -cne $expected) {
+    Fail 'WINDOW' 'The new chat page changed before sending; nothing was sent'
   }
-  $send = Until 5000 { @(Visible $window 'Button' $Names.Send) | Select-Object -First 1 }
-  if (-not $send) { Fail 'WINDOW' 'The send button did not become available' }
   Invoke $send
   return @{ ok = $true }
 }
@@ -138,6 +170,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
   try {
     $request = $line | ConvertFrom-Json
     $response = switch ($request.op) {
+      'pipe-owner' { PipeOwner $request }
       'transcript' { Transcript $request }
       'compose' { Compose $request }
       default { Fail 'INPUT' "Unknown operation: $($request.op)" }

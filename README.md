@@ -117,11 +117,12 @@ hermes mcp add acb --command "C:\Program Files\nodejs\node.exe" --args "D:\agent
 
 **通用**
 
-- **不重复发送**：如果对话的最新一条消息和要发的内容完全相同，ACB 不会再发，而是返回那一轮的回复。确实需要重复同样的内容时，请稍作改动。
+- **不重复发送**：要发的内容如果和对话的最新一条消息完全相同，或者和 ACB 刚发出、应用还没显示出来的那条相同，ACB 不会再发，而是返回那一轮的回复。确实需要重复同样的内容时，请稍作改动。
+- 单条消息最多 2 万字符：应用最多回读这么多，ACB 要完整回读才能确认回复属于哪条消息。发给 Codex 的消息里 `&`、`<`、`>` 会被转义，这类字符很多时上限会略低。更长的内容请写进文件，再在消息里引用。
 - 对话正在回复时，新的消息会被拒绝（`BUSY`）。
-- 应用只列出最近的 50 个对话（置顶的另算）。更早的对话可以直接用 ID 读取。
+- 列表按应用侧栏的顺序排列：置顶的在前，其余默认按最近更新排序。应用只列出最近的 50 个对话（置顶的另算），更早的对话可以直接用 ID 读取。
 - **调用身份**：应用要求每次调用都以一个 Codex 对话的名义进行。ACB 默认使用最近的 Codex 对话，也可以用 `--caller` 指定。这个对话里不会留下任何记录，只有新建 Codex 对话时，第一条消息会显示为由它转交。
-- ACB 只和本机的桌面应用通信，自己不联网，不读取账号凭据。
+- ACB 只和本机的桌面应用通信，自己不联网，不读取账号凭据。连接前会核对应用管道的服务端：必须是当前用户、当前 Windows 会话里、带 OpenAI 有效签名的 ChatGPT 应用。
 
 ## 出错时
 
@@ -165,7 +166,7 @@ npm run smoke                               # 真机验收：会在应用里真�
 | `src/conversation.ts` | 发送、去重、等待回复 |
 | `src/turns.ts` | 把应用的对话记录整理成提问和回复 |
 | `src/codex.ts`、`src/chatgpt.ts` | 两类对话各自的操作 |
-| `src/window.ts`、`src/window.ps1` | 读取 ChatGPT 页面、新建 ChatGPT 对话 |
+| `src/helper.ts`、`src/helper.ps1` | Windows 辅助进程：核对管道服务端、读取 ChatGPT 页面、新建 ChatGPT 对话 |
 
 开发规则见 [AGENTS.md](AGENTS.md) 和 [CONTRIBUTING.md](CONTRIBUTING.md)，变更记录见 [CHANGELOG.md](CHANGELOG.md)。
 

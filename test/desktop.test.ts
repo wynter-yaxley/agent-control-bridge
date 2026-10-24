@@ -10,22 +10,30 @@ import { AcbError } from '../src/errors.ts';
 import { exchange, pipeTransport } from '../src/pipe.ts';
 import { CALLER, CODEX } from './fake-app.ts';
 
-const ok = (value: unknown) => ({
-  result: { success: true, contentItems: [{ type: 'inputText', text: JSON.stringify(value) }] },
+const result = (success: boolean, text: string) => ({
+  jsonrpc: '2.0',
+  result: { success, contentItems: [{ type: 'inputText', text }] },
 });
-const refused = (text: string) => ({ result: { success: false, contentItems: [{ type: 'inputText', text }] } });
+const ok = (value: unknown) => result(true, JSON.stringify(value));
+const refused = (text: string) => result(false, text);
 const code = (expected: string) => (error: unknown) => error instanceof AcbError && error.code === expected;
+
+/** A transport that answers every request with `answer`, echoing the request's ID. */
+function answering(answer: (request: Json) => Json) {
+  return async (request: Json): Promise<Json> => ({ ...answer(request), id: request.id });
+}
 
 test('a tool call names the codex_app namespace and its caller', async () => {
   const requests: Json[] = [];
+  const project = { projectId: 'p', label: 'L', path: 'D:\\P', isGitRepository: true };
   const app = new Desktop({
     caller: CALLER,
-    transport: async (request) => {
+    transport: answering((request) => {
       requests.push(request);
-      return ok({ projects: [{ projectId: 'p', label: 'L', path: 'D:\\P', isGitRepository: true }] });
-    },
+      return ok({ projects: [project] });
+    }),
   });
-  assert.deepEqual(await app.listProjects(), [{ projectId: 'p', label: 'L', path: 'D:\\P', isGitRepository: true }]);
+  assert.deepEqual(await app.listProjects(), [project]);
   const params = requests[0].params as Json;
   assert.equal(requests[0].method, 'tools/call');
   assert.equal(params.namespace, 'codex_app');
@@ -47,14 +55,16 @@ test('app failures become error codes', () => {
     () => toolResult('list_threads', { error: { code: -32000, message: 'Codex app tool request failed' } }),
     code('PROTOCOL'),
   );
-  assert.deepEqual(
-    toolResult('set_thread_title', {
-      result: { success: true, contentItems: [{ type: 'inputText', text: 'Renamed' }] },
-    }),
-    {
-      text: 'Renamed',
-    },
-  );
+});
+
+test('only tools known to answer in text may do so', () => {
+  assert.deepEqual(toolResult('set_thread_title', result(true, 'Renamed')), { text: 'Renamed' });
+  assert.throws(() => toolResult('list_threads', result(true, 'Listed')), code('PROTOCOL'));
+});
+
+test('an answer to another request is refused', async () => {
+  const app = new Desktop({ caller: CALLER, transport: async () => ({ ...ok({ projects: [] }), id: 'other' }) });
+  await assert.rejects(app.listProjects(), code('PROTOCOL'));
 });
 
 test('the caller is the most recent Codex conversation the app accepts', async () => {
@@ -64,43 +74,62 @@ test('the caller is the most recent Codex conversation the app accepts', async (
   const tried: unknown[] = [];
   const app = new Desktop({
     codexHome,
-    transport: async (request) => {
+    transport: answering((request) => {
       const caller = (request.params as Json).threadId;
       tried.push(caller);
-      return caller === CODEX
-        ? { error: { code: -32000, message: 'Codex app tool request failed' } }
-        : ok({ projects: [] });
-    },
+      if (caller === CODEX)
+        return { jsonrpc: '2.0', error: { code: -32000, message: 'Codex app tool request failed' } };
+      return ok({ projects: [] });
+    }),
   });
   assert.equal(await app.caller(), CALLER);
   assert.deepEqual(tried, [CODEX, CALLER]);
 });
 
 test('without any Codex conversation there is no caller', async () => {
-  const app = new Desktop({ codexHome: mkdtempSync(join(tmpdir(), 'acb-')), transport: async () => ok({}) });
+  const app = new Desktop({ codexHome: mkdtempSync(join(tmpdir(), 'acb-')), transport: answering(() => ok({})) });
   await assert.rejects(app.caller(), code('UNAVAILABLE'));
 });
 
 test('a thread page keeps turns, active flags and a cursor only when there is more', async () => {
   const app = new Desktop({
     caller: CALLER,
-    transport: async () =>
+    transport: answering(() =>
       ok({
         thread: {
           id: CODEX,
           kind: 'codex',
           title: 'T',
           status: { type: 'active', activeFlags: ['waitingOnApproval'] },
-          cwd: 'D:\\W',
         },
         page: { nextCursor: 'next', hasMore: false },
         turns: [{ id: 't1', status: 'inProgress', items: [{ type: 'userMessage', content: [] }] }],
       }),
+    ),
   });
   const page = await app.readThread(CODEX);
   assert.deepEqual(page.activeFlags, ['waitingOnApproval']);
   assert.equal(page.nextCursor, null);
   assert.equal(page.turns[0].id, 't1');
+});
+
+test('a list without its rows is a protocol error, and kinds the app could not list are reported', async () => {
+  const broken = new Desktop({ caller: CALLER, transport: answering(() => ok({ pinnedThreads: [] })) });
+  await assert.rejects(broken.listThreads(), code('PROTOCOL'));
+  const threads = [
+    { id: CODEX, kind: 'codex', title: 'T' },
+    { id: 'w', kind: 'work', title: 'Cloud task' },
+  ];
+  const partial = new Desktop({
+    caller: CALLER,
+    transport: answering(() => ok({ threads, unavailableSources: ['chatgpt'] })),
+  });
+  const inventory = await partial.listThreads();
+  assert.deepEqual(
+    inventory.threads.map((thread) => thread.id),
+    [CODEX],
+  );
+  assert.deepEqual(inventory.unavailable, ['chatgpt']);
 });
 
 function socketPath(): string {
@@ -136,12 +165,29 @@ test('requests and responses are length-prefixed JSON', async () => {
   }
 });
 
-test('the pipe is found again when the app has restarted', async () => {
+test('a request that never left is sent again on the pipe found anew', async () => {
   const server = await frameServer(() => ({ ok: true }));
   const paths = [socketPath(), server.path];
   try {
-    const send = pipeTransport(2000, async () => paths.shift() as string);
+    const send = pipeTransport(async () => paths.shift() as string, 2000);
     assert.deepEqual(await send({ id: 1 }), { ok: true });
+  } finally {
+    server.close();
+  }
+});
+
+test('a request that reached the app is never sent again', async () => {
+  let connections = 0;
+  const path = socketPath();
+  const server = createServer((socket) => {
+    connections++;
+    socket.once('data', () => socket.destroy());
+  });
+  await new Promise<void>((resolve) => server.listen(path, resolve));
+  try {
+    const send = pipeTransport(async () => path, 2000);
+    await assert.rejects(send({ id: 1 }), code('PROTOCOL'));
+    assert.equal(connections, 1);
   } finally {
     server.close();
   }

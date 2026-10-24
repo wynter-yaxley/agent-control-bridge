@@ -1,22 +1,31 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { createGpt, type Page, readGpt, sendGpt } from '../src/chatgpt.ts';
+import { createGpt, listGpt, type Page, readGpt, sendGpt } from '../src/chatgpt.ts';
 import { createCodex, listCodex, sendCodex } from '../src/codex.ts';
 import { AcbError } from '../src/errors.ts';
+import { WindowsHelper } from '../src/helper.ts';
 import { CODEX, FakeApp, type FakeThread, GPT, userTurn } from './fake-app.ts';
 
 const fast = { timeoutMs: 2000, pollMs: 1 };
 const PAGE_REPLY = '::chatgpt-content-reference{index="0" source_message_id="m1"}';
+const code = (expected: string) => (error: unknown) => error instanceof AcbError && error.code === expected;
 
-/** A page that shows whatever conversation the app was last asked to show. */
-function fakePage(
-  app: FakeApp,
-  reply = 'reply from the page',
-): Page & { reads: { title: string; prompt: string }[]; chats: string[] } {
+interface FakePage extends Page {
+  reads: { title: string; prompt: string }[];
+  chats: string[];
+}
+
+/**
+ * A ChatGPT page with the real operation queue. It reads `reply` once the app was asked to
+ * show a conversation, and starting a chat adds a conversation opened by the prompt.
+ */
+function fakePage(app: FakeApp, reply = 'reply from the page'): FakePage {
+  const queue = new WindowsHelper();
+  let created = 0;
   return {
     reads: [],
     chats: [],
-    run: (task) => task(),
+    run: (task) => queue.run(task),
     async readReply(title, prompt) {
       this.reads.push({ title, prompt });
       if (!app.shown.length) throw new AcbError('WINDOW', 'nothing shown');
@@ -24,8 +33,8 @@ function fakePage(
     },
     async startChat(prompt) {
       this.chats.push(prompt);
-      const thread = app.add({ id: '6adc9087-70c4-83e8-8f06-a3c84ccaa86d', kind: 'chatgpt', title: 'Auto title' });
-      app.start(thread, prompt);
+      const id = `6adc9087-70c4-83e8-8f06-${String(++created).padStart(12, '0')}`;
+      app.start(app.add({ id, kind: 'chatgpt', title: 'Auto title' }), prompt);
     },
   };
 }
@@ -48,11 +57,25 @@ test('Codex conversations are filtered by folder regardless of case and separato
   );
 });
 
+test('a kind of conversation the app could not list is not an empty list', async () => {
+  const app = new FakeApp();
+  app.unavailable = ['chatgpt'];
+  await assert.rejects(listGpt(app), code('UNAVAILABLE'));
+});
+
 test('a Codex message names its own conversation as caller', async () => {
   const app = new FakeApp();
   app.add({ id: CODEX, kind: 'codex' });
   await sendCodex(app, CODEX, 'Hi', { ...fast, wait: true });
   assert.equal(app.sent[0].caller, CODEX);
+});
+
+test('a Codex message too long to be read back whole is refused before sending', async () => {
+  const app = new FakeApp();
+  app.add({ id: CODEX, kind: 'codex' });
+  // 5,000 ampersands become 25,000 characters once the app escapes them.
+  await assert.rejects(sendCodex(app, CODEX, '&'.repeat(5000), { ...fast, wait: true }), code('INPUT'));
+  assert.deepEqual(app.sent, []);
 });
 
 test('a Codex conversation is created in a project or in a new folder', async () => {
@@ -96,6 +119,17 @@ test('a page that cannot be read leaves a successful send with the reason', asyn
   assert.match(sent.pageError ?? '', /covered.*page: true/);
 });
 
+test('a reply read while the conversation moved on is not returned', async () => {
+  const app = new FakeApp();
+  const thread = app.add({ id: GPT, kind: 'chatgpt', turns: [userTurn('t1', 'Q', PAGE_REPLY)] });
+  const page = fakePage(app);
+  page.readReply = async () => {
+    app.start(thread, 'A newer question');
+    return 'reply of t1, or of the newer one?';
+  };
+  await assert.rejects(readGpt(app, page, GPT, { fromPage: true }), code('BUSY'));
+});
+
 test('reading from the page only touches the newest finished reply', async () => {
   const app = new FakeApp();
   app.add({ id: GPT, kind: 'chatgpt', turns: [userTurn('t1', 'Q', PAGE_REPLY)] });
@@ -111,9 +145,20 @@ test('a new ChatGPT conversation is found by its first message and titled after 
   app.add({ id: GPT, kind: 'chatgpt', title: 'Existing' });
   const page = fakePage(app);
   const created = await createGpt(app, page, { prompt: 'Start here', title: 'My title' }, fast);
-  assert.deepEqual(app.shown[0], GPT, 'an existing conversation puts the window in ChatGPT mode');
+  assert.equal(app.shown[0], GPT, 'an existing conversation puts the window in ChatGPT mode');
   assert.deepEqual(page.chats, ['Start here']);
-  assert.equal(created.conversationId, '6adc9087-70c4-83e8-8f06-a3c84ccaa86d');
+  assert.equal(created.conversationId, '6adc9087-70c4-83e8-8f06-000000000001');
   assert.equal(created.title, 'My title');
   assert.equal(created.turn.reply, 'ok');
+});
+
+test('concurrent creations with the same prompt each get their own conversation', async () => {
+  const app = new FakeApp();
+  app.add({ id: GPT, kind: 'chatgpt' });
+  const page = fakePage(app);
+  const [first, second] = await Promise.all([
+    createGpt(app, page, { prompt: 'Same' }, fast),
+    createGpt(app, page, { prompt: 'Same' }, fast),
+  ]);
+  assert.notEqual(first.conversationId, second.conversationId);
 });
