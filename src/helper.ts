@@ -70,6 +70,28 @@ export function samePrompt(shown: string, message: string): boolean {
   return plain(shown) === plain(message);
 }
 
+/** Whether `shown` ends with `prompts`. */
+function endsWith(shown: string[], prompts: string[]): boolean {
+  const offset = shown.length - prompts.length;
+  return offset >= 0 && prompts.every((prompt, index) => samePrompt(shown[offset + index], prompt));
+}
+
+/**
+ * Whether the page's user messages end with `prompts`. The page holds only the newest messages
+ * (five or more, fewer when they are long), so only as many as it holds are compared, but at
+ * least two.
+ */
+export function showsPrompts(state: PageState, prompts: string[]): boolean {
+  const count = Math.max(Math.min(prompts.length, state.prompts.length), Math.min(2, prompts.length));
+  return endsWith(state.prompts, prompts.slice(prompts.length - count));
+}
+
+/** The finished reply on a page whose user messages end with `prompts` (see showsPrompts); null otherwise. */
+export function replyTo(state: PageState | null, prompts: string[]): string | null {
+  if (!state || state.busy || !state.complete || !state.reply) return null;
+  return showsPrompts(state, prompts) ? state.reply : null;
+}
+
 /**
  * The messages the page shows after `known`, the newest messages known to be in the
  * conversation; undefined when the page does not show `known` exactly once.
@@ -78,23 +100,9 @@ export function shownAfter(state: PageState, known: string[]): string[] | undefi
   if (!known.length) return undefined;
   const ends: number[] = [];
   for (let end = known.length; end <= state.prompts.length; end++) {
-    const window = { ...state, prompts: state.prompts.slice(0, end) };
-    if (showsPrompts(window, known)) ends.push(end);
+    if (endsWith(state.prompts.slice(0, end), known)) ends.push(end);
   }
   return ends.length === 1 ? state.prompts.slice(ends[0]) : undefined;
-}
-
-/** Whether the page's user messages end with `prompts` (are exactly `prompts` with `whole`). */
-export function showsPrompts(state: PageState, prompts: string[], whole = false): boolean {
-  const offset = state.prompts.length - prompts.length;
-  if (offset < 0 || (whole && offset > 0)) return false;
-  return prompts.every((prompt, index) => samePrompt(state.prompts[offset + index], prompt));
-}
-
-/** The finished reply on a page whose user messages end with `prompts` (see showsPrompts); null otherwise. */
-export function replyTo(state: PageState | null, prompts: string[], whole = false): string | null {
-  if (!state || state.busy || !state.complete || !state.reply) return null;
-  return showsPrompts(state, prompts, whole) ? state.reply : null;
 }
 
 /** Why the page does not show the reply after `prompts`. */

@@ -20,6 +20,8 @@ export interface WaitOptions {
  * is up to a minute ahead of the app's list.
  */
 export interface Live {
+  /** The page shows messages after those known to the app and ACB, so neither knows the newest. */
+  ahead: boolean;
   /** Why the page says not to send the prompt now: ChatGPT is writing, for one. */
   refuse?: string;
   /** The page's newest message, which the app does not list yet, is the prompt. */
@@ -156,8 +158,9 @@ async function decide(app: App, kind: Kind, threadId: string, text: string, opti
   const after = chain ? chain.after : last?.id;
   const occurrence = chain?.messages.filter((message) => message.prompt === text).length ?? 0;
   const newest = chain?.messages.at(-1);
-  if (newest?.prompt === text) {
-    return { title, alreadySent: true, match: { after, occurrence: occurrence - 1 }, answer: newest.answer };
+  // A message whose arrival is not confirmed yet holds back every other.
+  if (newest?.prompt === text && !newest.answer) {
+    return { title, alreadySent: true, match: { after, occurrence: occurrence - 1 } };
   }
   const unanswered = chain?.messages.find((message) => !message.answer);
   if (unanswered) {
@@ -167,12 +170,17 @@ async function decide(app: App, kind: Kind, threadId: string, text: string, opti
       { threadId },
     );
   }
-  // Without messages of ACB still unlisted, the app's newest turn is the newest message.
-  if (!chain && last && opensWith(last, text)) return { title, alreadySent: true, match: { turnId: last.id } };
   const live = await options.watch?.(
     text,
     (chain?.messages ?? []).map((message) => message.prompt),
   );
+  // Unless the page shows newer messages, the newest is ACB's last message, or else the app's newest turn.
+  if (!live?.ahead && newest?.prompt === text) {
+    return { title, alreadySent: true, match: { after, occurrence: occurrence - 1 }, answer: newest.answer };
+  }
+  if (!live?.ahead && !chain && last && opensWith(last, text)) {
+    return { title, alreadySent: true, match: { turnId: last.id } };
+  }
   if (live?.shown) return { title, alreadySent: true, match: { after, occurrence }, early: live.reply };
   if (live?.refuse) throw new AcbError('BUSY', live.refuse, { threadId });
   if (statusOf(before) !== 'idle') {

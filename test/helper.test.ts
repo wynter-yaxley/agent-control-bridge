@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { type PageNode, readPage, replyTo, samePrompt, shownAfter } from '../src/helper.ts';
+import { type PageNode, readPage, replyTo, samePrompt, shownAfter, showsPrompts } from '../src/helper.ts';
 
 const text = (name: string): PageNode => ({ type: 'Text', name });
 const label = (name: string): PageNode => ({ type: 'Text', name, label: true });
@@ -93,11 +93,18 @@ test('the messages after the known ones are found only where the page shows them
   assert.equal(shownAfter({ ...page, prompts: ['Q', 'R', 'Q', 'R'] }, ['Q', 'R']), undefined, 'twice');
 });
 
+test('a page holding only the newest messages is compared on those, but on two at least', () => {
+  const page = { busy: false, prompts: ['C', 'D', 'E'], reply: '', complete: false };
+  assert.ok(showsPrompts(page, ['A', 'B', 'C', 'D', 'E']));
+  assert.ok(!showsPrompts(page, ['A', 'B', 'X', 'D', 'E']));
+  assert.ok(!showsPrompts({ ...page, prompts: ['E'] }, ['D', 'E']));
+  assert.ok(showsPrompts({ ...page, prompts: ['E'] }, ['E']));
+});
+
 test('a reply is taken only from a finished page ending with the expected prompts', () => {
   const state = { busy: false, prompts: ['Earlier', 'Question'], reply: 'Done.', complete: true };
   assert.equal(replyTo(state, ['Earlier', 'Question']), 'Done.');
   assert.equal(replyTo(state, ['Question']), 'Done.');
-  assert.equal(replyTo(state, ['Question'], true), null, 'the page shows more than expected');
   assert.equal(replyTo(state, ['Other', 'Question']), null);
   assert.equal(replyTo({ ...state, busy: true }, ['Question']), null);
   assert.equal(replyTo({ ...state, complete: false }, ['Question']), null);

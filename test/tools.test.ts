@@ -379,3 +379,44 @@ test('answers confirmed on the page follow the turns the app lists, also once it
     ],
   );
 });
+
+test('a prompt equal to the newest known message is sent when the page shows newer ones', async () => {
+  const app = new FakeApp();
+  app.add({ id: GPT, kind: 'chatgpt', title: 'Chat', turns: [userTurn('t1', 'X', PAGE_REPLY)] });
+  const page = fakePage(app);
+  // Q was sent from elsewhere; the app does not list it yet.
+  page.view = () => showing(['X', 'Q'], 'reply to Q');
+  const sent = await sendGpt(app, page, GPT, 'X', { ...fast, wait: false });
+  assert.equal(sent.alreadySent, false);
+  assert.deepEqual(
+    app.sent.map((entry) => entry.prompt),
+    ['X'],
+  );
+});
+
+test('an answer confirmed on the page is not returned again once newer messages follow it', async () => {
+  const app = lateConversation();
+  const page = fakePage(app);
+  answeringPage(app, page, 'A', 'reply to A');
+  await sendGpt(app, page, GPT, 'A', { ...fast, wait: true });
+  // E was sent from elsewhere after A.
+  page.view = () => showing(['Earlier', 'A', 'E'], 'reply to E');
+  const again = await sendGpt(app, page, GPT, 'A', { ...fast, wait: false });
+  assert.equal(again.alreadySent, false);
+  assert.deepEqual(
+    app.sent.map((entry) => entry.prompt),
+    ['A', 'A'],
+  );
+});
+
+test('a page that holds only the newest messages still returns the reply at once', async () => {
+  const app = new FakeApp();
+  const turns = ['P1', 'P2', 'P3'].map((prompt, index) => userTurn(`t${3 - index}`, prompt, PAGE_REPLY));
+  app.add({ id: GPT, kind: 'chatgpt', title: 'Chat', turns });
+  app.listAfterMs = 60_000;
+  const page = fakePage(app);
+  // The page holds three messages: the oldest drops out as the new one comes in.
+  page.view = () => (app.sent.length ? showing(['P2', 'P3', 'Q'], 'reply to Q') : showing(['P1', 'P2', 'P3']));
+  const sent = await sendGpt(app, page, GPT, 'Q', { ...fast, wait: true });
+  assert.deepEqual([sent.turn?.turnId, sent.turn?.reply], [null, 'reply to Q']);
+});
