@@ -14,10 +14,13 @@ export interface PageNode {
   label?: boolean;
 }
 
-export interface Exchange {
-  /** The user message before the last one, or null when the page shows only one. */
-  previous: string | null;
-  prompt: string;
+/** What the ChatGPT page shows of a conversation. */
+export interface PageState {
+  /** ChatGPT is writing a reply. */
+  busy: boolean;
+  /** The user messages, oldest first. */
+  prompts: string[];
+  /** The reply to the last user message, as far as it is shown. */
   reply: string;
   /** The reply's action buttons are shown, so it is finished. */
   complete: boolean;
@@ -29,25 +32,26 @@ const REQUEST_TIMEOUT_MS = 30_000;
 /** How long a reply may take to show on the page. */
 export const READ_TIMEOUT_MS = 20_000;
 
-/** The last user message on the page, the one before it and the ChatGPT reply after it. */
-export function lastExchange(nodes: PageNode[]): Exchange | null {
+/** The user messages on the page and the ChatGPT reply after the last one. */
+export function readPage(nodes: PageNode[], busy: boolean): PageState {
   const heading = (node: PageNode, names: string[]) =>
     node.type === 'Text' && node.label === true && names.includes(node.name);
-  const messages = nodes.flatMap((node, index) => (heading(node, LABELS.you) ? [index] : []));
-  const you = messages.at(-1);
-  if (you === undefined) return null;
+  const starts = nodes.flatMap((node, index) => (heading(node, LABELS.you) ? [index] : []));
   /** The message text after the heading at `start`, up to the next heading. */
   const message = (start: number) => {
     const end = nodes.findIndex((node, index) => index > start && node.label === true);
     return textOf(nodes.slice(start + 1, end < 0 ? nodes.length : end).filter((node) => node.type === 'Text'));
   };
-  const previous = messages.length > 1 ? message(messages[messages.length - 2]) : null;
-  const assistant = nodes.findIndex((node, index) => index > you && heading(node, LABELS.assistant));
-  if (assistant < 0) return { previous, prompt: message(you), reply: '', complete: false };
+  const prompts = starts.map(message);
+  const you = starts.at(-1);
+  const assistant = nodes.findIndex(
+    (node, index) => you !== undefined && index > you && heading(node, LABELS.assistant),
+  );
+  if (assistant < 0) return { busy, prompts, reply: '', complete: false };
   const rest = nodes.slice(assistant + 1);
   const finished = rest.findIndex((node) => node.type === 'Button' && node.name === LABELS.finished);
   const reply = (finished < 0 ? rest : rest.slice(0, finished)).filter((node) => node.type === 'Text' && !node.label);
-  return { previous, prompt: message(you), reply: textOf(reply), complete: finished >= 0 };
+  return { busy, prompts, reply: textOf(reply), complete: finished >= 0 };
 }
 
 function textOf(nodes: PageNode[]): string {
@@ -58,37 +62,36 @@ function textOf(nodes: PageNode[]): string {
 }
 
 /**
- * A message as compared with the page: the page lays out whitespace its own way and shows
- * `inline code` of a user message without the backticks.
+ * Whether a message reads the same as one shown on the page. The page shows the `inline code`
+ * of a user message without its backticks and may lay out whitespace differently.
  */
-const squash = (text: string) => normalize(text).replace(/[\s`]/g, '');
-
-export interface PageState {
-  /** ChatGPT is still writing. */
-  busy: boolean;
-  exchange: Exchange | null;
+export function samePrompt(shown: string, message: string): boolean {
+  const plain = (text: string) =>
+    normalize(text)
+      .replace(/`([^`\n]+)`/g, '$1')
+      .replace(/\s+/g, ' ');
+  return plain(shown) === plain(message);
 }
 
-/**
- * The finished reply on a page whose last two user messages are `previous` (null: there is no
- * earlier one) and `prompt`, as far as the page shows them (see squash); null otherwise. Two
- * messages, not one, tell the current page from an older state of it that ended with the same
- * prompt.
- */
-export function readyReply(state: PageState | null, prompt: string, previous: string | null): string | null {
-  const exchange = state && !state.busy ? state.exchange : null;
-  const same = (a: string | null, b: string | null) => (a === null || b === null ? a === b : squash(a) === squash(b));
-  const current = exchange?.complete && same(exchange.prompt, prompt) && same(exchange.previous, previous);
-  return current && exchange.reply ? exchange.reply : null;
+/** Whether the page's user messages end with `prompts` (are exactly `prompts` with `whole`). */
+export function showsPrompts(state: PageState, prompts: string[], whole = false): boolean {
+  const offset = state.prompts.length - prompts.length;
+  if (offset < 0 || (whole && offset > 0)) return false;
+  return prompts.every((prompt, index) => samePrompt(state.prompts[offset + index], prompt));
 }
 
-/** Why the page does not show the reply to `prompt`. */
-function missing(state: PageState | null, prompt: string): string {
+/** The finished reply on a page whose user messages end with `prompts` (see showsPrompts); null otherwise. */
+export function replyTo(state: PageState | null, prompts: string[], whole = false): string | null {
+  if (!state || state.busy || !state.complete || !state.reply) return null;
+  return showsPrompts(state, prompts, whole) ? state.reply : null;
+}
+
+/** Why the page does not show the reply after `prompts`. */
+function missing(state: PageState | null, prompts: string[]): string {
   if (!state) {
     return 'The ChatGPT window does not show the conversation; the app does not update a window that is fully covered, so keep part of it visible';
   }
-  const previous = state.exchange?.previous;
-  if (previous && squash(previous) === squash(prompt)) {
+  if (showsPrompts({ ...state, prompts: state.prompts.slice(0, -1) }, prompts)) {
     return 'The page shows a newer message than the app lists; the app lists a ChatGPT turn up to a minute after it ends, so read again shortly';
   }
   return 'The reply was not found on the ChatGPT page';
@@ -144,35 +147,30 @@ export class WindowsHelper {
   }
 
   /**
-   * The newest exchange on the page showing `title`, or null when no window shows it within
-   * `waitMs` (the page needs a moment after it has been asked to show a conversation).
+   * What the page showing `title` shows, or null when no window shows it within `waitMs` (the
+   * page needs a moment after it has been asked to show a conversation).
    */
   async pageState(title: string, waitMs = 0): Promise<PageState | null> {
     const until = Date.now() + waitMs;
     for (;;) {
       const page = await this.#request({ op: 'transcript', title });
-      if (page.found) return { busy: page.busy === true, exchange: lastExchange(page.nodes as PageNode[]) };
+      if (page.found) return readPage(page.nodes as PageNode[], page.busy === true);
       if (Date.now() >= until) return null;
       await delay(300);
     }
   }
 
   /**
-   * The reply to `prompt` from the page showing `title`, once ChatGPT has finished it. The
-   * page's last two user messages must be `previous` and `prompt` (see readyReply).
+   * The reply after `prompts` from the page showing `title`, once ChatGPT has finished it. The
+   * page's user messages must end with `prompts` (see replyTo).
    */
-  async readReply(
-    title: string,
-    prompt: string,
-    previous: string | null,
-    timeoutMs = READ_TIMEOUT_MS,
-  ): Promise<string> {
+  async readReply(title: string, prompts: string[], timeoutMs = READ_TIMEOUT_MS): Promise<string> {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
       const state = await this.pageState(title);
-      const reply = readyReply(state, prompt, previous);
+      const reply = replyTo(state, prompts);
       if (reply !== null) return reply;
-      if (Date.now() >= deadline) throw new AcbError('WINDOW', missing(state, prompt));
+      if (Date.now() >= deadline) throw new AcbError('WINDOW', missing(state, prompts));
       await delay(500);
     }
   }

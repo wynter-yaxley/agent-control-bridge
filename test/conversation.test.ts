@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
-import { sendPrompt, waitForTurn } from '../src/conversation.ts';
+import { type Live, sendPrompt, waitForTurn } from '../src/conversation.ts';
 import { AcbError } from '../src/errors.ts';
 import { CODEX, FakeApp, GPT, userTurn } from './fake-app.ts';
 
@@ -222,4 +222,41 @@ test('a turn named by its ID is found further back than the newest three', async
   });
   const turn = await waitForTurn(app, GPT, 't1', { turnId: 't1' }, fast);
   assert.equal(turn.turnId, 't1');
+});
+
+/** A page that confirms the reply to every prompt at once, or never. */
+const page =
+  (confirms: boolean) =>
+  async (prompt: string): Promise<Live> => ({
+    busy: false,
+    shown: false,
+    reply: async () =>
+      confirms
+        ? {
+            turnId: null,
+            status: 'completed',
+            prompt,
+            reply: `page reply to ${prompt}`,
+            replyOnPage: false,
+            truncated: false,
+            error: null,
+          }
+        : undefined,
+  });
+
+test('a prompt sent again is matched to its own turn, not to the earlier one', async () => {
+  const app = new FakeApp();
+  const thread = app.add({ id: GPT, kind: 'chatgpt', turns: [userTurn('t0', 'X')] });
+  app.listAfterMs = 60_000;
+  await sendPrompt(app, 'chatgpt', GPT, 'A', { ...fast, watch: page(true) });
+  await sendPrompt(app, 'chatgpt', GPT, 'B', { ...fast, watch: page(true) });
+  const third = sendPrompt(app, 'chatgpt', GPT, 'A', { ...fast, deadline: Date.now() + 300, watch: page(false) });
+  // Once all three are sent, the app lists the first A only, then B and the second A.
+  while (app.sent.length < 3) await delay(1);
+  thread.turns.unshift(userTurn('a1', 'A', 'reply to the first A'));
+  await assert.rejects(third, code('TIMEOUT'));
+  thread.turns.unshift(userTurn('a2', 'A', 'reply to the second A'), userTurn('b', 'B'));
+  const again = await sendPrompt(app, 'chatgpt', GPT, 'A', fast);
+  assert.deepEqual([again.alreadySent, again.turn?.reply], [true, 'reply to the second A']);
+  assert.equal(app.sent.length, 3);
 });
