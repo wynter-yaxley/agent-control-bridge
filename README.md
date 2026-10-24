@@ -1,185 +1,177 @@
-# Agent Control Bridge（ACB）
+# agent-control-bridge
 
 [![CI](https://github.com/wynter-yaxley/agent-control-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/wynter-yaxley/agent-control-bridge/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D24.19-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org/)
-[![Platform: Windows](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D6)](#1-用途平台与前置条件)
+[![Platform: Windows](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D6)](#准备)
 [![MCP](https://img.shields.io/badge/MCP-stdio%20server-6E56CF)](https://modelcontextprotocol.io/)
-[![Hermes Skill](https://img.shields.io/badge/Hermes-skill%20included-F59E0B)](skills/agent-control-bridge/SKILL.md)
 
 [English](README_EN.md)
 
-ACB 是一个 MCP Server，让 Hermes（或任何 MCP 客户端）直接操作 **ChatGPT 桌面应用** 和 **Codex 桌面应用**：创建 Workspace 与 Codex 项目、新建或复用对话、发送 Prompt 并取回真实回复。Hermes 只需调用工具，不必为日常任务编写脚本。
+一个 MCP Server，让 AI agent 使用你电脑上 **ChatGPT 桌面应用** 里的 ChatGPT 对话和 Codex 对话：列出、读取、新建对话，发一条消息并拿回回复。
 
-![架构](docs/images/architecture.svg)
+- **对话就在应用里**：消息由桌面应用自己执行，你在应用侧栏里能实时看到每一个对话和它的进度。
+- **几乎不打扰你**：只有「新建 ChatGPT 对话」会把 ChatGPT 窗口短暂切到前台，发出消息后立即把前台还给你；ACB 从不模拟键盘和鼠标。
+- **一个工具只做一件事**：读取、新建、发送彼此独立，按需组合。
+- **不会重复发送**：同一条消息超时后再调用，只会取回回复，不会再发一次。
 
-## 1. 用途、平台与前置条件
+```mermaid
+flowchart LR
+  agent["AI agent<br/>(MCP 客户端)"] -- MCP --> acb[agent-control-bridge]
+  acb -- "应用的工具接口<br/>(本机命名管道)" --> app[ChatGPT 桌面应用]
+  acb -. "读取页面文字<br/>(UI Automation)" .-> app
+  app --> chatgpt[ChatGPT 对话]
+  app --> codex[Codex 对话]
+```
 
-| 项目 | 要求 |
+## 工具一览
+
+| 工具 | 作用 |
 |---|---|
-| 系统 | Windows 10 / 11（ChatGPT 相关工具只支持 Windows） |
-| Node.js | 24.19 或更高，安装在 Windows 上 |
-| Codex 桌面应用 | 已安装并登录；ACB 会自动找到它自带的 `codex.exe` |
-| ChatGPT 桌面应用 | 已安装并登录；使用 GPT 工具时需要运行 |
-| Hermes | Windows 原生版或 WSL 版均可 |
+| `acb_codex_list` | 列出最近的 Codex 对话，可按文件夹筛选 |
+| `acb_codex_read` | 读取 Codex 对话最近几轮的提问和回复 |
+| `acb_codex_create` | 新建 Codex 对话（在某个项目里，或在新文件夹里），发出第一条消息 |
+| `acb_codex_send` | 给 Codex 对话发消息，等它做完并返回回复 |
+| `acb_gpt_list` | 列出最近的 ChatGPT 对话 |
+| `acb_gpt_read` | 读取 ChatGPT 对话最近几轮的提问和回复 |
+| `acb_gpt_create` | 新建 ChatGPT 对话，发出第一条消息并返回回复 |
+| `acb_gpt_send` | 给 ChatGPT 对话发消息并返回回复 |
+| `acb_projects` | 列出应用里的项目 |
+| `acb_open` | 在应用里打开某个对话，方便你旁观 |
+| `acb_status` | 检查应用能否连通 |
 
-> Codex 工具只依赖 `codex app-server`，理论上也能在 macOS / Linux 上运行，但没有实测。
+## 哪些操作会打扰你
 
-## 2. 安装与连接 Hermes
+| 操作 | 抢占前台和键盘焦点 | 切换应用显示的页面 |
+|---|---|---|
+| 所有 Codex 工具；列出、读取对话；`acb_projects`、`acb_status` | 否 | 否 |
+| `acb_gpt_send` | 否：消息在后台发出 | 是：拿到回复后打开该对话，从页面读取回复正文 |
+| `acb_gpt_read` 带 `page: true` | 否 | 是：打开该对话读取回复正文 |
+| `acb_open` | 否 | 是 |
+| **`acb_gpt_create`** | **会，持续一两秒**：应用打开新聊天时会把 ChatGPT 窗口切到前台，ACB 发出消息后立即把前台还给你原来的窗口。ACB 不发送任何按键，但这一两秒内你按的键可能会落进 ChatGPT 的输入框 | 是 |
 
-在 Windows 的 PowerShell 中：
+- 应用切换页面时偶尔也会把窗口切到前台。遇到这种情况，ACB 会立即把前台还给你原来的窗口；如果你已经切到了别的程序，ACB 不会去动它。
+- 需要读取页面时，如果 ChatGPT 窗口是最小化的，ACB 会把它还原出来，但不激活它，你正在用的窗口仍保持在前台。
+
+## 准备
+
+- Windows 10 或 11
+- [Node.js](https://nodejs.org/) 24.19 或更高，安装在 Windows 上
+- ChatGPT 桌面应用（Microsoft Store 版，内含 Codex，2026 年 10 月及之后的版本），已登录
+- 应用界面语言为**简体中文**：读取 ChatGPT 页面和新建 ChatGPT 对话依赖中文界面的控件名称
+- 在应用里至少有过一个 Codex 对话和一个 ChatGPT 对话
+- 一个支持 MCP 的客户端，例如 Claude Desktop、Claude Code、Hermes
+
+## 安装
+
+在 PowerShell 中：
 
 ```powershell
 git clone https://github.com/wynter-yaxley/agent-control-bridge.git
 cd agent-control-bridge
-npm install          # 安装依赖并自动构建 dist/
-npm run check        # 只读自检，并打印适合本机的 Hermes 注册命令
+npm install
 ```
 
-`npm run check` 会检查 Codex、ChatGPT 和桌面对话清单是否可用，并输出 `hermes` 字段，其中是**已经填好本机路径**的两组命令。按 Hermes 的安装位置选一组执行：
+`npm install` 会顺带完成构建。
 
-```bash
-# Hermes 在 WSL 中（示例，以 check 输出为准）
-hermes mcp add acb --command '/mnt/c/Program Files/nodejs/node.exe' --args 'D:\agent-control-bridge\dist\mcp.js' --allow-foreground-input
-cp -r '/mnt/d/agent-control-bridge/skills/agent-control-bridge' ~/.hermes/skills/
-```
+## 接入 MCP 客户端
 
-```powershell
-# Hermes 在 Windows 上（示例，以 check 输出为准）
-hermes mcp add acb --command "C:\Program Files\nodejs\node.exe" --args "D:\agent-control-bridge\dist\mcp.js" --allow-foreground-input
-Copy-Item -Recurse -Force "D:\agent-control-bridge\skills\agent-control-bridge" "$env:LOCALAPPDATA\hermes\skills\"
-```
-
-完成后新开一个 Hermes 会话（或执行 `/reload-mcp`），即可使用 `mcp_acb_*` 工具。
-
-- 服务名请保持为 `acb`，工具名会是 `mcp_acb_acb_gpt_send` 这样的形式。
-- `--allow-foreground-input` 表示授权 ACB 自动恢复/激活已核验的 ChatGPT 窗口并键入文字（见第 6 节）。不加这个参数时，不激活、不键入；只有 ChatGPT 已在前台且输入框里已有完全相同的草稿时，才会发送。
-- 也可以手动把 [config/hermes-mcp.example.yaml](config/hermes-mcp.example.yaml) 合并进 Hermes 的 `config.yaml`。
-
-### Hermes 工作规范（Skill）
-
-规则写在 [skills/agent-control-bridge/SKILL.md](skills/agent-control-bridge/SKILL.md)，上一步已复制到 Hermes 的 skills 目录。Hermes 每轮都会看到技能索引，并按其系统提示，在涉及 ChatGPT / Codex / ACB 的任务中加载这个 Skill。规则内容：
-
-- Hermes 负责接收任务、选择项目与对话、调用 ACB、转发 Prompt、管理进度和汇报；ChatGPT 负责分析、方案和复核；Codex 负责代码、命令、文件修改和测试。
-- Hermes 不重复做 Codex 的工作，不为普通任务编写脚本；优先复用已有项目和对话。
-- 默认只汇报关键进度和最终结果；工具失败时只查直接原因；非核心开发先征得用户同意。
-
-确认已加载：执行 `hermes skills list`，列表中应有 `agent-control-bridge`；在对话中也可以用 `/agent-control-bridge` 主动加载。合并到 main 后，还可以直接安装：`hermes skills install https://raw.githubusercontent.com/wynter-yaxley/agent-control-bridge/main/skills/agent-control-bridge/SKILL.md --yes`。
-
-### 配置（全部可选）
-
-不需要配置文件。如需调整，按以下优先级生效：命令行参数 → 环境变量 → 配置文件（`--config <file>` 或 `ACB_CONFIG`，示例见 [config/config.example.json](config/config.example.json)）→ 自动发现与默认值。
-
-| 配置项 | 命令行 / 环境变量 | 默认值 |
-|---|---|---|
-| `codexExecutable` | `--codex` / `ACB_CODEX` | Codex 桌面应用自带的最新 `codex.exe`，其次是 PATH 中的 `codex` |
-| `carrierThreadId` | `--carrier-thread` / `ACB_CARRIER_THREAD` | 最近一个 Codex 对话（作为桌面对话清单的调用上下文） |
-| `workspaceRoot` | `ACB_WORKSPACE_ROOT` | `%USERPROFILE%\acb-workspaces` |
-| `foregroundInput` | `--allow-foreground-input` / `ACB_ALLOW_FOREGROUND_INPUT=1` | 关闭 |
-| `timeoutMs` | — | 240000（单次发送最长等待；低于 Hermes 默认的 300 秒工具超时） |
-| 调试日志 | `--debug` / `ACB_DEBUG=1` | 关闭（正常运行不输出日志） |
-
-## 3. MCP 工具
-
-所有工具一次只执行一个。失败时统一返回 `{"ok":false,"code":"…","message":"…"}`。
-
-| 工具 | 参数 | 返回 | 运行方式 |
-|---|---|---|---|
-| `acb_status` | 无 | 自检结果和修复建议 | 只读 |
-| `acb_threads` | 无 | 最近的 ChatGPT / Codex 对话：`id / kind / title / projectId / cwd` | 只读 |
-| `acb_projects` | 无 | 桌面端项目：`projectId / projectKind / label / path` | 只读 |
-| `acb_workspace_create` | `name`，`path?` | `projectId / name / roots / path / directoryCreated` | 后台 |
-| `acb_codex_create` | `cwd`，`title`，`prompt?` | `threadId / reply / title / cwd` | 后台 |
-| `acb_codex_find` | `searchTerm` | `[{ threadId, name, cwd }]` | 后台只读 |
-| `acb_codex_send` | `threadId`，`prompt` | `reply / turnId / messageIds / alreadySent / approvalsDeclined` | 后台 |
-| `acb_gpt_create` | `title`，`project?` | `conversationId / title / project?` | 前台键入 |
-| `acb_gpt_open` | `conversationId` | `title / navigation`（`current` 或 `sidebar`） | 操作 ChatGPT 窗口（点击） |
-| `acb_gpt_send` | `conversationId`，`prompt` | `reply / turnId / inputMode / uiIdentity / navigation / alreadySent` | 前台键入 |
-
-调用示例（参数）：
+在客户端的 MCP 配置里加入（路径换成你的实际路径）：
 
 ```json
-{"name": "acb_workspace_create", "arguments": {"name": "shop-api"}}
-{"name": "acb_codex_create", "arguments": {"cwd": "C:\\Users\\me\\acb-workspaces\\shop-api", "title": "shop-api 开发"}}
-{"name": "acb_gpt_create", "arguments": {"title": "shop-api 方案", "project": "我的项目"}}
-{"name": "acb_gpt_send", "arguments": {"conversationId": "<GPT 对话 ID>", "prompt": "请为订单接口设计分页方案"}}
-{"name": "acb_codex_send", "arguments": {"threadId": "<Codex 对话 ID>", "prompt": "按以下方案实现并运行测试：…"}}
+{
+  "mcpServers": {
+    "acb": {
+      "command": "C:\\Program Files\\nodejs\\node.exe",
+      "args": ["D:\\agent-control-bridge\\dist\\mcp.js"]
+    }
+  }
+}
 ```
 
-## 4. Workspace、项目与对话的管理方式
-
-- **Workspace**：本地目录。`acb_workspace_create` 创建目录（默认在 `workspaceRoot` 下），并通过 Codex App Server 注册为 Codex 项目。同一目录重复调用，返回的是同一个项目。
-- **Codex 对话**：`acb_codex_create` 在 Workspace 目录中新建对话并命名；新对话要发出第一条消息才会保存，所以创建时会顺带发一句确认消息。找已有对话用 `acb_threads` 或 `acb_codex_find`。已归档的对话在发送时会自动取消归档一次。
-- **GPT 对话**：`acb_gpt_create` 新建普通对话：先发送一条一次性身份标记，据此确定对话的确切 ID，再改成指定标题。标题必须唯一，之后才能可靠定位。给出 `project` 时，新对话会建在该**已有**的 ChatGPT 项目中。
-- **定位**：ChatGPT 桌面应用不支持按 ID 跳转。所以目标对话必须正在显示，或者在侧栏中有唯一同名的入口。只要标题重名或无法确认，就会失败，不会发送。
-- **复用优先**：日常任务应先找已有项目和对话，确实没有时才创建。
-
-## 5. Hermes → GPT → Codex 工作流
-
-![工作流](docs/images/workflow.svg)
-
-1. 用户把任务交给 Hermes。
-2. Hermes 用 `acb_threads` / `acb_codex_find` 找到已有对话，没有才创建。
-3. `acb_gpt_send`：请 ChatGPT 分析需求、给出方案。
-4. `acb_codex_send`：把方案原文和具体任务发给 Codex，由它写代码、执行命令、测试。
-5. 需要时把 Codex 的结果发回 ChatGPT 复核。
-6. Hermes 向用户汇报关键进度和最终结果。
-
-## 6. 前台操作与后台操作
-
-| 操作 | 方式 | 需要 ChatGPT 在前台 | 文本输入 | 影响用户当前操作 |
-|---|---|---|---|---|
-| `acb_codex_*`、`acb_workspace_create` | Codex App Server（独立后台进程） | 否 | 否 | 否 |
-| `acb_threads`、`acb_projects`、`acb_status` | Native IPC 只读查询 | 否 | 否 | 否 |
-| `acb_gpt_send` 读取回复 | 桌面清单 + UIA 只读 | 否 | 否 | 否 |
-| `acb_gpt_open` | UIA 点击侧栏入口 | 是（已授权时自动尝试激活） | 否 | 切换当前对话，已授权时可能切前台 |
-| `acb_gpt_send` 发送 | UIA 定位 + 核验输入 | 是（已授权时自动尝试激活） | 单行 SendInput；多行 UIA ValuePattern（持续核对前台和焦点） | 激活窗口，输入期间占用键盘 |
-| `acb_gpt_create` | 左侧导航栏「新聊天」+ SendInput 键入 | 是（已授权时自动尝试激活） | 是 | 激活窗口，输入期间占用键盘 |
-
-`--allow-foreground-input` 明确授权 ACB 恢复最小化的、身份已确认的 ChatGPT 窗口，并在输入前尝试激活一次。ACB 等待恢复完成，再向该窗口内唯一可用的输入框发出一次 UIA 焦点请求；焦点请求不写入或清除草稿，仍须核对 Windows 实际前台句柄。未授权时不激活、不键入。ACB 不移动鼠标、不使用剪贴板。各种情况下的行为：
-
-ChatGPT 编辑器会合并连续的 Shift+Enter 换行；多行文本因此使用已核验 composer 支持的 UIA ValuePattern 逐段写入，仅替换本次已确认的输入前缀，每段精确回读，保留空行。单行仍用 SendInput；两种方式都需要授权并持续核对前台与焦点。
-
-- **ChatGPT 不在前台**：已授权时自动尝试激活，确认 Windows 实际前台句柄一致才输入。Windows 拒绝激活或未授权时返回 `FOCUS_REQUIRED`，不向其他窗口输入，不通过修改系统设置或模拟快捷键强抢焦点。
-- **输入中途切换窗口或焦点**：立即停止并返回 `FOCUS_REQUIRED`，不反复切回。已经输入的部分可能留在 ChatGPT 输入框里，请删除或保留；ACB 不会把它发出去。
-- **失焦诊断**：`diagnostics.focusReason` 区分 `activationDenied`（Windows 拒绝激活）、`foregroundChanged`（前台窗口改变）、`composerFocusLost`（输入框失焦）和 `foregroundNotAuthorized`（未授权切前台）。同时返回 `targetHandle`、`foregroundHandle` 和本次已完成写入的前缀长度 `typedLength`（UTF-16）；不包含正文。写入、提交和失败清理前都会再次检查前台，失焦后不清理草稿。
-- **激活诊断**：发生激活尝试时，失焦错误还包含 `diagnostics.activation`：方式 `method`、恢复请求是否受理 `restoreAccepted`、UIA 请求是否完成 `requestCompleted`，以及异常时的 `hresult`（按实际步骤返回）。请求完成不代表窗口已成为前台。
-- **关闭 ChatGPT**：GPT 工具返回 `OWNER` 或 `IO`，Codex 工具不受影响。下次调用时会自动重新启动相应的辅助进程。
-- **关闭 Codex 桌面应用**：`acb_threads` 和 GPT 工具无法读取对话清单，返回 `OWNER` 或 `IO`；Codex App Server 工具照常可用。
-- **同时开着 ChatGPT 和 Codex 窗口**：只使用能确认是 ChatGPT 的那一个窗口；无法确认时拒绝操作。
-- **仍需用户手动配合**：Windows 拒绝激活时手动处理；在 Codex 中批准命令或文件操作（ACB 不代替审批）；创建 ChatGPT 项目、把已有对话移入项目；打开不在侧栏中的旧对话。
-
-## 7. 当前限制与故障处理
-
-- **ChatGPT 原生项目**：ACB 不能新建项目，也不能把已有对话移入项目（「移至项目」里的项目列表 UIA 读不到），需要在 ChatGPT 中手动完成。新建对话时可以用 `project` 参数直接建在已有项目中。
-- **超时**：Codex 的长任务可能超过 240 秒，此时返回 `TIMEOUT`。稍后用**同一个 Prompt** 再调用一次即可拿到回复，不会重复发送。
-- **身份确认**：ChatGPT 页面不显示对话 UUID，返回 `uiIdentity: "titleOnly"`，表示是靠「标题唯一 + 桌面清单」确认的目标对话。
-- **清单范围**：native host 最多返回 50 条非置顶对话，置顶对话另计；接口没有分页参数，顺序受侧栏排序设置影响。不会把缺失的对话冒充已确认目标；页面暴露 UUID 时仍须按 ID 读取核验。
-- **新建**：只点击左侧导航栏的「新聊天」，确认空白页面后发送一次初始化标记，取得真实 ID，等待初始化完成再改标题；native 按 ID 读取、清单中同一 ID 的标题和页面定位连续两次一致才成功；页面显示了正确的 UUID 也不能代替清单确认。侧栏清单可能延迟约一分钟更新，会在原始创建超时预算内等待一致；预算耗尽后不再写入标题。失败会以 `status: "partial"` 返回已知 `conversationId`（未知则为 null）、实际 `title`、`requestedTitle`、`identityVerified`、失败 `stage` 及必要的标题核对结果。先检查已建对话，禁止重复创建或重复发送初始化标记。
-
-| 错误码 | 含义 | 处理 |
-|---|---|---|
-| `TIMEOUT` | 回复还没完成 | 稍后用同一 Prompt 再调用 |
-| `CONFLICT` | 对话正忙、已有草稿 | 等待，或清理输入框 |
-| `PROVENANCE` | 无法确认目标（标题重名、不在侧栏、项目未回读确认） | 在 ChatGPT 中打开该对话，或换一个唯一标题 |
-| `STATE` | 空白页面识别或 composer 精确回读校验失败 | 按 stage 和必要诊断定位，不重发 |
-| `FOCUS_REQUIRED` / `AUTH` | Windows 拒绝激活、输入失焦 / 未授权键入 | 停止，处理焦点问题 / 明确授权 `--allow-foreground-input`；不循环激活 |
-| `OWNER` / `DEPENDENCY` / `IO` | 应用未运行或连接中断 | 运行 `acb_status` 或 `npm run check`，按其中的 `fix` 处理 |
-| `CONFIG` | 找不到 Codex，或还没有任何 Codex 对话 | 安装并打开一次 Codex，或用 `--codex` 指定路径 |
-| `EXECUTION` 且 `approvalsDeclined > 0` | Codex 需要审批 | 在 Codex 应用中批准，或调整该对话的审批策略 |
-
-## 8. 开发、部署与开源
+Hermes 用户：
 
 ```powershell
-npm ci               # 按 package-lock.json 安装确切版本（会自动构建）
-npm run typecheck
-npm test             # 只用 Mock，不触碰真实对话
-npm run smoke -- --name ACB-smoke --path C:\temp\acb-smoke   # Windows 实机冒烟：会真实发送消息
+hermes mcp add acb --command "C:\Program Files\nodejs\node.exe" --args "D:\agent-control-bridge\dist\mcp.js"
 ```
 
-- smoke 失败后可用 `--gpt-conversation <已知 ID> --codex-thread <已知 ID>` 续测已有隔离会话，不重复创建或发送初始化标记。未指定 `--gpt-project` 时的项目测试跳过不属于本轮五项修复的验收结论。
-- 目录：`src/` MCP Server 与两个 PowerShell worker；`test/` Mock 回归测试；`scripts/` 构建与实机冒烟；`config/` 配置与 Hermes 注册示例；`skills/` Hermes Skill；`docs/images/` 图示。
-- 源码在 `src/`，构建产物在 `dist/`（不入库）。两个 PowerShell 辅助脚本必须保存为带 BOM 的 UTF-8，否则 Windows PowerShell 5.1 会读错中文控件名；`npm run build` 会检查这一点。
-- 开发规则见 [AGENTS.md](AGENTS.md) 和 [CONTRIBUTING.md](CONTRIBUTING.md)，变更记录见 [CHANGELOG.md](CHANGELOG.md)。
-- 许可证：[MIT](LICENSE)；依赖许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
-- 从 0.3 升级：`--carrier-thread` 和 `--codex` 改为可选；默认超时从 300 秒改为 240 秒（如需 300 秒，配置 `timeoutMs: 300000`，并把 Hermes 的 `timeout` 调到 400）；新增 `acb_status`；`scripts/acceptance.mjs` 更名为 `npm run smoke`。原有工具的名称和参数不变。
+再把 [skills/agent-control-bridge](skills/agent-control-bridge/SKILL.md) 复制到 Hermes 的 skills 目录。这份 Skill 写明了每个工具的用法和注意事项；其他客户端也可以把它作为给 agent 的说明。
+
+给 Codex 或 ChatGPT 发消息时，ACB 默认最多等 240 秒。请把客户端的工具超时设为 300 秒以上。
+
+## 使用须知
+
+**Codex 对话**
+
+- 消息在应用里执行，使用的是应用里为该对话或项目设置的权限。Codex 需要你批准命令时，工具会返回 `NEEDS_USER`：请到应用里处理，之后用 `acb_codex_read` 查看结果。
+- 应用把通过工具发来的消息显示为「转交」消息：发给已有对话的消息，显示为由这个对话自己转交；新建对话的第一条消息，显示为由「调用身份」对话转交（见下文）。
+- 不指定项目时，新对话会建在 `文档\Codex\<日期>\<文件夹名>` 下。
+- 已归档的对话，发消息时会自动取消归档。
+- 耗时长的任务可以传 `wait: false` 立即返回，之后用 `acb_codex_read` 查看进度和结果。
+
+**ChatGPT 对话**
+
+- 你会在 ChatGPT 里看到普通的用户消息。
+- 应用的对话记录里通常只保存回复的占位符，回复正文要从页面上读取。读取页面需要 ChatGPT 窗口**在屏幕上可见**：可以在别的窗口后面、可以被部分遮住，但不能被完全挡住（例如你正在全屏看视频）。读不到时，发送仍然成功，结果里会标出 `replyOnPage` 和原因，之后用 `acb_gpt_read` 加 `page: true` 再读即可。
+- 页面上看不到对话 ID，ACB 靠标题、消息条数和最后一条提问确认页面就是要读的那一轮。如果应用列出的对话里有另一个 ChatGPT 对话和它同名，就无法从页面读取（`WINDOW`），给其中一个改个名即可。
+- ChatGPT 窗口被完全挡住或最小化很久之后，应用会降低后台页面的活跃度，发送可能要等一分钟左右才真正发出。
+- 新建 ChatGPT 对话时，如果新聊天页面的输入框里有你没发出的草稿，ACB 会拒绝，不会覆盖它。
+
+**通用**
+
+- **不重复发送**：要发的内容如果和对话的最新一条消息完全相同，或者和 ACB 刚发出、应用还没显示出来的那条相同，ACB 不会再发，而是返回那一轮的回复。确实需要重复同样的内容时，请稍作改动。
+- 单条消息最多 2 万字符：应用最多回读这么多，ACB 要完整回读才能确认回复属于哪条消息。发给 Codex 的消息里 `&`、`<`、`>` 会被转义，这类字符很多时上限会略低。更长的内容请写进文件，再在消息里引用。
+- 对话正在回复时，新的消息会被拒绝（`BUSY`）。
+- 列表按应用侧栏的顺序排列：置顶的在前，其余默认按最近更新排序。应用只列出最近的 50 个对话（置顶的另算），更早的对话可以直接用 ID 读取。
+- **调用身份**：应用要求每次调用都以一个 Codex 对话的名义进行。ACB 默认使用最近的 Codex 对话，也可以用 `--caller` 指定。这个对话里不会留下任何记录，只有新建 Codex 对话时，第一条消息会显示为由它转交。
+- ACB 只和本机的桌面应用通信，自己不联网，不读取账号凭据。连接前会核对应用管道的服务端：必须是当前用户、当前 Windows 会话里、带 OpenAI 有效签名的 ChatGPT 应用。
+
+## 出错时
+
+先让 agent 调用 `acb_status`。错误结果里的 `error` 字段是下面的错误码之一：
+
+| 错误码 | 意思 | 怎么办 |
+|---|---|---|
+| `UNAVAILABLE` | 应用没运行，或 ACB 不在 Windows 上运行 | 打开 ChatGPT 桌面应用 |
+| `NOT_FOUND` | 对话不存在 | 检查 ID，或先列出对话 |
+| `BUSY` | 对话正在回复 | 等它回复完，读取后再发 |
+| `NEEDS_USER` | Codex 在等你批准或回答 | 到应用里处理 |
+| `TIMEOUT` | 回复还没好 | 稍后读取对话；用同一条消息再调用也不会重发 |
+| `FAILED` | 这一轮在应用里失败或被中断 | 看错误信息，必要时重新发送 |
+| `WINDOW` | ChatGPT 窗口找不到、被完全挡住或无法操作 | 让窗口可见后重试 |
+| `INPUT` | 参数不对 | 按提示修改参数 |
+| `PROTOCOL` | 应用的回应不符合预期，通常是应用更新了 | 更新 ACB；问题仍在请提 Issue |
+
+## 配置
+
+不需要配置文件。需要时可以使用命令行参数或环境变量：
+
+| 参数 | 环境变量 | 作用 | 默认 |
+|---|---|---|---|
+| `--caller <对话 ID>` | `ACB_CALLER` | 指定调用身份对话 | 最近的 Codex 对话 |
+| `--timeout <秒>` | `ACB_TIMEOUT` | 发送后最多等待多久 | 240 |
+
+## 开发
+
+```powershell
+npm ci
+npm run lint; npm run typecheck; npm test   # 单元测试只用模拟数据
+npm run smoke                               # 真机验收：会在应用里真实新建对话并发消息
+```
+
+| 文件 | 内容 |
+|---|---|
+| `src/mcp.ts` | 命令行入口 |
+| `src/server.ts` | MCP 工具定义 |
+| `src/pipe.ts` | 连接桌面应用的命名管道 |
+| `src/desktop.ts` | 桌面应用工具接口的客户端 |
+| `src/conversation.ts` | 发送、去重、等待回复 |
+| `src/turns.ts` | 把应用的对话记录整理成提问和回复 |
+| `src/codex.ts`、`src/chatgpt.ts` | 两类对话各自的操作 |
+| `src/helper.ts`、`src/helper.ps1` | Windows 辅助进程：核对管道服务端、读取 ChatGPT 页面、新建 ChatGPT 对话 |
+
+开发规则见 [AGENTS.md](AGENTS.md) 和 [CONTRIBUTING.md](CONTRIBUTING.md)，变更记录见 [CHANGELOG.md](CHANGELOG.md)。
+
+## License
+
+[MIT](LICENSE) · 依赖许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)

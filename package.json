@@ -1,10 +1,10 @@
 {
   "name": "agent-control-bridge",
-  "version": "0.4.0",
+  "version": "0.6.0",
   "private": true,
   "license": "MIT",
   "bin": {
-    "agent-control-bridge-mcp": "dist/mcp.js"
+    "agent-control-bridge": "dist/mcp.js"
   },
   "repository": {
     "type": "git",
@@ -13,25 +13,25 @@
   "files": [
     "dist",
     "skills",
-    "config",
     "README.md",
     "README_EN.md",
     "LICENSE",
     "THIRD_PARTY_NOTICES.md"
   ],
   "type": "module",
-  "description": "MCP server that lets Hermes (or any MCP client) drive the ChatGPT and Codex desktop apps: workspaces, conversations, prompts and replies",
-  "keywords": ["mcp", "hermes", "codex", "chatgpt", "agent"],
+  "description": "MCP server for the ChatGPT desktop app: list, read, create and message ChatGPT and Codex conversations",
   "scripts": {
     "prepare": "node scripts/build.mjs",
     "build": "node scripts/build.mjs",
     "typecheck": "tsc -p tsconfig.test.json",
     "test": "node --test \"test/*.test.ts\"",
     "start": "node dist/mcp.js",
-    "check": "node dist/mcp.js --check",
-    "smoke": "node scripts/smoke.mjs"
+    "smoke": "node scripts/smoke.mjs",
+    "lint": "biome check .",
+    "format": "biome check --write ."
   },
   "devDependencies": {
+    "@biomejs/biome": "2.6.2",
     "@types/node": "24.10.0",
     "typescript": "5.9.3"
   },
@@ -41,5 +41,11 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.1",
     "zod": "4.6.5"
-  }
+  },
+  "keywords": [
+    "mcp",
+    "chatgpt",
+    "codex",
+    "windows"
+  ]
 }
