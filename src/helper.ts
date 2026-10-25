@@ -24,6 +24,8 @@ export interface PageState extends PageMessages {
   atEnd: boolean;
   /** Where the conversation is scrolled to; null when it fits, so it does not scroll. */
   scroll: Scroll | null;
+  /** The page has older messages to load: it loads them once scrolled to its top. */
+  older: boolean;
   /** The messages the page holds, oldest first. */
   messages: PageMessage[];
 }
@@ -235,7 +237,15 @@ export class WindowsHelper {
         const nodes = page.nodes as PageNode[];
         // Without the conversation's frame, where it is scrolled to is unknown.
         const end = page.framed === true && atEnd(scroll);
-        return { busy: page.busy === true, atEnd: end, scroll, messages: readMessages(nodes), ...readPage(nodes) };
+        const older = page.older === true;
+        return {
+          busy: page.busy === true,
+          atEnd: end,
+          scroll,
+          older,
+          messages: readMessages(nodes),
+          ...readPage(nodes),
+        };
       }
       if (Date.now() >= until) return null;
       await delay(300);
@@ -274,6 +284,14 @@ export class WindowsHelper {
     return async () => {
       if (Array.isArray(raised) && raised.length) await this.#request({ op: 'lower', raised });
     };
+  }
+
+  /**
+   * Scrolls the conversation shown under `title` to the first of the messages with heading
+   * runtime IDs `ids` that is still on the page; false when none is, or no window shows it.
+   */
+  async reveal(title: string, ids: string[]): Promise<boolean> {
+    return (await this.#request({ op: 'reveal', title, ids })).found === true;
   }
 
   /** Scrolls the conversation shown under `title` to `percent` of its height; false when no window shows it. */

@@ -5,6 +5,7 @@ Versions follow Semantic Versioning. Desktop behavior is verified manually on Wi
 ## 0.7.0 (Unreleased)
 
 - New `acb_gpt_history { conversationId, turns?, skip? }`: earlier turns of a ChatGPT conversation with their whole reply text, read from its page, back to its start; `more` tells whether older turns exist. The app returns only the newest five ChatGPT turns, mostly with placeholders for the replies. The page holds only the messages near what it shows and loads older ones at its top, so ACB scrolls it up step by step (UI Automation ScrollPattern, no input) and joins the steps by the runtime IDs of the messages' headings, so equal turns are not confused; it waits for the page to load older messages before taking its top for the start. For when the user is away, it starts the app if it does not run (through the shell, by the app's user model ID; the foreground it takes is given back), and brings a window that does not show on screen above the others without activating it, putting it back afterwards. About 40 seconds for 50 turns.
+- `acb_gpt_create` works when the sidebar shows more than one new-chat button, as it now does next to its list of recent chats; the first is used, and the new chat page is still checked before the prompt is written.
 - The Windows helper sets per-monitor DPI awareness itself instead of relying on UI Automation to make it DPI-aware, so screen and window bounds are in physical pixels on every monitor.
 
 ## 0.6.1

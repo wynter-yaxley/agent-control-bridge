@@ -2,7 +2,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { hasNamesake, listedPrompts, type Page, PLACING, SHOW_MS } from './chatgpt.ts';
 import type { App, ThreadPage } from './desktop.ts';
 import { AcbError } from './errors.ts';
-import { type PageMessage, type PageState, READ_TIMEOUT_MS, type Scroll, shownAfter } from './helper.ts';
+import { type PageMessage, type PageState, READ_TIMEOUT_MS, shownAfter } from './helper.ts';
 
 /** A turn read from the page, which shows no turn IDs. */
 export interface PageTurn {
@@ -20,25 +20,25 @@ export interface History {
   more: boolean;
 }
 
-/** How far up the page first moves per step, in screens: it holds more than a screen around what it shows. */
-const STEP_SCREENS = 2;
-/** The longest step: a step that reads nothing new is doubled, up to this. */
-const MAX_STEP_SCREENS = 8;
 /** How long a page may take to move to a scroll position and show the messages there. */
 const SETTLE_MS = 3000;
-/** How long the page may take to load older messages once it is scrolled to its top. */
-const LOAD_MS = 5000;
 /** How long the app may take to start and load the user's conversations. */
 const START_MS = 90_000;
+
+/** Waits that tests shorten. */
+export const timing = {
+  /** How long the page may take to load older messages once scrolled to its top. */
+  loadMs: 15_000,
+  /** How often it is scrolled to its top again meanwhile, in case it missed it. */
+  retriggerMs: 5000,
+};
 
 /**
  * Reads the turns of a ChatGPT conversation from its page, where the app keeps their whole
  * text: the newest `turns` after skipping the newest `skip`, oldest first. The app is started
  * if it does not run, and a window that does not show on screen is brought above the others
  * without being activated: the page of a covered window does not update. The page is scrolled
- * up step by step; the messages each step reads are joined by their headings' runtime IDs,
- * not their text, so equal messages are not confused. The window's place and the page's end
- * are restored afterwards.
+ * up step by step (see scanUp); the window's place and the page's end are restored afterwards.
  */
 export async function readHistory(
   app: App,
@@ -99,6 +99,8 @@ async function whenRunning(app: App, page: Page, conversationId: string, deadlin
       const until = Math.min(deadline, Date.now() + START_MS);
       for (;;) {
         await delay(1000);
+        // The window opens, and takes the foreground, before the app is ready.
+        await giveBack();
         try {
           return await read();
         } catch (failure) {
@@ -113,23 +115,41 @@ async function whenRunning(app: App, page: Page, conversationId: string, deadlin
 }
 
 /**
- * A message reduced to its letters and digits. The page renders the Markdown of a message the
- * user typed (bold, lists, links), so only these are sure to read the same on both sides.
+ * A message reduced to the letters and digits of its text. The page renders the Markdown of a
+ * message the user typed (bold, lists, links), so only these are sure to read the same on both
+ * sides; a link reads as its text.
  */
-const letters = (text: string) => text.normalize('NFKC').replace(/[^\p{L}\p{N}]/gu, '');
+const letters = (text: string) =>
+  text
+    .replace(/!?\[([^\]]*)\]\([^)\s]*\)/g, '$1')
+    .normalize('NFKC')
+    .replace(/[^\p{L}\p{N}]/gu, '');
 
 /**
- * The page once it shows the end of the conversation: scrolled to the end, with the prompts
- * of the turns the app lists at one place (newer ones may follow, which the app lists late).
- * It only has to tell that this is the conversation's page, so prompts are compared by letters.
+ * Whether the page shows the newest prompts the app lists at one place, as many of them as it
+ * holds up to PLACING: a page of long messages holds few. Newer messages may follow, which the
+ * app lists late. It only has to tell that this is the conversation's page, so prompts are
+ * compared by their letters.
+ */
+function placed(state: PageState, listed: string[]): boolean {
+  if (!listed.length) return true;
+  const shown = { ...state, prompts: state.prompts.map(letters) };
+  for (let count = Math.min(PLACING, listed.length); count > 0; count--) {
+    if (shownAfter(shown, listed.slice(-count).map(letters)) !== undefined) return true;
+  }
+  return false;
+}
+
+/**
+ * The page once it shows the end of the conversation (see placed). A page that showed the
+ * conversation before stays where it was left, so it is scrolled to its end.
  */
 async function pageEnd(page: Page, title: string, listed: string[], deadline: number): Promise<PageState> {
   const until = Math.min(deadline, Date.now() + READ_TIMEOUT_MS);
-  const known = listed.slice(-PLACING).map(letters);
   let state = await page.pageState(title, SHOW_MS);
   for (;;) {
-    const placed = state && shownAfter({ ...state, prompts: state.prompts.map(letters) }, known) !== undefined;
-    if (state?.atEnd && (!known.length || placed)) return state;
+    if (state && !state.atEnd) await page.scroll(title, 100);
+    else if (state && placed(state, listed)) return state;
     if (Date.now() >= until) {
       throw new AcbError(
         'WINDOW',
@@ -145,10 +165,11 @@ async function pageEnd(page: Page, title: string, listed: string[], deadline: nu
 
 /**
  * Scrolls up from `end` until the page has shown `prompts` user messages or the start of the
- * conversation, and returns the messages read, oldest first. The page loads older messages
- * when it is scrolled to its top, so the start is reached only when it loads none. A step that
- * moved past what the previous one read is taken again, halved; one that read nothing new is
- * doubled next time.
+ * conversation, and returns the messages read, oldest first. Each step scrolls to the first
+ * message read, so the page renders those above it, and joins what it then holds to what was
+ * read (see prepend). When nothing shows above the first message read, the page is at the top
+ * of what it has loaded: there it shows whether it has older messages, and loads them. The
+ * conversation starts there only when it has none.
  */
 async function scanUp(
   page: Page,
@@ -158,91 +179,83 @@ async function scanUp(
   deadline: number,
 ): Promise<{ messages: PageMessage[]; top: boolean }> {
   let messages = end.messages;
-  let at = end.scroll;
-  let screens = STEP_SCREENS;
   const count = () => messages.filter((message) => message.role === 'you').length;
-  const join = (state: PageState) => {
-    const joined = prepend(state.messages, messages);
-    if (!joined) return false;
-    screens = joined.length === messages.length ? Math.min(screens * 2, MAX_STEP_SCREENS) : screens;
-    messages = joined;
-    at = state.scroll;
-    return true;
-  };
   while (count() < prompts) {
     if (Date.now() >= deadline) {
       throw new AcbError('TIMEOUT', 'Reading the conversation from the page took too long; ask for fewer turns');
     }
-    // A conversation that fits shows all of it.
-    if (!at) return { messages, top: true };
-    if (at.percent <= 0) {
-      const loaded = await olderLoaded(page, title, at);
-      if (!loaded) return { messages, top: true };
-      if (!join(loaded)) throw new AcbError('WINDOW', 'The ChatGPT page lost its place while loading older messages');
+    const ids = messages.flatMap((message) => (message.id === null ? [] : [message.id]));
+    if (!(await page.reveal(title, ids))) throw lost();
+    const joined = prepend((await settled(page, title)).messages, messages);
+    if (!joined) throw lost();
+    if (joined.length > messages.length) {
+      messages = joined;
       continue;
     }
-    const target = Math.max(0, at.percent - ((screens * at.view) / (100 - at.view)) * 100);
-    const state = await scrolledTo(page, title, target, at.percent);
-    const moved = state.scroll !== null && state.scroll.percent < at.percent;
-    if (!moved || !join(state)) {
-      screens /= 2;
-      if (screens < 0.1) throw new AcbError('WINDOW', 'The ChatGPT page could not be read further up');
-    }
+    if (!(await page.scroll(title, 0))) throw unseen();
+    const top = await settled(page, title);
+    if (!top.older) return { messages, top: true };
+    await olderLoaded(page, title, top);
   }
   return { messages, top: false };
 }
 
-/**
- * The page once it has loaded older messages above its top: it grows, and keeps what it shows
- * in place, so it is no longer at the top. Undefined when it loads none in time: the
- * conversation starts there.
- */
-async function olderLoaded(page: Page, title: string, top: Scroll): Promise<PageState | undefined> {
-  const until = Date.now() + LOAD_MS;
-  while (Date.now() < until) {
-    await delay(300);
-    const state = await page.pageState(title);
-    if (!state) throw new AcbError('WINDOW', 'The ChatGPT window does not show the conversation on screen');
-    if (state.scroll && (state.scroll.view < top.view || state.scroll.percent > 0)) {
-      return scrolledTo(page, title, state.scroll.percent, top.percent);
-    }
-  }
-  return undefined;
-}
+const lost = () => new AcbError('WINDOW', 'The ChatGPT page lost its place while it was read');
+const unseen = () => new AcbError('WINDOW', 'The ChatGPT window does not show the conversation on screen');
 
 /**
- * The page once it has moved from `from` towards `percent` and shows the same messages at the
- * same place on two reads in a row. It may not get there: at its top it loads older messages
- * and keeps what it shows in place.
+ * Waits for the page, scrolled to its top, to load older messages: it grows, or has none
+ * left. A page that does not load them in time does not tell where the conversation starts,
+ * which is an error rather than its start.
  */
-async function scrolledTo(page: Page, title: string, percent: number, from: number): Promise<PageState> {
-  if (!(await page.scroll(title, percent))) {
-    throw new AcbError('WINDOW', 'The ChatGPT window does not show the conversation on screen');
+async function olderLoaded(page: Page, title: string, top: PageState): Promise<void> {
+  const started = Date.now();
+  let triggered = started;
+  for (;;) {
+    await delay(300);
+    const state = await page.pageState(title);
+    if (!state) throw unseen();
+    const grown = state.scroll !== null && (top.scroll === null || state.scroll.view < top.scroll.view);
+    if (grown || !state.older) return;
+    if (Date.now() - started >= timing.loadMs) {
+      throw new AcbError('TIMEOUT', 'The ChatGPT page did not load its older messages in time; read again later');
+    }
+    if (Date.now() - triggered >= timing.retriggerMs) {
+      triggered = Date.now();
+      await page.scroll(title, 0);
+    }
   }
+}
+
+/** The page once two reads in a row show the same messages at the same place. */
+async function settled(page: Page, title: string): Promise<PageState> {
   const until = Date.now() + SETTLE_MS;
-  let previous: PageState | null = null;
+  const shape = (state: PageState) => `${state.scroll?.percent}:${state.messages.map((message) => message.id).join()}`;
+  let previous: string | undefined;
   for (;;) {
     await delay(150);
     const state = await page.pageState(title);
-    if (!state) throw new AcbError('WINDOW', 'The ChatGPT window does not show the conversation on screen');
-    const at = state.scroll?.percent;
-    const moved = at === undefined || Math.abs(at - percent) < 0.5 || Math.abs(at - from) >= 0.5;
-    const ids = (one: PageState) => one.messages.map((message) => message.id).join();
-    const settled = previous !== null && previous.scroll?.percent === at && ids(previous) === ids(state);
-    if ((moved && settled) || Date.now() >= until) return state;
-    previous = moved ? state : null;
+    if (!state) throw unseen();
+    if (shape(state) === previous || Date.now() >= until) return state;
+    previous = shape(state);
   }
 }
 
 /**
- * `known` with the messages read further up the page before it. Both reads must hold the
- * first known message, told by its heading's runtime ID; undefined when they do not.
+ * `known` with the messages read further up the page before it, joined at the first message
+ * both reads hold, told by its heading's runtime ID: equal messages are not confused. A message
+ * the page renders anew gets a new ID, so known messages above the joint must show right above
+ * it in the new read, the same. Undefined when the reads do not join.
  */
 export function prepend(older: PageMessage[], known: PageMessage[]): PageMessage[] | undefined {
-  const first = known[0];
-  if (!first) return older;
-  const at = first.id === null ? -1 : older.findIndex((message) => message.id === first.id);
-  return at < 0 ? undefined : [...older.slice(0, at), ...known];
+  if (!known.length) return older;
+  const index = new Map(known.flatMap((message, at) => (message.id === null ? [] : [[message.id, at] as const])));
+  const joint = older.findIndex((message) => message.id !== null && index.has(message.id));
+  if (joint < 0) return undefined;
+  const renewed = index.get(older[joint].id as string) as number;
+  const above = older.slice(joint - renewed, joint);
+  const same = above.every((message, at) => message.role === known[at].role && message.text === known[at].text);
+  return joint < renewed || !same ? undefined : [...older.slice(0, joint - renewed), ...known];
 }
 
 /**

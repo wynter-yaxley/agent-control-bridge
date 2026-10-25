@@ -39,6 +39,7 @@ function fakePage(app: FakeApp, reply = 'reply from the page'): FakePage {
     launch: async () => false,
     raise: async () => async () => {},
     scroll: async () => true,
+    reveal: async () => true,
     async pageState() {
       return this.view();
     },
@@ -216,6 +217,7 @@ const showing = (prompts: string[], reply = 'Earlier reply'): PageState => ({
   busy: false,
   atEnd: true,
   scroll: null,
+  older: false,
   messages: [],
   prompts,
   reply,

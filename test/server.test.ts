@@ -16,6 +16,7 @@ async function connect(app = new FakeApp(), queued: string[] = []) {
     launch: async () => false,
     raise: async () => async () => {},
     scroll: async () => true,
+    reveal: async () => true,
     readReply: async () => '',
     startChat: async () => {},
   };

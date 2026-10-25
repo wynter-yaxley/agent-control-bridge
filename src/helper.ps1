@@ -3,7 +3,7 @@
 #   {"op":"pipe-owner","path":"\\.\pipe\..."} -> {"ok":true,"isApp":bool}
 #   {"op":"foreground"}                        -> {"ok":true,"window":handle}
 #   {"op":"give-back","window":handle}         -> {"ok":true,"taken":bool,"restored":bool}
-#   {"op":"transcript","title":"..."}          -> {"ok":true,"found":bool,"busy":bool,"framed":bool,
+#   {"op":"transcript","title":"..."}          -> {"ok":true,"found":bool,"busy":bool,"older":bool,"framed":bool,
 #                                                  "scroll":{"percent","view"}|null,"nodes":[{"type","name","label"}]}
 #     (found only in a window that shows on screen)
 #     (the text between two buttons or role headings comes as one Text, with its line breaks)
@@ -13,6 +13,7 @@
 #   {"op":"raise"}                             -> {"ok":true,"raised":[{"window","after"}]}
 #   {"op":"lower","raised":[...]}              -> {"ok":true}
 #   {"op":"scroll","title":"...","percent":n}  -> {"ok":true,"found":bool,"scroll":{"percent","view"}|null}
+#   {"op":"reveal","title":"...","ids":["..."]} -> {"ok":true,"found":bool}
 #   failure                                    -> {"ok":false,"code":"WINDOW|BUSY|UNAVAILABLE|INPUT","message":"..."}
 # The ChatGPT window is used through UI Automation patterns only: no keystrokes, no mouse,
 # no clipboard. Control names are those of the Simplified Chinese app.
@@ -123,8 +124,10 @@ $Names = @{
   Composer     = '询问 ChatGPT'
   Send         = '发送'
   You          = @('你说：', '您说：')
+  Assistant    = @('ChatGPT 说：')
   ModePrefix   = '切换模式，当前模式：'
   ChatGptMode  = 'ChatGPT'
+  Older        = '正在加载更早的消息…'
 }
 $Element = [Windows.Automation.AutomationElement]
 $Descendants = [Windows.Automation.TreeScope]::Descendants
@@ -247,6 +250,8 @@ function Transcript($request) {
   $scope = Find $pages[0] 'Group' $Names.Conversation
   $position = Position $scope
   $framed = [bool]$scope
+  # Above its first message, the page shows a status while it has older messages to load.
+  $older = [bool]($scope -and (Find $scope 'Text' $Names.Older))
   if (-not $scope) { $scope = $pages[0] }
   $cache = [Windows.Automation.CacheRequest]::new()
   foreach ($property in $Element::NameProperty, $Element::ControlTypeProperty, $Element::ClassNameProperty, $Element::IsControlElementProperty, $Element::RuntimeIdProperty) {
@@ -259,7 +264,7 @@ function Transcript($request) {
   $page = @{ nodes = [Collections.Generic.List[object]]::new(); text = [Text.StringBuilder]::new(); last = $null }
   Visit $page $tree @()
   EndText $page
-  return @{ ok = $true; found = $true; busy = [bool](Find $pages[0] 'Button' $Names.Stop); framed = $framed; scroll = $position; nodes = $page.nodes }
+  return @{ ok = $true; found = $true; busy = [bool](Find $pages[0] 'Button' $Names.Stop); older = $older; framed = $framed; scroll = $position; nodes = $page.nodes }
 }
 
 # Where the conversation `scope` is scrolled to: null when it fits, so it does not scroll.
@@ -284,6 +289,34 @@ function Scroll($request) {
     $scroll.SetScrollPercent([Windows.Automation.ScrollPattern]::NoScroll, [Math]::Min(100, [Math]::Max(0, [double]$request.percent)))
   }
   return @{ ok = $true; found = [bool]$scope; scroll = (Position $scope) }
+}
+
+# Scrolls the conversation shown under `title` to the first of the messages whose headings
+# have the runtime IDs `ids` that is still on the page (ScrollItemPattern: no input). The page
+# renders the messages above it then. Moving by what the page shows keeps to it while the page
+# re-measures the messages it renders, which a share of its height does not.
+function Reveal($request) {
+  $documents = @(foreach ($window in AppWindows) {
+    $document = Find $window 'Document'
+    if ($document -and $document.Current.Name -eq $request.title -and [Acb.Screen]::Shows([IntPtr]$window.Current.NativeWindowHandle)) { $document }
+  })
+  if ($documents.Count -ne 1) { return @{ ok = $true; found = $false } }
+  $scope = Find $documents[0] 'Group' $Names.Conversation
+  if (-not $scope) { return @{ ok = $true; found = $false } }
+  $cache = [Windows.Automation.CacheRequest]::new()
+  $cache.Add($Element::RuntimeIdProperty)
+  $headings = [Windows.Automation.OrCondition]::new(@($Names.You + $Names.Assistant | ForEach-Object { Condition 'Text' $_ }))
+  $active = $cache.Activate()
+  try { $found = @($scope.FindAll($Descendants, $headings)) } finally { $active.Dispose() }
+  $byId = @{}
+  foreach ($heading in $found) { $byId[(@($heading.GetCachedPropertyValue($Element::RuntimeIdProperty)) -join '.')] = $heading }
+  foreach ($id in @($request.ids)) {
+    if ($byId.ContainsKey($id)) {
+      $byId[$id].GetCurrentPattern([Windows.Automation.ScrollItemPattern]::Pattern).ScrollIntoView()
+      return @{ ok = $true; found = $true }
+    }
+  }
+  return @{ ok = $true; found = $false }
 }
 
 # Starts the ChatGPT desktop app unless it runs. It is a packaged app, started the way the
@@ -417,8 +450,10 @@ function Compose($request) {
     if ($found.Count -eq 1) { $found[0] }
   }
   if (-not $window) { Fail 'WINDOW' 'No single ChatGPT window in ChatGPT mode; the app does not update a fully covered window, so keep part of it visible' }
+  # The sidebar can show more than one new-chat button (its list of recent chats has one too);
+  # any opens the same page, which is checked before anything is written. The first is used.
   $newChat = @(Visible $window 'Button' $Names.NewChat)
-  if ($newChat.Count -ne 1) { Fail 'WINDOW' 'The new-chat button was not found' }
+  if (-not $newChat.Count) { Fail 'WINDOW' 'The new-chat button was not found' }
   Invoke $newChat[0]
   $page = Until 10000 { BlankPage $window }
   if (-not $page) { Fail 'WINDOW' 'The new chat page did not open' }
@@ -450,6 +485,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
       'raise' { Raise }
       'lower' { Lower $request }
       'scroll' { Scroll $request }
+      'reveal' { Reveal $request }
       default { Fail 'INPUT' "Unknown operation: $($request.op)" }
     }
   } catch {

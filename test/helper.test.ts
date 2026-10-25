@@ -103,6 +103,7 @@ test('a reply is taken only from a finished page ending with the expected prompt
     busy: false,
     atEnd: true,
     scroll: null,
+    older: false,
     messages: [],
     prompts: ['Earlier', 'Question'],
     reply: 'Done.',

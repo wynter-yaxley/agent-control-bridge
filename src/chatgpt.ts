@@ -13,7 +13,7 @@ export const PLACING = 3;
 /** The page operations of WindowsHelper; tests substitute them. */
 export type Page = Pick<
   WindowsHelper,
-  'run' | 'holdForeground' | 'pageState' | 'readReply' | 'startChat' | 'launch' | 'raise' | 'scroll'
+  'run' | 'holdForeground' | 'pageState' | 'readReply' | 'startChat' | 'launch' | 'raise' | 'scroll' | 'reveal'
 >;
 
 /** A finished turn whose reply could not be read from the page keeps `replyOnPage` and says why. */
