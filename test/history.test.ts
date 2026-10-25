@@ -33,17 +33,34 @@ interface FakeHistoryPage extends Page {
 }
 
 /**
- * A page that holds only `held` messages around its scroll position, as the app's page does,
- * and moves to a position at once. With `chunk`, it has loaded only the newest `chunk`
- * messages, and loads `chunk` older ones each time it is read while scrolled to its top,
- * keeping what it shows in place.
+ * A page that shows `held / 2` messages on the screen and holds half a screen more above and
+ * below it, as the app's page does, and moves at once. With `chunk`, it has loaded only the
+ * newest `chunk` messages, and loads `chunk` older ones each time it is at its top, keeping
+ * the screen in place. A conversation that fits on the screen does not scroll.
  */
 function virtualPage(messages: PageMessage[], held = 8, chunk = messages.length): FakeHistoryPage {
   const queue = new WindowsHelper();
+  const screen = held / 2;
   let from = Math.max(0, messages.length - chunk);
-  const start = (percent: number) => Math.max(0, Math.round((percent / 100) * (messages.length - from - held)));
+  /** The first loaded message on the screen. */
+  let top = Number.POSITIVE_INFINITY;
+  const loaded = () => messages.slice(from);
+  const range = () => Math.max(0, loaded().length - screen);
+  const clamp = () => {
+    top = Math.min(Math.max(0, top), range());
+  };
+  const shown = () => {
+    clamp();
+    return loaded().slice(Math.max(0, top - screen / 2), top + screen + screen / 2);
+  };
   return {
-    percent: 100,
+    get percent() {
+      clamp();
+      return range() ? (top / range()) * 100 : 100;
+    },
+    set percent(percent: number) {
+      top = Math.round((percent / 100) * range());
+    },
     launched: 0,
     lowered: 0,
     givenBack: 0,
@@ -64,41 +81,38 @@ function virtualPage(messages: PageMessage[], held = 8, chunk = messages.length)
         this.lowered++;
       };
     },
+    load() {
+      clamp();
+      if (top > 0 || from === 0 || !this.loads) return;
+      const added = Math.min(chunk, from);
+      from -= added;
+      top += added;
+    },
     async scroll(_title, percent) {
       this.percent = percent;
       if (this.quick) this.load();
       return true;
     },
-    /** At its top, loads older messages and keeps what it showed at the top of the screen. */
-    load() {
-      if (this.percent > 0 || from === 0 || !this.loads) return;
-      const added = Math.min(chunk, from);
-      from -= added;
-      this.percent = (added / (messages.length - from - held)) * 100;
-    },
-    async reveal(_title, ids) {
-      const loaded = messages.slice(from);
-      const shown = loaded.slice(start(this.percent), start(this.percent) + held);
-      const target = ids.find((id) => shown.some((message) => message.id === id));
+    async reveal(_title, ids, pages = 0) {
+      const target = ids.find((id) => shown().some((message) => message.id === id));
       if (target === undefined) return false;
-      // The message goes to the top of the screen; the page holds half its messages above that.
-      const first = Math.max(0, loaded.findIndex((message) => message.id === target) - held / 2);
-      this.percent = loaded.length > held ? (first / (loaded.length - held)) * 100 : 100;
+      top = loaded().findIndex((message) => message.id === target) - pages * screen;
+      if (this.quick) this.load();
       return true;
     },
     async pageState(): Promise<PageState> {
-      if (!this.quick) this.load();
-      const loaded = messages.slice(from);
-      const shown = loaded.slice(start(this.percent), start(this.percent) + held);
-      const last = shown.findLastIndex((message) => message.role === 'you');
+      // A page that fits shows that it has older messages, and so loads them.
+      if (!this.quick || !range()) this.load();
+      const held = shown();
+      const last = held.findLastIndex((message) => message.role === 'you');
       return {
         busy: false,
-        atEnd: this.percent >= 100,
-        scroll: { percent: this.percent, view: (held / 2 / loaded.length) * 100 },
+        atEnd: top >= range(),
+        scroll: range() ? { percent: this.percent, view: (screen / loaded().length) * 100 } : null,
         older: from > 0,
-        messages: shown,
-        prompts: shown.filter((message) => message.role === 'you').map((message) => message.text),
-        reply: shown[last + 1]?.text ?? '',
+        messages: held,
+        prompts: held.filter((message) => message.role === 'you').map((message) => message.text),
+        reply: held[last + 1]?.text ?? '',
         complete: true,
       };
     },
@@ -151,8 +165,8 @@ test('older messages the page loads at its top are read too', async () => {
 test('older messages that load as the page reaches its top are read before it is taken for the start', async () => {
   const app = new FakeApp();
   listed(app, twelve);
-  // The last load ends as the page is scrolled to its top: it shows no more to load, and its
-  // messages are above what it then shows.
+  // Each load ends as the page is moved to its top: it shows no more to load once the last
+  // one has, and their messages are above what it then shows.
   const page = virtualPage(conversation(twelve), 8, 6);
   page.quick = true;
   const history = await readHistory(app, page, GPT, { turns: 50, skip: 0 }, soon());

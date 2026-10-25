@@ -173,10 +173,11 @@ async function pageEnd(page: Page, title: string, listed: string[], deadline: nu
  * Scrolls up from `end` until the page has shown `prompts` user messages or the start of the
  * conversation, and returns the messages read, oldest first. Each step scrolls to the first
  * message read, so the page renders those above it, and joins what it then holds to what was
- * read (see prepend). When nothing shows above the first message read, the page is scrolled
- * to its top, where it shows whether it has older messages, and loads them. The conversation
+ * read (see prepend). When nothing shows above the first message read, the page is moved a
+ * screen further up from it, never further, so what was read stays on the page: it shows more,
+ * or its top, where it shows whether it has older messages, and loads them. The conversation
  * starts there only when, at the top, the page shows nothing above the first message read and
- * no older messages to load: a load that ends meanwhile shows its messages first.
+ * no older messages to load: a load that ends meanwhile keeps the page below its top.
  */
 async function scanUp(
   page: Page,
@@ -203,17 +204,22 @@ async function scanUp(
     if (!(await page.reveal(title, ids))) throw lost();
     const shown = await settled(page, title);
     if (!prepend(shown.messages, messages)) throw lost();
-    if (grew(shown)) continue;
-    if (!(await page.scroll(title, 0))) throw unseen();
+    if (grew(shown)) {
+      misses = 0;
+      continue;
+    }
+    if (!(await page.reveal(title, ids, 1))) throw lost();
     const top = await settled(page, title);
-    // A read that does not join, as when a load moved the page, is taken again from the first message read.
-    if (!prepend(top.messages, messages)) {
+    if (prepend(top.messages, messages) && grew(top)) {
+      misses = 0;
+      continue;
+    }
+    // A read that does not join, or a page below its top that shows nothing new, as when a
+    // load ended meanwhile, is taken again from the first message read; a few times at most.
+    if (!prepend(top.messages, messages) || !atTop(top.scroll)) {
       if (++misses >= 3) throw lost();
       continue;
     }
-    misses = 0;
-    // A load that ended meanwhile keeps what the page showed in place, below its top.
-    if (grew(top) || !atTop(top.scroll)) continue;
     if (!top.older) return { messages, top: true };
     await olderLoaded(page, title, top);
   }

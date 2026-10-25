@@ -288,10 +288,11 @@ export class WindowsHelper {
 
   /**
    * Scrolls the conversation shown under `title` to the first of the messages with heading
-   * runtime IDs `ids` that is still on the page; false when none is, or no window shows it.
+   * runtime IDs `ids` that is still on the page, then `pages` screens further up; false when
+   * none is, or no window shows it.
    */
-  async reveal(title: string, ids: string[]): Promise<boolean> {
-    return (await this.#request({ op: 'reveal', title, ids })).found === true;
+  async reveal(title: string, ids: string[], pages = 0): Promise<boolean> {
+    return (await this.#request({ op: 'reveal', title, ids, pages })).found === true;
   }
 
   /** Scrolls the conversation shown under `title` to `percent` of its height; false when no window shows it. */

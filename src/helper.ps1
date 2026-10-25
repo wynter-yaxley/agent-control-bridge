@@ -13,7 +13,7 @@
 #   {"op":"raise"}                             -> {"ok":true,"raised":[{"window","after"}]}
 #   {"op":"lower","raised":[...]}              -> {"ok":true}
 #   {"op":"scroll","title":"...","percent":n}  -> {"ok":true,"found":bool,"scroll":{"percent","view"}|null}
-#   {"op":"reveal","title":"...","ids":["..."]} -> {"ok":true,"found":bool}
+#   {"op":"reveal","title":"...","ids":["..."],"pages":n} -> {"ok":true,"found":bool}
 #   failure                                    -> {"ok":false,"code":"WINDOW|BUSY|UNAVAILABLE|INPUT","message":"..."}
 # The ChatGPT window is used through UI Automation patterns only: no keystrokes, no mouse,
 # no clipboard. Control names are those of the Simplified Chinese app.
@@ -292,9 +292,10 @@ function Scroll($request) {
 }
 
 # Scrolls the conversation shown under `title` to the first of the messages whose headings
-# have the runtime IDs `ids` that is still on the page (ScrollItemPattern: no input). The page
-# renders the messages above it then. Moving by what the page shows keeps to it while the page
-# re-measures the messages it renders, which a share of its height does not.
+# have the runtime IDs `ids` that is still on the page, then `pages` screens further up
+# (ScrollItemPattern and ScrollPattern: no input). The page renders the messages above it
+# then. Moving from what the page shows keeps to it while the page re-measures the messages it
+# renders, which a share of its height does not.
 function Reveal($request) {
   $documents = @(foreach ($window in AppWindows) {
     $document = Find $window 'Document'
@@ -313,6 +314,12 @@ function Reveal($request) {
   foreach ($id in @($request.ids)) {
     if ($byId.ContainsKey($id)) {
       $byId[$id].GetCurrentPattern([Windows.Automation.ScrollItemPattern]::Pattern).ScrollIntoView()
+      $scroll = $null
+      if ($scope.TryGetCurrentPattern([Windows.Automation.ScrollPattern]::Pattern, [ref]$scroll) -and $scroll.Current.VerticallyScrollable) {
+        for ($page = 0; $page -lt [int]$request.pages; $page++) {
+          $scroll.Scroll([Windows.Automation.ScrollAmount]::NoAmount, [Windows.Automation.ScrollAmount]::LargeDecrement)
+        }
+      }
       return @{ ok = $true; found = $true }
     }
   }
