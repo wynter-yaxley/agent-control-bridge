@@ -20,6 +20,7 @@ function conversation(turns: [string, string][]): PageMessage[] {
 }
 
 interface FakeHistoryPage extends Page {
+  load(): void;
   percent: number;
   launched: number;
   lowered: number;
@@ -27,6 +28,8 @@ interface FakeHistoryPage extends Page {
   givenBack: number;
   /** Whether it loads older messages when scrolled to its top. */
   loads: boolean;
+  /** It loads them as it is scrolled to its top, before it is read there. */
+  quick: boolean;
 }
 
 /**
@@ -38,13 +41,14 @@ interface FakeHistoryPage extends Page {
 function virtualPage(messages: PageMessage[], held = 8, chunk = messages.length): FakeHistoryPage {
   const queue = new WindowsHelper();
   let from = Math.max(0, messages.length - chunk);
-  const start = (percent: number) => Math.round((percent / 100) * (messages.length - from - held));
+  const start = (percent: number) => Math.max(0, Math.round((percent / 100) * (messages.length - from - held)));
   return {
     percent: 100,
     launched: 0,
     lowered: 0,
     givenBack: 0,
     loads: true,
+    quick: false,
     run: (task) => queue.run(task),
     async holdForeground() {
       return async () => {
@@ -62,7 +66,15 @@ function virtualPage(messages: PageMessage[], held = 8, chunk = messages.length)
     },
     async scroll(_title, percent) {
       this.percent = percent;
+      if (this.quick) this.load();
       return true;
+    },
+    /** At its top, loads older messages and keeps what it showed at the top of the screen. */
+    load() {
+      if (this.percent > 0 || from === 0 || !this.loads) return;
+      const added = Math.min(chunk, from);
+      from -= added;
+      this.percent = (added / (messages.length - from - held)) * 100;
     },
     async reveal(_title, ids) {
       const loaded = messages.slice(from);
@@ -75,11 +87,7 @@ function virtualPage(messages: PageMessage[], held = 8, chunk = messages.length)
       return true;
     },
     async pageState(): Promise<PageState> {
-      if (this.percent <= 0 && from > 0 && this.loads) {
-        const added = Math.min(chunk, from);
-        from -= added;
-        this.percent = (added / (messages.length - from - held)) * 100;
-      }
+      if (!this.quick) this.load();
       const loaded = messages.slice(from);
       const shown = loaded.slice(start(this.percent), start(this.percent) + held);
       const last = shown.findLastIndex((message) => message.role === 'you');
@@ -138,6 +146,36 @@ test('older messages the page loads at its top are read too', async () => {
     history.turns.map((turn) => [turn.prompt, turn.reply]),
     twelve,
   );
+});
+
+test('older messages that load as the page reaches its top are read before it is taken for the start', async () => {
+  const app = new FakeApp();
+  listed(app, twelve);
+  // The last load ends as the page is scrolled to its top: it shows no more to load, and its
+  // messages are above what it then shows.
+  const page = virtualPage(conversation(twelve), 8, 6);
+  page.quick = true;
+  const history = await readHistory(app, page, GPT, { turns: 50, skip: 0 }, soon());
+  assert.equal(history.turns.length, 12);
+  assert.equal(history.more, false);
+});
+
+test('a page whose earlier prompts differ is not taken for the conversation, however its newest reads', async () => {
+  const app = new FakeApp();
+  listed(app, [
+    ['X', 'x'],
+    ['New A', 'a'],
+    ['New B', 'b'],
+    ['Continue', 'c'],
+  ]);
+  const stale = virtualPage(
+    conversation([
+      ['Old X', 'x'],
+      ['Old Y', 'y'],
+      ['Continue', 'old c'],
+    ]),
+  );
+  await assert.rejects(readHistory(app, stale, GPT, { turns: 1, skip: 0 }, Date.now() + 1500), code('WINDOW'));
 });
 
 test('a page that does not load its older messages is not taken for the start', async () => {
