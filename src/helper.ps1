@@ -12,7 +12,7 @@
 #   {"op":"launch"}                            -> {"ok":true,"started":bool}
 #   {"op":"raise"}                             -> {"ok":true,"raised":[{"window","after"}]}
 #   {"op":"lower","raised":[...]}              -> {"ok":true}
-#   {"op":"scroll","title":"...","percent":n}  -> {"ok":true,"found":bool,"scroll":{"percent","view"}|null}
+#   {"op":"scroll","title":"...","percent":n}  -> {"ok":true,"found":bool}
 #   {"op":"reveal","title":"...","ids":["..."],"pages":n} -> {"ok":true,"found":bool}
 #   failure                                    -> {"ok":false,"code":"WINDOW|BUSY|UNAVAILABLE|INPUT","message":"..."}
 # The ChatGPT window is used through UI Automation patterns only: no keystrokes, no mouse,
@@ -21,38 +21,60 @@ $ErrorActionPreference = 'Stop'
 [Console]::InputEncoding = [Text.UTF8Encoding]::new($false)
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
-Add-Type -Namespace Acb -Name Win32 -MemberDefinition @'
-[DllImport("user32.dll")] public static extern bool IsIconic(IntPtr window);
-[DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr window, int command);
-[DllImport("kernel32.dll", SetLastError = true)]
-public static extern bool GetNamedPipeServerProcessId(Microsoft.Win32.SafeHandles.SafePipeHandle pipe, out uint processId);
-[DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
-[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr window);
-[DllImport("user32.dll")] public static extern bool IsWindow(IntPtr window);
-[DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
-[DllImport("user32.dll")] public static extern bool AttachThreadInput(uint from, uint to, bool attach);
-[DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
-[DllImport("user32.dll")] public static extern IntPtr GetWindow(IntPtr window, uint command);
-[DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr window, IntPtr after, int x, int y, int width, int height, uint flags);
-[DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr context);
-'@
-# Window bounds from DWM are in physical pixels; screen metrics are too only in a DPI-aware
-# process. UI Automation would make this process system-aware on first use; per-monitor
-# awareness, set before, keeps every monitor in physical pixels.
-[void][Acb.Win32]::SetProcessDpiAwarenessContext([IntPtr](-4))
-
-# Whether a window shows on screen. Chromium stops updating the page of a window that is
-# minimized, cloaked (another virtual desktop) or fully covered; this follows its occlusion
-# rules: only visible, opaque, rectangular windows above it in z-order cover it.
-Add-Type -Language CSharp -TypeDefinition @'
+# Native helpers, compiled once: Win32 calls, whether a window shows on screen, and the
+# reader of a page's UI tree (PowerShell takes far longer to walk one).
+Add-Type -ReferencedAssemblies UIAutomationClient, UIAutomationTypes, WindowsBase -TypeDefinition @'
 using System;
+using System.Collections;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Text;
+using System.Windows.Automation;
 namespace Acb {
+  public static class Win32 {
+    [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr window);
+    [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr window, int command);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool GetNamedPipeServerProcessId(Microsoft.Win32.SafeHandles.SafePipeHandle pipe, out uint processId);
+    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr window);
+    [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr window);
+    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+    [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint from, uint to, bool attach);
+    [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+    [DllImport("user32.dll")] public static extern IntPtr GetWindow(IntPtr window, uint command);
+    [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr window, IntPtr after, int x, int y, int width, int height, uint flags);
+    [DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr context);
+    [DllImport("kernel32.dll")] static extern IntPtr OpenProcess(uint access, bool inherit, int id);
+    [DllImport("advapi32.dll")] static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+    [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+
+    // The SID of the user that runs process `id`, from its token; null when it cannot be read.
+    public static string Owner(int id) {
+      IntPtr process = OpenProcess(0x1000, false, id);
+      if (process == IntPtr.Zero) return null;
+      try {
+        IntPtr token;
+        if (!OpenProcessToken(process, 0x0008, out token)) return null;
+        try {
+          using (var identity = new System.Security.Principal.WindowsIdentity(token)) return identity.User.Value;
+        } finally {
+          CloseHandle(token);
+        }
+      } finally {
+        CloseHandle(process);
+      }
+    }
+  }
+
+  // Whether a window shows on screen. Chromium stops updating the page of a window that is
+  // minimized, cloaked (another virtual desktop) or fully covered; this follows its occlusion
+  // rules: only visible, opaque, rectangular windows above it in z-order cover it.
   public static class Screen {
+    delegate bool EachWindow(IntPtr window, IntPtr data);
+    [DllImport("user32.dll")] static extern bool EnumWindows(EachWindow each, IntPtr data);
     [StructLayout(LayoutKind.Sequential)] struct Rect { public int Left, Top, Right, Bottom; }
-    [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr window, uint command);
     [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr window);
-    [DllImport("user32.dll")] static extern bool IsIconic(IntPtr window);
     [DllImport("user32.dll")] static extern int GetWindowLong(IntPtr window, int index);
     [DllImport("user32.dll")] static extern bool GetLayeredWindowAttributes(IntPtr window, out uint key, out byte alpha, out uint flags);
     [DllImport("user32.dll")] static extern int GetWindowRgn(IntPtr window, IntPtr region);
@@ -65,13 +87,27 @@ namespace Acb {
     const uint Above = 3;
     const int And = 1, Diff = 4, Empty = 1, Error = 0;
 
+    // The visible top-level windows of the processes `ids`: the ones UI Automation lists as
+    // children of the desktop, found without walking its tree, which takes far longer.
+    public static IntPtr[] Windows(int[] ids) {
+      var processes = new HashSet<int>(ids);
+      var found = new List<IntPtr>();
+      EnumWindows((window, data) => {
+        uint owner;
+        Win32.GetWindowThreadProcessId(window, out owner);
+        if (processes.Contains((int)owner) && IsWindowVisible(window)) found.Add(window);
+        return true;
+      }, IntPtr.Zero);
+      return found.ToArray();
+    }
+
     public static bool Shows(IntPtr window) {
       Rect bounds;
       if (!Showing(window) || !Bounds(window, out bounds)) return false;
       IntPtr visible = CreateRectRgn(bounds.Left, bounds.Top, bounds.Right, bounds.Bottom);
       int x = GetSystemMetrics(76), y = GetSystemMetrics(77);
       int left = Clip(visible, x, y, x + GetSystemMetrics(78), y + GetSystemMetrics(79), And);
-      for (IntPtr other = GetWindow(window, Above); other != IntPtr.Zero && left != Empty && left != Error; other = GetWindow(other, Above)) {
+      for (IntPtr other = Win32.GetWindow(window, Above); other != IntPtr.Zero && left != Empty && left != Error; other = Win32.GetWindow(other, Above)) {
         Rect cover;
         if (Covers(other) && Bounds(other, out cover)) left = Clip(visible, cover.Left, cover.Top, cover.Right, cover.Bottom, Diff);
       }
@@ -88,7 +124,7 @@ namespace Acb {
 
     static bool Showing(IntPtr window) {
       int cloaked;
-      return IsWindowVisible(window) && !IsIconic(window) &&
+      return IsWindowVisible(window) && !Win32.IsIconic(window) &&
         !(DwmGetWindowAttribute(window, 14, out cloaked, 4) == 0 && cloaked != 0);
     }
 
@@ -114,8 +150,85 @@ namespace Acb {
         rect.Right > rect.Left && rect.Bottom > rect.Top;
     }
   }
+
+  // The text and buttons of a page's cached raw tree, in page order (see Transcript).
+  public class Page {
+    readonly List<Hashtable> nodes = new List<Hashtable>();
+    readonly StringBuilder text = new StringBuilder();
+    readonly List<AutomationElement> path = new List<AutomationElement>();
+    AutomationElement[] last;
+
+    public static List<Hashtable> Read(AutomationElement root) {
+      var page = new Page();
+      page.Visit(root);
+      page.EndText();
+      return page.nodes;
+    }
+
+    void Visit(AutomationElement element) {
+      var cached = element.Cached;
+      var type = cached.ControlType;
+      bool label = type == ControlType.Text && (" " + cached.ClassName + " ").Contains(" sr-only ");
+      if (label || type == ControlType.Button) {
+        EndText();
+        if (!string.IsNullOrEmpty(cached.Name)) {
+          var node = new Hashtable { { "type", type.ProgrammaticName.Substring(12) }, { "name", cached.Name }, { "label", label } };
+          // A heading keeps its runtime ID while its message stays on the page, also as it scrolls.
+          var id = element.GetCachedPropertyValue(AutomationElement.RuntimeIdProperty) as int[];
+          if (label && id != null) node["id"] = string.Join(".", id);
+          nodes.Add(node);
+        }
+        return;
+      }
+      var children = element.CachedChildren;
+      if (type == ControlType.Text && (children == null || children.Count == 0)) {
+        if (!string.IsNullOrEmpty(cached.Name)) AddText(cached.Name);
+        return;
+      }
+      if (children == null) return;
+      path.Add(element);
+      foreach (AutomationElement child in children) Visit(child);
+      path.RemoveAt(path.Count - 1);
+    }
+
+    // Adds a piece of text whose ancestors are `path`. Pieces of one block are joined as they
+    // are; a line break separates two pieces with a block between them and their common
+    // ancestor: anything but inline text (code, emphasis) and links. A list item's marker joins
+    // its first line. An empty code line is a block holding only a line break, which then needs
+    // no other.
+    void AddText(string piece) {
+      if (last != null) {
+        int shared = 0;
+        while (shared < path.Count && shared < last.Length && ReferenceEquals(path[shared], last[shared])) shared++;
+        bool block = false;
+        for (int i = shared; i < last.Length; i++) if (!IsInline(last[i])) block = true;
+        for (int i = shared; i < path.Count; i++) if (!IsInline(path[i])) block = true;
+        bool marker = shared == last.Length && shared > 0 && path[shared - 1].Cached.ControlType == ControlType.ListItem;
+        bool broken = text.Length > 0 && text[text.Length - 1] == '\n';
+        if (block && !marker && !broken) text.Append('\n');
+      }
+      text.Append(piece);
+      last = path.ToArray();
+    }
+
+    static bool IsInline(AutomationElement element) {
+      var cached = element.Cached;
+      return (cached.ControlType == ControlType.Text && !cached.IsControlElement) || cached.ControlType == ControlType.Hyperlink;
+    }
+
+    // Ends the text being gathered: what follows is a button or a role heading.
+    void EndText() {
+      if (text.Length > 0) nodes.Add(new Hashtable { { "type", "Text" }, { "name", text.ToString() }, { "label", false } });
+      text.Clear();
+      last = null;
+    }
+  }
 }
 '@
+# Window bounds from DWM are in physical pixels; screen metrics are too only in a DPI-aware
+# process. UI Automation would make this process system-aware on first use; per-monitor
+# awareness, set before, keeps every monitor in physical pixels.
+[void][Acb.Win32]::SetProcessDpiAwarenessContext([IntPtr](-4))
 
 $Names = @{
   Conversation = '对话'
@@ -176,12 +289,13 @@ function IsAppPipe([string]$path) {
   }
   $server = Get-Process -Id $id
   $signature = Get-AuthenticodeSignature -LiteralPath $server.Path
-  $owner = Invoke-CimMethod -InputObject (Get-CimInstance Win32_Process -Filter "ProcessId=$id") -MethodName GetOwnerSid
-  return [bool]($server.SessionId -eq (Get-Process -Id $PID).SessionId -and
-    $owner.Sid -eq [Security.Principal.WindowsIdentity]::GetCurrent().User.Value -and
+  return [bool]($server.SessionId -eq [Diagnostics.Process]::GetCurrentProcess().SessionId -and
+    [Acb.Win32]::Owner([int]$id) -eq [Security.Principal.WindowsIdentity]::GetCurrent().User.Value -and
     $signature.Status -eq 'Valid' -and
     $signature.SignerCertificate.Subject -match '(^|, )O=("OpenAI OpCo, LLC"|OpenAI)(,|$)')
 }
+
+function AppIds { @([Diagnostics.Process]::GetProcessesByName('ChatGPT') | ForEach-Object Id) }
 
 function Foreground { return @{ ok = $true; window = [Acb.Win32]::GetForegroundWindow().ToInt64() } }
 
@@ -192,7 +306,7 @@ function Foreground { return @{ ok = $true; window = [Acb.Win32]::GetForegroundW
 function GiveBack($request) {
   $target = [IntPtr][long]$request.window
   if ($target -eq [IntPtr]::Zero -or -not [Acb.Win32]::IsWindow($target)) { return @{ ok = $true; taken = $false; restored = $false } }
-  $app = @(Get-Process -Name ChatGPT -ErrorAction SilentlyContinue | ForEach-Object Id)
+  $app = AppIds
   $taken = Until 300 {
     $current = [Acb.Win32]::GetForegroundWindow()
     [uint32]$owner = 0
@@ -209,12 +323,10 @@ function GiveBack($request) {
 # The app's top-level windows. A minimized window exposes no UI tree, so it is restored
 # without being activated (SW_SHOWNOACTIVATE): the user's active window keeps the focus.
 function AppWindows {
-  $ids = @(Get-Process -Name ChatGPT -ErrorAction SilentlyContinue | ForEach-Object Id)
+  $ids = AppIds
   if (-not $ids) { Fail 'UNAVAILABLE' 'The ChatGPT desktop app is not running' }
-  $windows = @(foreach ($id in $ids) {
-    $Element::RootElement.FindAll([Windows.Automation.TreeScope]::Children,
-      [Windows.Automation.PropertyCondition]::new($Element::ProcessIdProperty, [int]$id))
-  })
+  # A window can close in between.
+  $windows = @(foreach ($handle in [Acb.Screen]::Windows([int[]]$ids)) { try { $Element::FromHandle($handle) } catch {} })
   foreach ($window in $windows) {
     $handle = [IntPtr]$window.Current.NativeWindowHandle
     if ([Acb.Win32]::IsIconic($handle)) {
@@ -233,26 +345,31 @@ function ComposerText($composer) {
   return $text
 }
 
+# The page of the conversation shown under `title`, or null when no window that shows on
+# screen shows it: the page of a window that does not may be out of date.
+function Shown([string]$title) {
+  $pages = @(foreach ($window in AppWindows) {
+    $document = Find $window 'Document'
+    if ($document -and $document.Current.Name -eq $title) { @{ Window = $window; Document = $document } }
+  })
+  if ($pages.Count -gt 1) { Fail 'WINDOW' 'Several windows show a conversation with this title' }
+  if (-not $pages.Count -or -not [Acb.Screen]::Shows([IntPtr]$pages[0].Window.Current.NativeWindowHandle)) { return $null }
+  return $pages[0].Document
+}
+
 # Text and buttons of the conversation shown under `title`, in page order. The role headings
 # before each message are screen-reader-only (`sr-only`), which tells them from message text.
 # The page comes as one cached batch of its raw tree: a reply being written has one element
 # per word, and the tree tells where paragraphs, list items and code lines begin.
 function Transcript($request) {
-  $pages = @(foreach ($window in AppWindows) {
-    $document = Find $window 'Document'
-    if ($document -and $document.Current.Name -eq $request.title) { @{ Window = $window; Document = $document } }
-  })
-  if ($pages.Count -eq 0) { return @{ ok = $true; found = $false } }
-  if ($pages.Count -gt 1) { Fail 'WINDOW' 'Several windows show a conversation with this title' }
-  # The page of a window that does not show on screen may be out of date.
-  if (-not [Acb.Screen]::Shows([IntPtr]$pages[0].Window.Current.NativeWindowHandle)) { return @{ ok = $true; found = $false } }
-  $pages = @($pages[0].Document)
-  $scope = Find $pages[0] 'Group' $Names.Conversation
+  $document = Shown $request.title
+  if (-not $document) { return @{ ok = $true; found = $false } }
+  $scope = Find $document 'Group' $Names.Conversation
   $position = Position $scope
   $framed = [bool]$scope
   # Above its first message, the page shows a status while it has older messages to load.
   $older = [bool]($scope -and (Find $scope 'Text' $Names.Older))
-  if (-not $scope) { $scope = $pages[0] }
+  if (-not $scope) { $scope = $document }
   $cache = [Windows.Automation.CacheRequest]::new()
   foreach ($property in $Element::NameProperty, $Element::ControlTypeProperty, $Element::ClassNameProperty, $Element::IsControlElementProperty, $Element::RuntimeIdProperty) {
     $cache.Add($property)
@@ -261,10 +378,8 @@ function Transcript($request) {
   $cache.TreeFilter = [Windows.Automation.Automation]::RawViewCondition
   $active = $cache.Activate()
   try { $tree = $scope.GetUpdatedCache($cache) } finally { $active.Dispose() }
-  $page = @{ nodes = [Collections.Generic.List[object]]::new(); text = [Text.StringBuilder]::new(); last = $null }
-  Visit $page $tree @()
-  EndText $page
-  return @{ ok = $true; found = $true; busy = [bool](Find $pages[0] 'Button' $Names.Stop); older = $older; framed = $framed; scroll = $position; nodes = $page.nodes }
+  $nodes = [Acb.Page]::Read($tree)
+  return @{ ok = $true; found = $true; busy = [bool](Find $document 'Button' $Names.Stop); older = $older; framed = $framed; scroll = $position; nodes = $nodes }
 }
 
 # Where the conversation `scope` is scrolled to: null when it fits, so it does not scroll.
@@ -278,17 +393,14 @@ function Position($scope) {
 # Scrolls the conversation shown under `title` to `percent` of its height (ScrollPattern: no
 # input, the window is not activated).
 function Scroll($request) {
-  $documents = @(foreach ($window in AppWindows) {
-    $document = Find $window 'Document'
-    if ($document -and $document.Current.Name -eq $request.title -and [Acb.Screen]::Shows([IntPtr]$window.Current.NativeWindowHandle)) { $document }
-  })
-  if ($documents.Count -ne 1) { return @{ ok = $true; found = $false } }
-  $scope = Find $documents[0] 'Group' $Names.Conversation
+  $document = Shown $request.title
+  if (-not $document) { return @{ ok = $true; found = $false } }
+  $scope = Find $document 'Group' $Names.Conversation
   $scroll = $null
   if ($scope -and $scope.TryGetCurrentPattern([Windows.Automation.ScrollPattern]::Pattern, [ref]$scroll) -and $scroll.Current.VerticallyScrollable) {
     $scroll.SetScrollPercent([Windows.Automation.ScrollPattern]::NoScroll, [Math]::Min(100, [Math]::Max(0, [double]$request.percent)))
   }
-  return @{ ok = $true; found = [bool]$scope; scroll = (Position $scope) }
+  return @{ ok = $true; found = [bool]$scope }
 }
 
 # Scrolls the conversation shown under `title` to the first of the messages whose headings
@@ -297,12 +409,9 @@ function Scroll($request) {
 # then. Moving from what the page shows keeps to it while the page re-measures the messages it
 # renders, which a share of its height does not.
 function Reveal($request) {
-  $documents = @(foreach ($window in AppWindows) {
-    $document = Find $window 'Document'
-    if ($document -and $document.Current.Name -eq $request.title -and [Acb.Screen]::Shows([IntPtr]$window.Current.NativeWindowHandle)) { $document }
-  })
-  if ($documents.Count -ne 1) { return @{ ok = $true; found = $false } }
-  $scope = Find $documents[0] 'Group' $Names.Conversation
+  $document = Shown $request.title
+  if (-not $document) { return @{ ok = $true; found = $false } }
+  $scope = Find $document 'Group' $Names.Conversation
   if (-not $scope) { return @{ ok = $true; found = $false } }
   $cache = [Windows.Automation.CacheRequest]::new()
   $cache.Add($Element::RuntimeIdProperty)
@@ -329,7 +438,7 @@ function Reveal($request) {
 # Starts the ChatGPT desktop app unless it runs. It is a packaged app, started the way the
 # Start menu does: through the shell, by its application user model ID.
 function Launch {
-  if (Get-Process -Name ChatGPT -ErrorAction SilentlyContinue) { return @{ ok = $true; started = $false } }
+  if (AppIds) { return @{ ok = $true; started = $false } }
   $package = @(Get-AppxPackage -Name 'OpenAI.Codex')[0]
   if (-not $package) { Fail 'UNAVAILABLE' 'The ChatGPT desktop app is not installed' }
   $application = @((Get-AppxPackageManifest $package).Package.Applications.Application)[0]
@@ -344,7 +453,7 @@ function Launch {
 # it. The user's active window keeps the focus.
 function Raise {
   $flags = 0x0001 -bor 0x0002 -bor 0x0010
-  $app = @(Get-Process -Name ChatGPT -ErrorAction SilentlyContinue | ForEach-Object Id)
+  $app = AppIds
   $raised = @(foreach ($window in AppWindows) {
     $handle = [IntPtr]$window.Current.NativeWindowHandle
     if ([Acb.Screen]::Shows($handle)) { continue }
@@ -374,63 +483,6 @@ function Lower($request) {
     }
   }
   return @{ ok = $true }
-}
-
-function Visit($page, $element, $path) {
-  $cached = $element.Cached
-  $type = $cached.ControlType
-  $label = $type -eq [Windows.Automation.ControlType]::Text -and $cached.ClassName -match '(^| )sr-only( |$)'
-  if ($label -or $type -eq [Windows.Automation.ControlType]::Button) {
-    EndText $page
-    if ($cached.Name) {
-      $node = @{ type = $type.ProgrammaticName.Substring(12); name = $cached.Name; label = $label }
-      # A heading keeps its runtime ID while its message stays on the page, also as it scrolls.
-      if ($label) { $node.id = @($element.GetCachedPropertyValue($Element::RuntimeIdProperty)) -join '.' }
-      $page.nodes.Add($node)
-    }
-    return
-  }
-  $children = $element.CachedChildren
-  if ($type -eq [Windows.Automation.ControlType]::Text -and -not $children.Count) {
-    if ($cached.Name) { AddText $page $path $cached.Name }
-    return
-  }
-  $inside = @($path) + $element
-  foreach ($child in $children) { Visit $page $child $inside }
-}
-
-# Adds a piece of text whose ancestors are `path`. Pieces of one block are joined as they are;
-# a line break separates two pieces with a block between them and their common ancestor:
-# anything but inline text (code, emphasis) and links. A list item's marker joins its first line.
-# An empty code line is a block holding only a line break, which then needs no other.
-function AddText($page, $path, [string]$text) {
-  $last = $page.last
-  if ($null -ne $last) {
-    $shared = 0
-    while ($shared -lt $path.Count -and $shared -lt $last.Count -and [object]::ReferenceEquals($path[$shared], $last[$shared])) { $shared++ }
-    $block = $false
-    foreach ($side in $last, $path) {
-      for ($i = $shared; $i -lt $side.Count; $i++) { if (-not (IsInline $side[$i])) { $block = $true } }
-    }
-    $marker = $shared -eq $last.Count -and $shared -gt 0 -and $path[$shared - 1].Cached.ControlType -eq [Windows.Automation.ControlType]::ListItem
-    $broken = $page.text.Length -and $page.text.Chars($page.text.Length - 1) -eq "`n"
-    if ($block -and -not $marker -and -not $broken) { [void]$page.text.Append("`n") }
-  }
-  [void]$page.text.Append($text)
-  $page.last = $path
-}
-
-function IsInline($element) {
-  $cached = $element.Cached
-  ($cached.ControlType -eq [Windows.Automation.ControlType]::Text -and -not $cached.IsControlElement) -or
-    $cached.ControlType -eq [Windows.Automation.ControlType]::Hyperlink
-}
-
-# Ends the text being gathered: what follows is a button or a role heading.
-function EndText($page) {
-  if ($page.text.Length) { $page.nodes.Add(@{ type = 'Text'; name = $page.text.ToString(); label = $false }) }
-  [void]$page.text.Clear()
-  $page.last = $null
 }
 
 # A new, empty chat page of `window`: no message on it and exactly one usable composer.

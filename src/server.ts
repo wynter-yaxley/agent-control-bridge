@@ -46,6 +46,7 @@ export function createServer({ app, page, version, timeoutMs }: Services): McpSe
   server.registerTool(
     'acb_status',
     {
+      title: 'App status',
       description: 'Check that the ChatGPT desktop app is reachable. Call it first when a tool reports UNAVAILABLE.',
       inputSchema: {},
       annotations: READ,
@@ -61,6 +62,7 @@ export function createServer({ app, page, version, timeoutMs }: Services): McpSe
   server.registerTool(
     'acb_projects',
     {
+      title: 'List projects',
       description:
         'List the projects of the desktop app (projectId, label, path, isGitRepository). Pass a projectId to acb_codex_create.',
       inputSchema: {},
@@ -72,6 +74,7 @@ export function createServer({ app, page, version, timeoutMs }: Services): McpSe
   server.registerTool(
     'acb_open',
     {
+      title: 'Show conversation',
       description:
         'Show a ChatGPT or Codex conversation in the desktop app, e.g. so the user can watch it. Switches the page of the app window without activating it; sends nothing.',
       inputSchema: { id: id('Conversation') },
@@ -94,6 +97,7 @@ export function createServer({ app, page, version, timeoutMs }: Services): McpSe
   server.registerTool(
     'acb_codex_list',
     {
+      title: 'List Codex conversations',
       description:
         'List Codex conversations of the desktop app (id, title, status, cwd, projectId, updatedAt, pinned) in its sidebar order: pinned first, then most recently updated unless the user sorts manually.',
       inputSchema: { cwd: z.string().min(1).max(1000).optional().describe('Only conversations in this folder'), limit },
@@ -105,6 +109,7 @@ export function createServer({ app, page, version, timeoutMs }: Services): McpSe
   server.registerTool(
     'acb_codex_read',
     {
+      title: 'Read Codex conversation',
       description:
         'Read a Codex conversation: its status (idle, running, needsUser) and the prompt and final reply of its newest turns, oldest first.',
       inputSchema: { threadId: id('Codex conversation'), turns, cursor },
@@ -116,6 +121,7 @@ export function createServer({ app, page, version, timeoutMs }: Services): McpSe
   server.registerTool(
     'acb_codex_create',
     {
+      title: 'Start Codex conversation',
       description:
         'Start a Codex conversation in the desktop app with a first prompt and return its reply. Runs in a project (projectId from acb_projects) or, without one, in a new folder under Documents\\Codex. In the app, the first message is shown as sent by another conversation.',
       inputSchema: {
@@ -140,6 +146,7 @@ export function createServer({ app, page, version, timeoutMs }: Services): McpSe
   server.registerTool(
     'acb_codex_send',
     {
+      title: 'Message Codex',
       description:
         "Send a prompt to a Codex conversation and return its final reply. Codex runs it in the desktop app with the app's permissions; NEEDS_USER means it waits for the user's approval there. Archived conversations are restored. Long tasks: pass wait: false, then acb_codex_read.",
       inputSchema: { threadId: id('Codex conversation'), prompt, wait },
@@ -151,6 +158,7 @@ export function createServer({ app, page, version, timeoutMs }: Services): McpSe
   server.registerTool(
     'acb_gpt_list',
     {
+      title: 'List ChatGPT conversations',
       description:
         'List ChatGPT conversations of the desktop app (id, title, status, projectId, updatedAt, pinned) in its sidebar order: pinned first, then most recently updated unless the user sorts manually.',
       inputSchema: { limit },
@@ -162,6 +170,7 @@ export function createServer({ app, page, version, timeoutMs }: Services): McpSe
   server.registerTool(
     'acb_gpt_read',
     {
+      title: 'Read ChatGPT conversation',
       description:
         'Read a ChatGPT conversation: the prompt and reply of its newest turns, oldest first. The app keeps most replies only on the page (replyOnPage: true); page: true reads the newest one there by showing the conversation in the app (not activating the window).',
       inputSchema: {
@@ -178,6 +187,7 @@ export function createServer({ app, page, version, timeoutMs }: Services): McpSe
   server.registerTool(
     'acb_gpt_history',
     {
+      title: 'Read ChatGPT history',
       description:
         'Read earlier turns of a ChatGPT conversation with their whole reply text, from its page: the newest `turns` after skipping the newest `skip`, oldest first, and whether older ones exist (more). For what acb_gpt_read cannot show: the app lists only the newest five turns and keeps most replies only on the page. Starts the desktop app if it does not run, brings its window above the others while reading (without activating it), scrolls the page and restores both. Turns read from the page carry no IDs.',
       inputSchema: {
@@ -202,6 +212,7 @@ export function createServer({ app, page, version, timeoutMs }: Services): McpSe
   server.registerTool(
     'acb_gpt_create',
     {
+      title: 'Start ChatGPT conversation',
       description:
         'Start a ChatGPT conversation with a first prompt and return its reply. The only tool that brings the ChatGPT window to the front: the app has no other way to open a new chat. No keystrokes are sent.',
       inputSchema: { prompt, title: title.optional() },
@@ -213,6 +224,7 @@ export function createServer({ app, page, version, timeoutMs }: Services): McpSe
   server.registerTool(
     'acb_gpt_send',
     {
+      title: 'Message ChatGPT',
       description:
         'Send a prompt to a ChatGPT conversation and return its reply. Sending happens in the background; the reply is then read from the page, so the app shows this conversation (the window is not activated).',
       inputSchema: { conversationId: id('ChatGPT conversation'), prompt, wait },

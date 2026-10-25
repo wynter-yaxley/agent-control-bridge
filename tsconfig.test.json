@@ -1,6 +1,6 @@
 {
   "extends": "./tsconfig.json",
-  "compilerOptions": { "noEmit": true, "declaration": false, "rootDir": ".", "allowImportingTsExtensions": true },
+  "compilerOptions": { "noEmit": true, "rootDir": ".", "allowImportingTsExtensions": true },
   "include": ["src/**/*.ts", "test/**/*.ts"],
   "exclude": []
 }

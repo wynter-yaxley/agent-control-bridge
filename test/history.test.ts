@@ -7,6 +7,9 @@ import { WindowsHelper } from '../src/helper.ts';
 import { prepend, readHistory, timing, toTurns } from '../src/history.ts';
 import { FakeApp, GPT, userTurn } from './fake-app.ts';
 
+// The fake page moves at once, so it is read without pauses.
+Object.assign(timing, { pollMs: 1, settleMs: 1, startMs: 1 });
+
 const code = (expected: string) => (error: unknown) => error instanceof AcbError && error.code === expected;
 /** Reaching the top of a page takes a few seconds: it is given time to load older messages. */
 const soon = () => Date.now() + 30_000;
@@ -30,6 +33,8 @@ interface FakeHistoryPage extends Page {
   loads: boolean;
   /** It loads them as it is scrolled to its top, before it is read there. */
   quick: boolean;
+  /** How many reads show a reply that comes on the page without its text. */
+  unwritten: number;
 }
 
 /**
@@ -44,6 +49,8 @@ function virtualPage(messages: PageMessage[], held = 8, chunk = messages.length)
   let from = Math.max(0, messages.length - chunk);
   /** The first loaded message on the screen. */
   let top = Number.POSITIVE_INFINITY;
+  /** How many reads have shown each message the page holds. */
+  let shownFor = new Map<string | null, number>();
   const loaded = () => messages.slice(from);
   const range = () => Math.max(0, loaded().length - screen);
   const clamp = () => {
@@ -66,6 +73,7 @@ function virtualPage(messages: PageMessage[], held = 8, chunk = messages.length)
     givenBack: 0,
     loads: true,
     quick: false,
+    unwritten: 0,
     run: (task) => queue.run(task),
     async holdForeground() {
       return async () => {
@@ -103,7 +111,12 @@ function virtualPage(messages: PageMessage[], held = 8, chunk = messages.length)
     async pageState(): Promise<PageState> {
       // A page that fits shows that it has older messages, and so loads them.
       if (!this.quick || !range()) this.load();
-      const held = shown();
+      const held = shown().map((message) => {
+        const reads = (shownFor.get(message.id) ?? 0) + 1;
+        return message.role === 'assistant' && reads <= this.unwritten ? { ...message, text: '' } : message;
+      });
+      // A message that leaves the page comes on it anew.
+      shownFor = new Map(held.map((message) => [message.id, (shownFor.get(message.id) ?? 0) + 1]));
       const last = held.findLastIndex((message) => message.role === 'you');
       return {
         busy: false,
@@ -189,7 +202,7 @@ test('a page whose earlier prompts differ is not taken for the conversation, how
       ['Continue', 'old c'],
     ]),
   );
-  await assert.rejects(readHistory(app, stale, GPT, { turns: 1, skip: 0 }, Date.now() + 1500), code('WINDOW'));
+  await assert.rejects(readHistory(app, stale, GPT, { turns: 1, skip: 0 }, Date.now() + 200), code('WINDOW'));
 });
 
 test('a page that loads its older messages late is moved to its top again from what was read', async () => {
@@ -233,6 +246,18 @@ test('a page that does not load its older messages is not taken for the start', 
   } finally {
     Object.assign(timing, saved);
   }
+});
+
+test('replies that come on the page before their text are read once it shows', async () => {
+  const app = new FakeApp();
+  listed(app, twelve);
+  const page = virtualPage(conversation(twelve), 8, 10);
+  page.unwritten = 2;
+  const history = await readHistory(app, page, GPT, { turns: 50, skip: 0 }, soon());
+  assert.deepEqual(
+    history.turns.map((turn) => [turn.prompt, turn.reply]),
+    twelve,
+  );
 });
 
 test('a page left scrolled up is scrolled to its end first', async () => {
@@ -300,7 +325,7 @@ test('a page whose end does not show the turns the app lists is not read', async
   listed(app, twelve);
   const other: [string, string][] = twelve.map(([prompt, reply]) => [`Another ${prompt}`, reply]);
   await assert.rejects(
-    readHistory(app, virtualPage(conversation(other)), GPT, { turns: 5, skip: 0 }, Date.now() + 1500),
+    readHistory(app, virtualPage(conversation(other)), GPT, { turns: 5, skip: 0 }, Date.now() + 200),
     code('WINDOW'),
   );
 });
@@ -334,11 +359,16 @@ test('known messages the page rendered anew must show, the same, above the joint
   assert.equal(prepend(renewed.slice(3), known), undefined, 'known messages above the joint are missing');
 });
 
-test('a reply still being written is null, and replies above the first prompt are left out', () => {
+test('a reply still being written or without text is null, and replies above the first prompt are left out', () => {
   const messages: PageMessage[] = [
     { id: 'a', role: 'assistant', text: 'end of an earlier reply', complete: true },
     { id: 'b', role: 'you', text: 'Q', complete: true },
     { id: 'c', role: 'assistant', text: 'partial', complete: false },
+    { id: 'd', role: 'you', text: 'R', complete: true },
+    { id: 'e', role: 'assistant', text: '', complete: true },
   ];
-  assert.deepEqual(toTurns(messages), [{ prompt: 'Q', reply: null }]);
+  assert.deepEqual(toTurns(messages), [
+    { prompt: 'Q', reply: null },
+    { prompt: 'R', reply: null },
+  ]);
 });

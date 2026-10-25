@@ -107,8 +107,8 @@ async function watchPage(
   unlisted: string[],
 ): Promise<Live | undefined> {
   try {
-    const read = await app.readThread(conversationId, { turns: 10 });
-    if (await hasNamesake(app, conversationId, read.title)) return undefined;
+    const [read, inventory] = await Promise.all([app.readThread(conversationId, { turns: 10 }), app.listThreads()]);
+    if (hasNamesake(inventory, conversationId, read.title)) return undefined;
     const before = await page.run(async () => {
       await show(app, page, conversationId);
       return page.pageState(read.title, SHOW_MS);
@@ -179,10 +179,8 @@ async function show(app: App, page: Page, conversationId: string): Promise<void>
 }
 
 /** Whether another ChatGPT conversation the app lists has this title, so the page cannot tell them apart. */
-export async function hasNamesake(app: App, conversationId: string, title: string): Promise<boolean> {
-  return chatgptThreads(await app.listThreads()).some(
-    (thread) => thread.title === title && thread.id !== conversationId,
-  );
+export function hasNamesake(inventory: Inventory, conversationId: string, title: string): boolean {
+  return chatgptThreads(inventory).some((thread) => thread.title === title && thread.id !== conversationId);
 }
 
 /**
@@ -293,8 +291,11 @@ async function pageReply(app: App, page: Page, conversationId: string, turn: Tur
   if (!turn.prompt || turn.truncated) {
     throw new AcbError('WINDOW', 'This prompt is too long to be matched on the page', { conversationId });
   }
-  const { title, turns } = await app.readThread(conversationId, { turns: 10 });
-  if (await hasNamesake(app, conversationId, title)) {
+  const [{ title, turns }, inventory] = await Promise.all([
+    app.readThread(conversationId, { turns: 10 }),
+    app.listThreads(),
+  ]);
+  if (hasNamesake(inventory, conversationId, title)) {
     throw new AcbError(
       'WINDOW',
       'Another ChatGPT conversation has the same title; rename one to read replies from the page',

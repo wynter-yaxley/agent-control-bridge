@@ -1,13 +1,13 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import { hasNamesake, listedPrompts, type Page, PLACING, SHOW_MS } from './chatgpt.ts';
-import type { App, ThreadPage } from './desktop.ts';
+import type { App } from './desktop.ts';
 import { AcbError } from './errors.ts';
 import { type PageMessage, type PageState, READ_TIMEOUT_MS } from './helper.ts';
 
 /** A turn read from the page, which shows no turn IDs. */
 export interface PageTurn {
   prompt: string;
-  /** Null while ChatGPT is still writing it. */
+  /** Null while ChatGPT is still writing it, or when the page shows no text of it. */
   reply: string | null;
 }
 
@@ -31,6 +31,12 @@ export const timing = {
   loadMs: 15_000,
   /** How often it is scrolled to its top again meanwhile, in case it missed it. */
   retriggerMs: 5000,
+  /** Pause between two reads of a page that is expected to change. */
+  pollMs: 300,
+  /** Pause between two reads of a page that has just been moved, until it settles. */
+  settleMs: 150,
+  /** Pause between two attempts to reach an app that is starting. */
+  startMs: 1000,
 };
 
 /**
@@ -47,10 +53,14 @@ export async function readHistory(
   { turns, skip }: { turns: number; skip: number },
   deadline: number,
 ): Promise<History> {
-  const read = await whenRunning(app, page, conversationId, deadline);
+  const [read, inventory] = await whenRunning(
+    page,
+    () => Promise.all([app.readThread(conversationId, { turns: 10 }), app.listThreads()]),
+    deadline,
+  );
   if (read.kind !== 'chatgpt') throw new AcbError('INPUT', 'This is a Codex conversation: use acb_codex_read');
   const { title } = read;
-  if (await hasNamesake(app, conversationId, title)) {
+  if (hasNamesake(inventory, conversationId, title)) {
     throw new AcbError(
       'WINDOW',
       'Another ChatGPT conversation has the same title; rename one to read replies from the page',
@@ -84,11 +94,10 @@ export async function readHistory(
 }
 
 /**
- * The conversation as the app lists it. When the app cannot be reached, it is started (it
- * takes the foreground as it opens, which is given back) and waited for.
+ * What `read` reads from the app. When the app cannot be reached, it is started (it takes the
+ * foreground as it opens, which is given back) and waited for.
  */
-async function whenRunning(app: App, page: Page, conversationId: string, deadline: number): Promise<ThreadPage> {
-  const read = () => app.readThread(conversationId, { turns: 10 });
+async function whenRunning<T>(page: Page, read: () => Promise<T>, deadline: number): Promise<T> {
   try {
     return await read();
   } catch (error) {
@@ -98,7 +107,7 @@ async function whenRunning(app: App, page: Page, conversationId: string, deadlin
       if (!(await page.launch())) throw error;
       const until = Math.min(deadline, Date.now() + START_MS);
       for (;;) {
-        await delay(1000);
+        await delay(timing.startMs);
         // The window opens, and takes the foreground, before the app is ready.
         await giveBack();
         try {
@@ -147,15 +156,18 @@ function placed(state: PageState, listed: string[]): boolean {
 }
 
 /**
- * The page once it shows the end of the conversation (see placed). A page that showed the
- * conversation before stays where it was left, so it is scrolled to its end.
+ * The page once it shows the end of the conversation (see placed), settled. A page that showed
+ * the conversation before stays where it was left, so it is scrolled to its end.
  */
 async function pageEnd(page: Page, title: string, listed: string[], deadline: number): Promise<PageState> {
   const until = Math.min(deadline, Date.now() + READ_TIMEOUT_MS);
   let state = await page.pageState(title, SHOW_MS);
   for (;;) {
     if (state && !state.atEnd) await page.scroll(title, 100);
-    else if (state && placed(state, listed)) return state;
+    else if (state && placed(state, listed)) {
+      const shown = await settled(page, title);
+      if (shown.atEnd && placed(shown, listed)) return shown;
+    }
     if (Date.now() >= until) {
       throw new AcbError(
         'WINDOW',
@@ -164,7 +176,7 @@ async function pageEnd(page: Page, title: string, listed: string[], deadline: nu
           : 'The ChatGPT window does not show the conversation on screen',
       );
     }
-    await delay(300);
+    await delay(timing.pollMs);
     state = await page.pageState(title);
   }
 }
@@ -244,7 +256,7 @@ async function olderLoaded(page: Page, title: string, top: PageState, ids: strin
   const started = Date.now();
   let triggered = started;
   for (;;) {
-    await delay(300);
+    await delay(timing.pollMs);
     const state = await page.pageState(title);
     if (!state) throw unseen();
     const grown = state.scroll !== null && (top.scroll === null || state.scroll.view < top.scroll.view);
@@ -259,16 +271,22 @@ async function olderLoaded(page: Page, title: string, top: PageState, ids: strin
   }
 }
 
-/** The page once two reads in a row show the same messages at the same place. */
+/**
+ * The page once two reads in a row show the same messages at the same place, each with its
+ * text: the page puts a message it renders anew on the page before its reply's text, which
+ * follows a moment later. A reply without text (an image only) is taken as it is in the end.
+ */
 async function settled(page: Page, title: string): Promise<PageState> {
   const until = Date.now() + SETTLE_MS;
-  const shape = (state: PageState) => `${state.scroll?.percent}:${state.messages.map((message) => message.id).join()}`;
+  const shape = (state: PageState) =>
+    `${state.scroll?.percent}:${state.messages.map((message) => `${message.id}=${message.text.length}`).join()}`;
   let previous: string | undefined;
   for (;;) {
-    await delay(150);
+    await delay(timing.settleMs);
     const state = await page.pageState(title);
     if (!state) throw unseen();
-    if (shape(state) === previous || Date.now() >= until) return state;
+    const written = state.messages.every((message) => message.role === 'you' || message.text !== '');
+    if ((shape(state) === previous && written) || Date.now() >= until) return state;
     previous = shape(state);
   }
 }
@@ -292,19 +310,20 @@ export function prepend(older: PageMessage[], known: PageMessage[]): PageMessage
 
 /**
  * The turns of the messages read: a user message and the replies after it. Replies before the
- * first user message read belong to a turn further up, and are left out.
+ * first user message read belong to a turn further up, and are left out. A reply without text
+ * is unknown rather than empty: the page may not have written it yet (see settled).
  */
 export function toTurns(messages: PageMessage[]): PageTurn[] {
-  const turns: (PageTurn & { writing: boolean })[] = [];
+  const turns: (PageTurn & { unknown: boolean })[] = [];
   for (const message of messages) {
     if (message.role === 'you') {
-      turns.push({ prompt: message.text, reply: null, writing: false });
+      turns.push({ prompt: message.text, reply: null, unknown: false });
       continue;
     }
     const turn = turns.at(-1);
     if (!turn) continue;
-    turn.writing ||= !message.complete;
+    turn.unknown ||= !message.complete || message.text === '';
     turn.reply = turn.reply === null ? message.text : `${turn.reply}\n${message.text}`;
   }
-  return turns.map(({ prompt, reply, writing }) => ({ prompt, reply: writing ? null : reply }));
+  return turns.map(({ prompt, reply, unknown }) => ({ prompt, reply: unknown ? null : reply }));
 }

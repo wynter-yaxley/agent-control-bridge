@@ -7,7 +7,6 @@
     "outDir": "dist",
     "rootDir": "src",
     "rewriteRelativeImportExtensions": true,
-    "declaration": true,
     "skipLibCheck": true,
     "types": ["node"],
     "erasableSyntaxOnly": true

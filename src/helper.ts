@@ -97,9 +97,8 @@ export function readMessages(nodes: PageNode[]): PageMessage[] {
   });
 }
 
-/** The user messages on the page and the ChatGPT reply after the last one. */
-export function readPage(nodes: PageNode[]): PageMessages {
-  const messages = readMessages(nodes);
+/** The user messages of `messages` and the ChatGPT reply after the last one. */
+export function readPage(messages: PageMessage[]): PageMessages {
   const last = messages.findLastIndex((message) => message.role === 'you');
   const reply = last < 0 ? undefined : messages.slice(last + 1).find((message) => message.role === 'assistant');
   return {
@@ -234,21 +233,19 @@ export class WindowsHelper {
       const page = await this.#request({ op: 'transcript', title });
       if (page.found) {
         const scroll = (page.scroll as Scroll | null) ?? null;
-        const nodes = page.nodes as PageNode[];
-        // Without the conversation's frame, where it is scrolled to is unknown.
-        const end = page.framed === true && atEnd(scroll);
-        const older = page.older === true;
+        const messages = readMessages(page.nodes as PageNode[]);
         return {
           busy: page.busy === true,
-          atEnd: end,
+          // Without the conversation's frame, where it is scrolled to is unknown.
+          atEnd: page.framed === true && atEnd(scroll),
           scroll,
-          older,
-          messages: readMessages(nodes),
-          ...readPage(nodes),
+          older: page.older === true,
+          messages,
+          ...readPage(messages),
         };
       }
       if (Date.now() >= until) return null;
-      await delay(300);
+      await delay(150);
     }
   }
 

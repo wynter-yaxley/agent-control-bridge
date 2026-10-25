@@ -5,7 +5,7 @@ agent-control-bridge（ACB）是把 ChatGPT 桌面应用里的 ChatGPT / Codex �
 ## 架构
 
 - **唯一的数据通道是桌面应用的工具接口**（`src/pipe.ts`、`src/desktop.ts`，命名管道 `codex-app-tools-<uuid>`）。连接前核对管道服务端是当前用户、当前会话里带 OpenAI 有效签名的应用。列出、读取、发送、新建 Codex 对话、改名、归档、导航都走它。不自行启动 `codex app-server`，不读应用的本地数据库或缓存。唯一的例外是只读的 `~/.codex/session_index.jsonl`，用来确定默认调用身份。
-- **Windows 辅助进程只做应用接口做不到的事**（`src/helper.ts`、`src/helper.ps1`）：核对管道服务端，以及通过 UI Automation 读取和滚动 ChatGPT 页面、新建 ChatGPT 对话；为读历史启动应用、提升被挡住的窗口。页面解析放在 TypeScript 里，以便测试；PowerShell 只取控件、调用 UIA Pattern。
+- **Windows 辅助进程只做应用接口做不到的事**（`src/helper.ts`、`src/helper.ps1`）：核对管道服务端，以及通过 UI Automation 读取和滚动 ChatGPT 页面、新建 ChatGPT 对话；为读历史启动应用、提升被挡住的窗口。页面解析放在 TypeScript 里，以便测试；PowerShell 只取控件、调用 UIA Pattern，频繁执行的部分（找应用窗口、遍历页面控件树、核对进程身份）用其中编译的 C# 和 Win32 调用，不在 PowerShell 里循环，也不遍历整个桌面的 UIA 树。
 - 每个 MCP 工具只做一件事。工具内不串联多个对话，说明和 Skill 里不规定工作流。
 - 不引入任务管理、台账、角色、审批或配置文件。新功能先提出，获批后再做。
 - 不绑定具体机器、目录、账号或对话 ID。
