@@ -6,12 +6,15 @@ import { READ_TIMEOUT_MS, replyTo, samePrompt, shownAfter, showsPrompts, type Wi
 import { type Conversation, normalize, opensWith, promptOf, type Turn, toConversation } from './turns.ts';
 
 /** How long the page may take to show a conversation it was asked to show. */
-const SHOW_MS = 2000;
+export const SHOW_MS = 2000;
 /** How many of the newest known prompts place the page's messages: it holds five or more. */
-const PLACING = 3;
+export const PLACING = 3;
 
 /** The page operations of WindowsHelper; tests substitute them. */
-export type Page = Pick<WindowsHelper, 'run' | 'holdForeground' | 'pageState' | 'readReply' | 'startChat'>;
+export type Page = Pick<
+  WindowsHelper,
+  'run' | 'holdForeground' | 'pageState' | 'readReply' | 'startChat' | 'launch' | 'raise' | 'scroll' | 'reveal'
+>;
 
 /** A finished turn whose reply could not be read from the page keeps `replyOnPage` and says why. */
 export interface PageRead {
@@ -104,8 +107,8 @@ async function watchPage(
   unlisted: string[],
 ): Promise<Live | undefined> {
   try {
-    const read = await app.readThread(conversationId, { turns: 10 });
-    if (await hasNamesake(app, conversationId, read.title)) return undefined;
+    const [read, inventory] = await Promise.all([app.readThread(conversationId, { turns: 10 }), app.listThreads()]);
+    if (hasNamesake(inventory, conversationId, read.title)) return undefined;
     const before = await page.run(async () => {
       await show(app, page, conversationId);
       return page.pageState(read.title, SHOW_MS);
@@ -140,7 +143,7 @@ async function watchPage(
 }
 
 /** The prompts of the newest listed turns that the app returns whole, oldest first. */
-function listedPrompts(turns: AppTurn[]): string[] {
+export function listedPrompts(turns: AppTurn[]): string[] {
   const prompts: string[] = [];
   for (const turn of turns) {
     const prompt = promptOf(turn);
@@ -176,10 +179,8 @@ async function show(app: App, page: Page, conversationId: string): Promise<void>
 }
 
 /** Whether another ChatGPT conversation the app lists has this title, so the page cannot tell them apart. */
-async function hasNamesake(app: App, conversationId: string, title: string): Promise<boolean> {
-  return chatgptThreads(await app.listThreads()).some(
-    (thread) => thread.title === title && thread.id !== conversationId,
-  );
+export function hasNamesake(inventory: Inventory, conversationId: string, title: string): boolean {
+  return chatgptThreads(inventory).some((thread) => thread.title === title && thread.id !== conversationId);
 }
 
 /**
@@ -290,8 +291,11 @@ async function pageReply(app: App, page: Page, conversationId: string, turn: Tur
   if (!turn.prompt || turn.truncated) {
     throw new AcbError('WINDOW', 'This prompt is too long to be matched on the page', { conversationId });
   }
-  const { title, turns } = await app.readThread(conversationId, { turns: 10 });
-  if (await hasNamesake(app, conversationId, title)) {
+  const [{ title, turns }, inventory] = await Promise.all([
+    app.readThread(conversationId, { turns: 10 }),
+    app.listThreads(),
+  ]);
+  if (hasNamesake(inventory, conversationId, title)) {
     throw new AcbError(
       'WINDOW',
       'Another ChatGPT conversation has the same title; rename one to read replies from the page',

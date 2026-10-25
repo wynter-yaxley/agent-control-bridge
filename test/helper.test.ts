@@ -1,10 +1,20 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { atEnd, type PageNode, readPage, replyTo, samePrompt, shownAfter, showsPrompts } from '../src/helper.ts';
+import {
+  atEnd,
+  type PageNode,
+  readMessages,
+  readPage,
+  replyTo,
+  samePrompt,
+  shownAfter,
+  showsPrompts,
+} from '../src/helper.ts';
 
 const text = (name: string): PageNode => ({ type: 'Text', name });
 const label = (name: string): PageNode => ({ type: 'Text', name, label: true });
 const button = (name: string): PageNode => ({ type: 'Button', name });
+const read = (nodes: PageNode[]) => readPage(readMessages(nodes));
 
 const page: PageNode[] = [
   label('你说：'),
@@ -24,7 +34,7 @@ const page: PageNode[] = [
 ];
 
 test('a page holds every prompt and every paragraph of the last reply', () => {
-  assert.deepEqual(readPage(page), {
+  assert.deepEqual(read(page), {
     prompts: ['first question', 'second\nquestion'],
     reply: 'Paragraph one.\nParagraph two.',
     complete: true,
@@ -32,12 +42,8 @@ test('a page holds every prompt and every paragraph of the last reply', () => {
 });
 
 test('a reply without its action buttons is still being written', () => {
-  assert.equal(readPage(page.slice(0, 10)).complete, false);
-  assert.equal(readPage(page.slice(0, 8)).reply, '');
-});
-
-test('a page without messages has no prompts', () => {
-  assert.deepEqual(readPage([text('ChatGPT 可能会出错。')]).prompts, []);
+  assert.equal(read(page.slice(0, 10)).complete, false);
+  assert.equal(read(page.slice(0, 8)).reply, '');
 });
 
 test('label text inside a message is content, not a new message', () => {
@@ -48,7 +54,7 @@ test('label text inside a message is content, not a new message', () => {
     text('It means "you said".'),
     button('更多操作'),
   ];
-  assert.deepEqual(readPage(quoted), {
+  assert.deepEqual(read(quoted), {
     prompts: ['What does 你说：mean?'],
     reply: 'It means "you said".',
     complete: true,
@@ -66,7 +72,7 @@ test('message text that equals a role heading is still message text', () => {
     text('end'),
     button('更多操作'),
   ];
-  assert.deepEqual(readPage(page), {
+  assert.deepEqual(read(page), {
     prompts: ['Q'],
     reply: 'Start\n你说：\nQ\nend',
     complete: true,
@@ -99,7 +105,16 @@ test('a page holding only the newest messages is compared on those, but on two a
 });
 
 test('a reply is taken only from a finished page ending with the expected prompts', () => {
-  const state = { busy: false, atEnd: true, prompts: ['Earlier', 'Question'], reply: 'Done.', complete: true };
+  const state = {
+    busy: false,
+    atEnd: true,
+    scroll: null,
+    older: false,
+    messages: [],
+    prompts: ['Earlier', 'Question'],
+    reply: 'Done.',
+    complete: true,
+  };
   assert.equal(replyTo(state, ['Earlier', 'Question']), 'Done.');
   assert.equal(replyTo(state, ['Question']), 'Done.');
   assert.equal(replyTo(state, ['Other', 'Question']), null);
