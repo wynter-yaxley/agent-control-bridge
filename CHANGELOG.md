@@ -2,7 +2,7 @@
 
 Versions follow Semantic Versioning. Desktop behavior is verified manually on Windows (`npm run smoke`); unit tests use mocks.
 
-## 0.7.0 (Unreleased)
+## 0.7.0
 
 - New `acb_gpt_history { conversationId, turns?, skip? }`: earlier turns of a ChatGPT conversation with their whole reply text, read from its page, back to its start; `more` tells whether older turns exist. The app returns only the newest five ChatGPT turns, mostly with placeholders for the replies. The page holds only the messages near what it shows and loads older ones at its top, so ACB scrolls it up step by step (UI Automation ScrollPattern, no input) and joins the steps by the runtime IDs of the messages' headings, so equal turns are not confused; it waits for the page to load older messages before taking its top for the start. For when the user is away, it starts the app if it does not run (through the shell, by the app's user model ID; the foreground it takes is given back), and brings a window that does not show on screen above the others without activating it, putting it back afterwards. About 20 seconds for 50 turns. The page puts a message it renders anew on the page a moment before its reply's text, so a step is read only once every reply in it shows its text; a reply that never does (an image) is returned as `null`, never as empty text.
 - `acb_gpt_create` works when the sidebar shows more than one new-chat button, as it now does next to its list of recent chats; the first is used, and the new chat page is still checked before the prompt is written.
