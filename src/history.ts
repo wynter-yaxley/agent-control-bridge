@@ -221,7 +221,7 @@ async function scanUp(
       continue;
     }
     if (!top.older) return { messages, top: true };
-    await olderLoaded(page, title, top);
+    await olderLoaded(page, title, top, ids);
   }
   return { messages, top: false };
 }
@@ -235,11 +235,12 @@ const lost = () => new AcbError('WINDOW', 'The ChatGPT page lost its place while
 const unseen = () => new AcbError('WINDOW', 'The ChatGPT window does not show the conversation on screen');
 
 /**
- * Waits for the page, scrolled to its top, to load older messages: it grows, or has none
- * left. A page that does not load them in time does not tell where the conversation starts,
- * which is an error rather than its start.
+ * Waits for the page, at its top, to load older messages: it grows, or has none left. Now and
+ * then it is moved to its top again, from the messages read (`ids`) as in scanUp, in case it
+ * missed it. A page that does not load them in time does not tell where the conversation
+ * starts, which is an error rather than its start.
  */
-async function olderLoaded(page: Page, title: string, top: PageState): Promise<void> {
+async function olderLoaded(page: Page, title: string, top: PageState, ids: string[]): Promise<void> {
   const started = Date.now();
   let triggered = started;
   for (;;) {
@@ -253,7 +254,7 @@ async function olderLoaded(page: Page, title: string, top: PageState): Promise<v
     }
     if (Date.now() - triggered >= timing.retriggerMs) {
       triggered = Date.now();
-      await page.scroll(title, 0);
+      if (!(await page.reveal(title, ids, 1))) throw lost();
     }
   }
 }

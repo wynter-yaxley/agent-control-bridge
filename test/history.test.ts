@@ -192,6 +192,35 @@ test('a page whose earlier prompts differ is not taken for the conversation, how
   await assert.rejects(readHistory(app, stale, GPT, { turns: 1, skip: 0 }, Date.now() + 1500), code('WINDOW'));
 });
 
+test('a page that loads its older messages late is moved to its top again from what was read', async () => {
+  const app = new FakeApp();
+  listed(app, twelve);
+  // One load brings all older messages, far above what was read.
+  const page = virtualPage(conversation(twelve), 8, 12);
+  page.quick = true;
+  page.loads = false;
+  const read = page.pageState.bind(page);
+  let waited = 0;
+  // Once it is waited on at its top (the fifth read there), the page loads right after a read
+  // has shown it unloaded.
+  page.pageState = async (title, wait) => {
+    const state = await read(title, wait);
+    if (!page.loads && state?.older && page.percent <= 0 && ++waited === 5) {
+      page.loads = true;
+      page.load();
+    }
+    return state;
+  };
+  const saved = { ...timing };
+  Object.assign(timing, { loadMs: 3000, retriggerMs: 100 });
+  try {
+    const history = await readHistory(app, page, GPT, { turns: 50, skip: 0 }, soon());
+    assert.equal(history.turns.length, 12);
+  } finally {
+    Object.assign(timing, saved);
+  }
+});
+
 test('a page that does not load its older messages is not taken for the start', async () => {
   const app = new FakeApp();
   listed(app, twelve);
