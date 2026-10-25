@@ -99,7 +99,15 @@ test('a page holding only the newest messages is compared on those, but on two a
 });
 
 test('a reply is taken only from a finished page ending with the expected prompts', () => {
-  const state = { busy: false, atEnd: true, prompts: ['Earlier', 'Question'], reply: 'Done.', complete: true };
+  const state = {
+    busy: false,
+    atEnd: true,
+    scroll: null,
+    messages: [],
+    prompts: ['Earlier', 'Question'],
+    reply: 'Done.',
+    complete: true,
+  };
   assert.equal(replyTo(state, ['Earlier', 'Question']), 'Done.');
   assert.equal(replyTo(state, ['Question']), 'Done.');
   assert.equal(replyTo(state, ['Other', 'Question']), null);

@@ -7,7 +7,12 @@
 #                                                  "scroll":{"percent","view"}|null,"nodes":[{"type","name","label"}]}
 #     (found only in a window that shows on screen)
 #     (the text between two buttons or role headings comes as one Text, with its line breaks)
+#     (a role heading carries "id", the UI Automation runtime ID of its message)
 #   {"op":"compose","prompt":"..."}            -> {"ok":true}
+#   {"op":"launch"}                            -> {"ok":true,"started":bool}
+#   {"op":"raise"}                             -> {"ok":true,"raised":[{"window","after"}]}
+#   {"op":"lower","raised":[...]}              -> {"ok":true}
+#   {"op":"scroll","title":"...","percent":n}  -> {"ok":true,"found":bool,"scroll":{"percent","view"}|null}
 #   failure                                    -> {"ok":false,"code":"WINDOW|BUSY|UNAVAILABLE|INPUT","message":"..."}
 # The ChatGPT window is used through UI Automation patterns only: no keystrokes, no mouse,
 # no clipboard. Control names are those of the Simplified Chinese app.
@@ -26,7 +31,14 @@ public static extern bool GetNamedPipeServerProcessId(Microsoft.Win32.SafeHandle
 [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
 [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint from, uint to, bool attach);
 [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+[DllImport("user32.dll")] public static extern IntPtr GetWindow(IntPtr window, uint command);
+[DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr window, IntPtr after, int x, int y, int width, int height, uint flags);
+[DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr context);
 '@
+# Window bounds from DWM are in physical pixels; screen metrics are too only in a DPI-aware
+# process. UI Automation would make this process system-aware on first use; per-monitor
+# awareness, set before, keeps every monitor in physical pixels.
+[void][Acb.Win32]::SetProcessDpiAwarenessContext([IntPtr](-4))
 
 # Whether a window shows on screen. Chromium stops updating the page of a window that is
 # minimized, cloaked (another virtual desktop) or fully covered; this follows its occlusion
@@ -233,16 +245,11 @@ function Transcript($request) {
   if (-not [Acb.Screen]::Shows([IntPtr]$pages[0].Window.Current.NativeWindowHandle)) { return @{ ok = $true; found = $false } }
   $pages = @($pages[0].Document)
   $scope = Find $pages[0] 'Group' $Names.Conversation
-  # Where the conversation is scrolled to; one that fits has no ScrollPattern.
-  $scroll = $null
-  $position = $null
-  if ($scope -and $scope.TryGetCurrentPattern([Windows.Automation.ScrollPattern]::Pattern, [ref]$scroll) -and $scroll.Current.VerticallyScrollable) {
-    $position = @{ percent = $scroll.Current.VerticalScrollPercent; view = $scroll.Current.VerticalViewSize }
-  }
+  $position = Position $scope
   $framed = [bool]$scope
   if (-not $scope) { $scope = $pages[0] }
   $cache = [Windows.Automation.CacheRequest]::new()
-  foreach ($property in $Element::NameProperty, $Element::ControlTypeProperty, $Element::ClassNameProperty, $Element::IsControlElementProperty) {
+  foreach ($property in $Element::NameProperty, $Element::ControlTypeProperty, $Element::ClassNameProperty, $Element::IsControlElementProperty, $Element::RuntimeIdProperty) {
     $cache.Add($property)
   }
   $cache.TreeScope = [Windows.Automation.TreeScope]::Subtree
@@ -255,13 +262,92 @@ function Transcript($request) {
   return @{ ok = $true; found = $true; busy = [bool](Find $pages[0] 'Button' $Names.Stop); framed = $framed; scroll = $position; nodes = $page.nodes }
 }
 
+# Where the conversation `scope` is scrolled to: null when it fits, so it does not scroll.
+function Position($scope) {
+  $scroll = $null
+  if (-not ($scope -and $scope.TryGetCurrentPattern([Windows.Automation.ScrollPattern]::Pattern, [ref]$scroll))) { return $null }
+  if (-not $scroll.Current.VerticallyScrollable) { return $null }
+  return @{ percent = $scroll.Current.VerticalScrollPercent; view = $scroll.Current.VerticalViewSize }
+}
+
+# Scrolls the conversation shown under `title` to `percent` of its height (ScrollPattern: no
+# input, the window is not activated).
+function Scroll($request) {
+  $documents = @(foreach ($window in AppWindows) {
+    $document = Find $window 'Document'
+    if ($document -and $document.Current.Name -eq $request.title -and [Acb.Screen]::Shows([IntPtr]$window.Current.NativeWindowHandle)) { $document }
+  })
+  if ($documents.Count -ne 1) { return @{ ok = $true; found = $false } }
+  $scope = Find $documents[0] 'Group' $Names.Conversation
+  $scroll = $null
+  if ($scope -and $scope.TryGetCurrentPattern([Windows.Automation.ScrollPattern]::Pattern, [ref]$scroll) -and $scroll.Current.VerticallyScrollable) {
+    $scroll.SetScrollPercent([Windows.Automation.ScrollPattern]::NoScroll, [Math]::Min(100, [Math]::Max(0, [double]$request.percent)))
+  }
+  return @{ ok = $true; found = [bool]$scope; scroll = (Position $scope) }
+}
+
+# Starts the ChatGPT desktop app unless it runs. It is a packaged app, started the way the
+# Start menu does: through the shell, by its application user model ID.
+function Launch {
+  if (Get-Process -Name ChatGPT -ErrorAction SilentlyContinue) { return @{ ok = $true; started = $false } }
+  $package = @(Get-AppxPackage -Name 'OpenAI.Codex')[0]
+  if (-not $package) { Fail 'UNAVAILABLE' 'The ChatGPT desktop app is not installed' }
+  $application = @((Get-AppxPackageManifest $package).Package.Applications.Application)[0]
+  Start-Process -FilePath (Join-Path $env:SystemRoot 'explorer.exe') -ArgumentList "shell:AppsFolder\$($package.PackageFamilyName)!$($application.Id)"
+  return @{ ok = $true; started = $true }
+}
+
+# Brings the app's windows that do not show on screen above the others without activating
+# them (topmost on, then off), so the app updates their pages. Each comes with the window it
+# was below, to put it back with Lower: the first one above it of another process, as the
+# app's own windows above it (owned ones, such as its input method window) move along with
+# it. The user's active window keeps the focus.
+function Raise {
+  $flags = 0x0001 -bor 0x0002 -bor 0x0010
+  $app = @(Get-Process -Name ChatGPT -ErrorAction SilentlyContinue | ForEach-Object Id)
+  $raised = @(foreach ($window in AppWindows) {
+    $handle = [IntPtr]$window.Current.NativeWindowHandle
+    if ([Acb.Screen]::Shows($handle)) { continue }
+    $after = [Acb.Win32]::GetWindow($handle, 3)
+    while ($after -ne [IntPtr]::Zero) {
+      [uint32]$owner = 0
+      [void][Acb.Win32]::GetWindowThreadProcessId($after, [ref]$owner)
+      if ($app -notcontains [int]$owner) { break }
+      $after = [Acb.Win32]::GetWindow($after, 3)
+    }
+    # Below no other window: it is put back at the top, where it already is.
+    if ($after -eq [IntPtr]::Zero) { continue }
+    [void][Acb.Win32]::SetWindowPos($handle, [IntPtr](-1), 0, 0, 0, 0, $flags)
+    [void][Acb.Win32]::SetWindowPos($handle, [IntPtr](-2), 0, 0, 0, 0, $flags)
+    @{ window = $handle.ToInt64(); after = $after.ToInt64() }
+  })
+  return @{ ok = $true; raised = $raised }
+}
+
+function Lower($request) {
+  $flags = 0x0001 -bor 0x0002 -bor 0x0010
+  foreach ($entry in @($request.raised)) {
+    $window = [IntPtr][long]$entry.window
+    $after = [IntPtr][long]$entry.after
+    if ([Acb.Win32]::IsWindow($window) -and [Acb.Win32]::IsWindow($after)) {
+      [void][Acb.Win32]::SetWindowPos($window, $after, 0, 0, 0, 0, $flags)
+    }
+  }
+  return @{ ok = $true }
+}
+
 function Visit($page, $element, $path) {
   $cached = $element.Cached
   $type = $cached.ControlType
   $label = $type -eq [Windows.Automation.ControlType]::Text -and $cached.ClassName -match '(^| )sr-only( |$)'
   if ($label -or $type -eq [Windows.Automation.ControlType]::Button) {
     EndText $page
-    if ($cached.Name) { $page.nodes.Add(@{ type = $type.ProgrammaticName.Substring(12); name = $cached.Name; label = $label }) }
+    if ($cached.Name) {
+      $node = @{ type = $type.ProgrammaticName.Substring(12); name = $cached.Name; label = $label }
+      # A heading keeps its runtime ID while its message stays on the page, also as it scrolls.
+      if ($label) { $node.id = @($element.GetCachedPropertyValue($Element::RuntimeIdProperty)) -join '.' }
+      $page.nodes.Add($node)
+    }
     return
   }
   $children = $element.CachedChildren
@@ -360,6 +446,10 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
       'give-back' { GiveBack $request }
       'transcript' { Transcript $request }
       'compose' { Compose $request }
+      'launch' { Launch }
+      'raise' { Raise }
+      'lower' { Lower $request }
+      'scroll' { Scroll $request }
       default { Fail 'INPUT' "Unknown operation: $($request.op)" }
     }
   } catch {

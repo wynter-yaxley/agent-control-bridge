@@ -19,7 +19,7 @@
 一个 MCP Server，让 AI agent 使用你电脑上 **ChatGPT 桌面应用** 里的 ChatGPT 对话和 Codex 对话：列出、读取、新建对话，发一条消息并拿回回复。
 
 - **对话就在应用里**：消息由桌面应用自己执行，你在应用侧栏里能实时看到每一个对话和它的进度。
-- **几乎不打扰你**：只有「新建 ChatGPT 对话」会把 ChatGPT 窗口短暂切到前台，发出消息后立即把前台还给你；ACB 从不模拟键盘和鼠标。
+- **几乎不打扰你**：只有「新建 ChatGPT 对话」会把 ChatGPT 窗口短暂切到前台，发出消息后立即把前台还给你（读历史时如果应用没开，启动应用那一下也会，同样马上交还）；ACB 从不模拟键盘和鼠标。
 - **一个工具只做一件事**：读取、新建、发送彼此独立，按需组合。
 - **不会重复发送**：同一条消息超时后再调用，只会取回回复，不会再发一次。
 
@@ -42,6 +42,7 @@ flowchart LR
 | `acb_codex_send` | 给 Codex 对话发消息，等它做完并返回回复 |
 | `acb_gpt_list` | 列出最近的 ChatGPT 对话 |
 | `acb_gpt_read` | 读取 ChatGPT 对话最近几轮的提问和回复 |
+| `acb_gpt_history` | 从页面读取 ChatGPT 对话更早的轮次和完整回复正文，可以一直读到对话开头 |
 | `acb_gpt_create` | 新建 ChatGPT 对话，发出第一条消息并返回回复 |
 | `acb_gpt_send` | 给 ChatGPT 对话发消息并返回回复 |
 | `acb_projects` | 列出应用里的项目 |
@@ -56,6 +57,7 @@ flowchart LR
 | `acb_gpt_send` | 否：消息在后台发出 | 是：发送前打开该对话，从页面读取回复正文 |
 | `acb_gpt_read` 带 `page: true` | 否 | 是：打开该对话读取回复正文 |
 | `acb_open` | 否 | 是 |
+| `acb_gpt_history` | 通常否。只有应用没在运行时，ACB 会先启动它，应用窗口打开时会切到前台，ACB 随后把前台还给你。窗口被其他窗口完全挡住时，ACB 会把它临时提到最上层（不激活、不抢键盘焦点），读完放回原来的位置 | 是：打开该对话，并把页面上下滚动着读，读完滚回底部 |
 | **`acb_gpt_create`** | **会，持续一两秒**：应用打开新聊天时会把 ChatGPT 窗口切到前台，ACB 发出消息后立即把前台还给你原来的窗口。ACB 不发送任何按键，但这一两秒内你按的键可能会落进 ChatGPT 的输入框 | 是 |
 
 - 应用切换页面时偶尔也会把窗口切到前台。遇到这种情况，ACB 会立即把前台还给你原来的窗口；如果你已经切到了别的程序，ACB 不会去动它。
@@ -125,6 +127,7 @@ hermes mcp add acb --command "C:\Program Files\nodejs\node.exe" --args "D:\agent
 - **速度**：应用要在 ChatGPT 回复结束后最多一分钟才把这一轮记进对话记录。窗口可见时，`acb_gpt_send` 在页面上看到回复写完就返回（通常十几秒），这一轮的 `turnId` 暂时是 `null`；在应用记下它之前，同一个 ACB 进程里的 `acb_gpt_read` 会把它作为最新一轮返回。窗口看不到时，ACB 等应用记下这一轮，约一分钟。`acb_gpt_create` 总要等应用列出新对话，约一分钟。
 - ChatGPT 窗口被完全挡住或最小化很久之后，应用会降低后台页面的活跃度，发送可能要等一分钟左右才真正发出。
 - 新建 ChatGPT 对话时，如果新聊天页面的输入框里有你没发出的草稿，ACB 会拒绝，不会覆盖它。
+- **读历史**：应用只返回最近 5 轮，而且回复多半只有占位符。`acb_gpt_history` 改为直接从页面读取：一段段往上滚动，按页面元素的 ID 把各段拼接起来，内容相同的轮次也不会混淆。页面滚到顶时会再加载更早的消息，ACB 会等它加载，直到对话开头。速度大约是 10 轮十几秒、50 轮半分钟到一分钟。返回的是页面上显示的文字：你手打的 Markdown 会是渲染后的样子，没有轮次 ID。如果你不在电脑前，应用没开时它会先启动应用；窗口被挡住时会临时把窗口提上来。屏幕需要保持解锁、显示器保持开启，因为锁屏或熄屏时应用不更新页面。
 
 **通用**
 
@@ -177,7 +180,8 @@ npm run smoke                               # 真机验收：会在应用里真�
 | `src/conversation.ts` | 发送、去重、等待回复 |
 | `src/turns.ts` | 把应用的对话记录整理成提问和回复 |
 | `src/codex.ts`、`src/chatgpt.ts` | 两类对话各自的操作 |
-| `src/helper.ts`、`src/helper.ps1` | Windows 辅助进程：核对管道服务端、读取 ChatGPT 页面、新建 ChatGPT 对话 |
+| `src/history.ts` | 从 ChatGPT 页面滚动读取历史轮次 |
+| `src/helper.ts`、`src/helper.ps1` | Windows 辅助进程：核对管道服务端、读取和滚动 ChatGPT 页面、新建 ChatGPT 对话、启动应用、提升窗口 |
 
 开发规则见 [AGENTS.md](AGENTS.md) 和 [CONTRIBUTING.md](CONTRIBUTING.md)，变更记录见 [CHANGELOG.md](CHANGELOG.md)。
 

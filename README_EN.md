@@ -19,7 +19,7 @@ List · Read · Start · Send · Hardly in your way
 An MCP server that lets AI agents use the ChatGPT and Codex conversations of the **ChatGPT desktop app** on your computer: list, read and start conversations, send a message and get the reply.
 
 - **Conversations stay in the app**: the desktop app runs every message itself, so you see each conversation and its progress live in the sidebar.
-- **Hardly in your way**: only "start a ChatGPT conversation" brings the ChatGPT window to the front, briefly, and ACB hands the foreground back as soon as the message is sent; ACB never simulates keyboard or mouse input.
+- **Hardly in your way**: only "start a ChatGPT conversation" brings the ChatGPT window to the front, briefly, and ACB hands the foreground back as soon as the message is sent (so does starting the app when reading history needs it, and the foreground is handed back the same way); ACB never simulates keyboard or mouse input.
 - **One tool, one job**: reading, starting and sending are independent and combine as needed.
 - **No duplicate messages**: calling again with the same message after a timeout returns the reply instead of sending it twice.
 
@@ -42,6 +42,7 @@ flowchart LR
 | `acb_codex_send` | Message a Codex conversation, wait until it is done and return the reply |
 | `acb_gpt_list` | List recent ChatGPT conversations |
 | `acb_gpt_read` | Read the prompts and replies of a ChatGPT conversation's newest turns |
+| `acb_gpt_history` | Read earlier turns of a ChatGPT conversation, with their whole replies, from its page, back to its start |
 | `acb_gpt_create` | Start a ChatGPT conversation with a first message and return the reply |
 | `acb_gpt_send` | Message a ChatGPT conversation and return the reply |
 | `acb_projects` | List the app's projects |
@@ -56,6 +57,7 @@ flowchart LR
 | `acb_gpt_send` | No: the message is sent in the background | Yes: before sending, the conversation is shown to read the reply text |
 | `acb_gpt_read` with `page: true` | No | Yes: the conversation is shown to read the reply text |
 | `acb_open` | No | Yes |
+| `acb_gpt_history` | Usually no. Only when the app does not run does ACB start it; its window comes to the front as it opens, and ACB gives the foreground back. When the window is fully covered, ACB brings it above the others for the time it reads (without activating it or taking keyboard focus) and puts it back afterwards | Yes: the conversation is shown and its page scrolled through, then scrolled back to the end |
 | **`acb_gpt_create`** | **Yes, for a second or two**: the app activates the ChatGPT window when it opens a new chat; ACB gives the foreground back to your window as soon as the message is sent. ACB sends no keystrokes, but keys you press during those seconds can land in ChatGPT's composer | Yes |
 
 - The app occasionally brings its window to the front when it switches pages. ACB then gives the foreground back to your window at once; if you have switched to another program yourself, ACB leaves it alone.
@@ -125,6 +127,7 @@ A send waits up to 240 seconds by default. Set the client's tool timeout to 300 
 - **Speed**: the app records a ChatGPT turn up to a minute after the reply ends. With the window visible, `acb_gpt_send` returns as soon as the page shows the finished reply (usually within 10-20 seconds), with `turnId: null` for now; until the app records the turn, `acb_gpt_read` in the same ACB process returns it as the newest turn. Without a visible window, ACB waits for the app to record it, about a minute. `acb_gpt_create` always waits for the app to list the new conversation, about a minute.
 - After the ChatGPT window has been fully covered or minimized for a long time, the app slows down its background page, and a message can take about a minute to go out.
 - If the new-chat page holds a draft you have not sent, starting a ChatGPT conversation is refused rather than overwriting it.
+- **Reading history**: the app returns only the newest five turns, and mostly placeholders for replies. `acb_gpt_history` reads the page instead: it scrolls up step by step and joins the steps by the page elements' IDs, so equal turns are not confused. At its top the page loads older messages; ACB waits for them, back to the start of the conversation. It takes about ten-odd seconds for 10 turns and half a minute to a minute for 50. Texts are as the page shows them (Markdown you typed comes out rendered) and turns carry no IDs. For when you are away, it starts the app if it does not run and brings a covered window up while it reads. The screen must stay unlocked and the display on: the app does not update the page otherwise.
 
 **In general**
 
@@ -177,7 +180,8 @@ npm run smoke                               # acceptance run: really starts conv
 | `src/conversation.ts` | Sending, duplicate check, waiting for the reply |
 | `src/turns.ts` | Turns the app's records into prompts and replies |
 | `src/codex.ts`, `src/chatgpt.ts` | Operations of each kind of conversation |
-| `src/helper.ts`, `src/helper.ps1` | Windows helper: checking the pipe's server, reading the ChatGPT page, starting ChatGPT conversations |
+| `src/history.ts` | Reading earlier turns from the ChatGPT page by scrolling it |
+| `src/helper.ts`, `src/helper.ps1` | Windows helper: checking the pipe's server, reading and scrolling the ChatGPT page, starting ChatGPT conversations, starting the app, raising its window |
 
 See [AGENTS.md](AGENTS.md) and [CONTRIBUTING.md](CONTRIBUTING.md) for development rules and [CHANGELOG.md](CHANGELOG.md) for changes.
 

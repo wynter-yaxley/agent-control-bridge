@@ -77,6 +77,11 @@ if (values.scope !== 'codex') {
   await expect('gpt-send reply', sent.turn.reply?.trim() === 'ACB_GPT_OK');
   const read = await call('gpt-read', 'acb_gpt_read', { conversationId: created.conversationId, turns: 2, page: true });
   await expect('gpt-read shows the reply', read.turns.at(-1).reply?.trim() === 'ACB_GPT_OK');
+  const history = await call('gpt-history', 'acb_gpt_history', { conversationId: created.conversationId, turns: 5 });
+  await expect(
+    'gpt-history reads both turns from the page',
+    history.more === false && history.turns.map((turn) => turn.reply?.trim()).join() === 'ACB_GPT_READY,ACB_GPT_OK',
+  );
 }
 
 console.log(`ACCEPTANCE_DONE scope=${values.scope}`);

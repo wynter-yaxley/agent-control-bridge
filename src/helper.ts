@@ -12,6 +12,8 @@ export interface PageNode {
   name: string;
   /** A screen-reader-only role heading such as "你说：", not message text. */
   label?: boolean;
+  /** A heading's UI Automation runtime ID: the same while its message stays on the page. */
+  id?: string;
 }
 
 /** What the ChatGPT page shows of a conversation. */
@@ -20,6 +22,20 @@ export interface PageState extends PageMessages {
   busy: boolean;
   /** The page is scrolled to the end, so its last messages are the conversation's newest. */
   atEnd: boolean;
+  /** Where the conversation is scrolled to; null when it fits, so it does not scroll. */
+  scroll: Scroll | null;
+  /** The messages the page holds, oldest first. */
+  messages: PageMessage[];
+}
+
+/** A message the page holds. */
+export interface PageMessage {
+  /** The runtime ID of its heading, which tells it apart from an equal message. */
+  id: string | null;
+  role: 'you' | 'assistant';
+  text: string;
+  /** For a reply, its action buttons are shown, so it is finished. */
+  complete: boolean;
 }
 
 export interface PageMessages {
@@ -57,26 +73,38 @@ const REQUEST_TIMEOUT_MS = 30_000;
 /** How long a reply may take to show on the page. */
 export const READ_TIMEOUT_MS = 20_000;
 
+/**
+ * The messages on the page, oldest first. A user message runs to the next heading; a reply
+ * runs to its action buttons, which show once it is finished, or to the next role heading.
+ */
+export function readMessages(nodes: PageNode[]): PageMessage[] {
+  const role = (node: PageNode | undefined) => {
+    if (node?.type !== 'Text' || node.label !== true) return null;
+    if (LABELS.you.includes(node.name)) return 'you';
+    return LABELS.assistant.includes(node.name) ? 'assistant' : null;
+  };
+  const finished = (node: PageNode | undefined) => node?.type === 'Button' && node.name === LABELS.finished;
+  return nodes.flatMap((node, start): PageMessage[] => {
+    const kind = role(node);
+    if (!kind) return [];
+    let end = start + 1;
+    const last = (next: PageNode) => (kind === 'you' ? next.label === true : role(next) !== null || finished(next));
+    while (end < nodes.length && !last(nodes[end])) end++;
+    const text = textOf(nodes.slice(start + 1, end).filter((next) => next.type === 'Text' && !next.label));
+    return [{ id: node.id ?? null, role: kind, text, complete: kind === 'you' || finished(nodes[end]) }];
+  });
+}
+
 /** The user messages on the page and the ChatGPT reply after the last one. */
 export function readPage(nodes: PageNode[]): PageMessages {
-  const heading = (node: PageNode, names: string[]) =>
-    node.type === 'Text' && node.label === true && names.includes(node.name);
-  const starts = nodes.flatMap((node, index) => (heading(node, LABELS.you) ? [index] : []));
-  /** The message text after the heading at `start`, up to the next heading. */
-  const message = (start: number) => {
-    const end = nodes.findIndex((node, index) => index > start && node.label === true);
-    return textOf(nodes.slice(start + 1, end < 0 ? nodes.length : end).filter((node) => node.type === 'Text'));
+  const messages = readMessages(nodes);
+  const last = messages.findLastIndex((message) => message.role === 'you');
+  const reply = last < 0 ? undefined : messages.slice(last + 1).find((message) => message.role === 'assistant');
+  return {
+    prompts: messages.flatMap((message) => (message.role === 'you' ? [message.text] : [])),
+    reply: reply?.text ?? '',
+    complete: reply?.complete ?? false,
   };
-  const prompts = starts.map(message);
-  const you = starts.at(-1);
-  const assistant = nodes.findIndex(
-    (node, index) => you !== undefined && index > you && heading(node, LABELS.assistant),
-  );
-  if (assistant < 0) return { prompts, reply: '', complete: false };
-  const rest = nodes.slice(assistant + 1);
-  const finished = rest.findIndex((node) => node.type === 'Button' && node.name === LABELS.finished);
-  const reply = (finished < 0 ? rest : rest.slice(0, finished)).filter((node) => node.type === 'Text' && !node.label);
-  return { prompts, reply: textOf(reply), complete: finished >= 0 };
 }
 
 function textOf(nodes: PageNode[]): string {
@@ -203,9 +231,11 @@ export class WindowsHelper {
     for (;;) {
       const page = await this.#request({ op: 'transcript', title });
       if (page.found) {
+        const scroll = (page.scroll as Scroll | null) ?? null;
+        const nodes = page.nodes as PageNode[];
         // Without the conversation's frame, where it is scrolled to is unknown.
-        const end = page.framed === true && atEnd((page.scroll as Scroll | null) ?? null);
-        return { busy: page.busy === true, atEnd: end, ...readPage(page.nodes as PageNode[]) };
+        const end = page.framed === true && atEnd(scroll);
+        return { busy: page.busy === true, atEnd: end, scroll, messages: readMessages(nodes), ...readPage(nodes) };
       }
       if (Date.now() >= until) return null;
       await delay(300);
@@ -228,6 +258,27 @@ export class WindowsHelper {
       if (Date.now() >= deadline) throw new AcbError('WINDOW', missing(state, prompts));
       await delay(500);
     }
+  }
+
+  /** Starts the desktop app unless it runs; whether it was started. */
+  async launch(): Promise<boolean> {
+    return (await this.#request({ op: 'launch' })).started === true;
+  }
+
+  /**
+   * Brings the app's windows that do not show on screen above the others without activating
+   * them, so their pages update, and returns a function that puts them back.
+   */
+  async raise(): Promise<() => Promise<void>> {
+    const { raised } = await this.#request({ op: 'raise' });
+    return async () => {
+      if (Array.isArray(raised) && raised.length) await this.#request({ op: 'lower', raised });
+    };
+  }
+
+  /** Scrolls the conversation shown under `title` to `percent` of its height; false when no window shows it. */
+  async scroll(title: string, percent: number): Promise<boolean> {
+    return (await this.#request({ op: 'scroll', title, percent })).found === true;
   }
 
   /** Opens a new chat in the ChatGPT-mode window and sends `prompt`. */

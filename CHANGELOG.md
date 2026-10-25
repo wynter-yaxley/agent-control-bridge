@@ -2,7 +2,12 @@
 
 Versions follow Semantic Versioning. Desktop behavior is verified manually on Windows (`npm run smoke`); unit tests use mocks.
 
-## 0.6.1 (Unreleased)
+## 0.7.0 (Unreleased)
+
+- New `acb_gpt_history { conversationId, turns?, skip? }`: earlier turns of a ChatGPT conversation with their whole reply text, read from its page, back to its start; `more` tells whether older turns exist. The app returns only the newest five ChatGPT turns, mostly with placeholders for the replies. The page holds only the messages near what it shows and loads older ones at its top, so ACB scrolls it up step by step (UI Automation ScrollPattern, no input) and joins the steps by the runtime IDs of the messages' headings, so equal turns are not confused; it waits for the page to load older messages before taking its top for the start. For when the user is away, it starts the app if it does not run (through the shell, by the app's user model ID; the foreground it takes is given back), and brings a window that does not show on screen above the others without activating it, putting it back afterwards. About 40 seconds for 50 turns.
+- The Windows helper sets per-monitor DPI awareness itself instead of relying on UI Automation to make it DPI-aware, so screen and window bounds are in physical pixels on every monitor.
+
+## 0.6.1
 
 - **Faster ChatGPT replies**: the app records a ChatGPT turn up to a minute after it ends (it caches conversations for a minute, and none of its tools refreshes them). `acb_gpt_send` now shows the conversation before sending and returns as soon as the page's user messages end with those it showed before plus the new one and the reply is finished: about 10-20 seconds instead of 60-90. (The page holds only the messages near what it shows, five or more, so it is compared on those, and on two at least, and only while it is scrolled to the end.) Such a turn has `turnId: null`; until the app records it, `acb_gpt_read` in the same process returns it, and sending the same prompt again returns it without waiting. Without a usable page, the app's list is still awaited.
 - Page text follows the page's structure: a reply being written is one UI Automation element per word, which used to come out one word per line. The page is now fetched as one cached batch of its raw tree, and its text is joined within paragraphs, list items and code lines, with line breaks between them and list markers kept (a read takes 150-400 ms).

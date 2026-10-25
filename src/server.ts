@@ -5,6 +5,7 @@ import { createGpt, listGpt, type Page, readGpt, sendGpt } from './chatgpt.ts';
 import { createCodex, listCodex, readCodex, sendCodex } from './codex.ts';
 import { type App, UUID } from './desktop.ts';
 import { toAcbError } from './errors.ts';
+import { readHistory } from './history.ts';
 
 export interface Services {
   app: App;
@@ -17,7 +18,8 @@ export interface Services {
 const INSTRUCTIONS = `Tools for the ChatGPT desktop app on this computer: list, read, create and message ChatGPT and Codex conversations.
 Messages run inside the app, so the user sees them live. Listing and reading never send anything.
 Sending a prompt that is already the newest message of the conversation does not send it again: repeat a timed-out send to collect its reply.
-Only acb_gpt_create brings the ChatGPT window to the front; reading a ChatGPT reply from the page and acb_open switch the page the app shows.`;
+Only acb_gpt_create brings the ChatGPT window to the front; reading a ChatGPT reply from the page and acb_open switch the page the app shows.
+acb_gpt_history reads older ChatGPT turns from the page: it may start the app and brings its window above the others (without activating it) while it reads.`;
 
 const id = (what: string) => z.string().regex(UUID, `Expected a ${what} ID`).describe(`${what} ID`);
 // The app reads back at most 20,000 characters of a message; ACB must read its own prompts back whole.
@@ -171,6 +173,30 @@ export function createServer({ app, page, version, timeoutMs }: Services): McpSe
       annotations: READ,
     },
     (args) => answer(() => readGpt(app, page, args.conversationId, { ...args, fromPage: args.page })),
+  );
+
+  server.registerTool(
+    'acb_gpt_history',
+    {
+      description:
+        'Read earlier turns of a ChatGPT conversation with their whole reply text, from its page: the newest `turns` after skipping the newest `skip`, oldest first, and whether older ones exist (more). For what acb_gpt_read cannot show: the app lists only the newest five turns and keeps most replies only on the page. Starts the desktop app if it does not run, brings its window above the others while reading (without activating it), scrolls the page and restores both. Turns read from the page carry no IDs.',
+      inputSchema: {
+        conversationId: id('ChatGPT conversation'),
+        turns: z.number().int().min(1).max(50).optional().describe('Turns to return (1-50, default 10)'),
+        skip: z
+          .number()
+          .int()
+          .min(0)
+          .max(1000)
+          .optional()
+          .describe('Newest turns to skip, to read further back (default 0)'),
+      },
+      annotations: READ,
+    },
+    (args) =>
+      answer(() =>
+        readHistory(app, page, args.conversationId, { turns: args.turns ?? 10, skip: args.skip ?? 0 }, deadline()),
+      ),
   );
 
   server.registerTool(

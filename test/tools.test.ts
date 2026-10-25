@@ -36,6 +36,9 @@ function fakePage(app: FakeApp, reply = 'reply from the page'): FakePage {
     view: () => null,
     run: (task) => queue.run(task),
     holdForeground: async () => async () => {},
+    launch: async () => false,
+    raise: async () => async () => {},
+    scroll: async () => true,
     async pageState() {
       return this.view();
     },
@@ -212,6 +215,8 @@ test('a page is not read when the prompts repeat, as an older state of it would 
 const showing = (prompts: string[], reply = 'Earlier reply'): PageState => ({
   busy: false,
   atEnd: true,
+  scroll: null,
+  messages: [],
   prompts,
   reply,
   complete: true,

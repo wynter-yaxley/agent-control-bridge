@@ -13,6 +13,9 @@ async function connect(app = new FakeApp(), queued: string[] = []) {
     },
     holdForeground: async () => async () => {},
     pageState: async () => null,
+    launch: async () => false,
+    raise: async () => async () => {},
+    scroll: async () => true,
     readReply: async () => '',
     startChat: async () => {},
   };
@@ -34,6 +37,7 @@ test('the server offers one tool per operation, with read-only ones marked', asy
     'acb_codex_read',
     'acb_codex_send',
     'acb_gpt_create',
+    'acb_gpt_history',
     'acb_gpt_list',
     'acb_gpt_read',
     'acb_gpt_send',
@@ -45,6 +49,7 @@ test('the server offers one tool per operation, with read-only ones marked', asy
   assert.deepEqual(readOnly.sort(), [
     'acb_codex_list',
     'acb_codex_read',
+    'acb_gpt_history',
     'acb_gpt_list',
     'acb_gpt_read',
     'acb_projects',
