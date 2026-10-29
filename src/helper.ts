@@ -49,6 +49,44 @@ export interface PageMessages {
   complete: boolean;
 }
 
+/** The approval card Codex shows while it waits for the user, as the Windows helper reads it. */
+export interface ApprovalCard {
+  /** Its title, then its question, one line break between blocks. */
+  text: string;
+  buttons: { name: string; className: string; usable: boolean }[];
+}
+
+export interface Approval {
+  /** The card's title, e.g. 请求权限. */
+  title: string;
+  question: string;
+  buttons: { name: string; kind: 'deny' | 'allow' | 'other'; className: string }[];
+  /**
+   * The button that allows the least, for the user's default of allowing: 允许一次 when the
+   * card has it, else its primary allow button; never a broader one such as 始终允许.
+   */
+  defaultButton: string | null;
+}
+
+/**
+ * The approval of a card. A deny button shares its class with the other secondary buttons
+ * (始终允许), so it is told by its name; the primary button, by its class, allows.
+ */
+export function approvalOf(card: ApprovalCard): Approval {
+  const [title, ...question] = card.text.split('\n');
+  const buttons = card.buttons
+    .filter((button) => button.usable)
+    .map(({ name, className }): Approval['buttons'][number] => ({
+      name,
+      kind: name === LABELS.deny ? 'deny' : /(^| )bg-primary-solid( |$)/.test(className) ? 'allow' : 'other',
+      className,
+    }));
+  const allow =
+    buttons.find((button) => button.name === LABELS.allowOnce) ??
+    buttons.find((button) => button.kind === 'allow' && button.name !== LABELS.allowAlways);
+  return { title, question: question.join('\n'), buttons, defaultButton: allow?.name ?? null };
+}
+
 /** A vertical scroll position: how far down, and how much of the height shows (percent). */
 export interface Scroll {
   percent: number;
@@ -70,7 +108,14 @@ export function atEnd(scroll: Scroll | null): boolean {
 }
 
 /** Page labels of the Simplified Chinese app. */
-const LABELS = { you: ['你说：', '您说：'], assistant: ['ChatGPT 说：'], finished: '更多操作' };
+const LABELS = {
+  you: ['你说：', '您说：'],
+  assistant: ['ChatGPT 说：'],
+  finished: '更多操作',
+  deny: '拒绝',
+  allowOnce: '允许一次',
+  allowAlways: '始终允许',
+};
 const REQUEST_TIMEOUT_MS = 30_000;
 /** How long a reply may take to show on the page. */
 export const READ_TIMEOUT_MS = 20_000;
@@ -306,6 +351,25 @@ export class WindowsHelper {
   /** Scrolls the conversation shown under `title` to `percent` of its height; false when no window shows it. */
   async scroll(title: string, percent: number): Promise<boolean> {
     return (await this.#request({ op: 'scroll', title, percent })).found === true;
+  }
+
+  /**
+   * The approval card of the conversation shown under `title`, once the page shows one within
+   * `waitMs`: null when it shows none by then, undefined when no window shows the page.
+   */
+  async approval(title: string, waitMs = 0): Promise<ApprovalCard | null | undefined> {
+    const until = Date.now() + waitMs;
+    for (;;) {
+      const { found, card } = await this.#request({ op: 'approval', title });
+      if (found && card) return card as ApprovalCard;
+      if (Date.now() >= until) return found ? null : undefined;
+      await delay(150);
+    }
+  }
+
+  /** Presses button `name` on the approval card under `title`, if the card still reads `text`. */
+  async press(title: string, text: string, name: string): Promise<void> {
+    await this.#request({ op: 'press', title, text, name });
   }
 
   /** Opens a new chat in the ChatGPT-mode window and sends `prompt`. */

@@ -19,6 +19,8 @@ async function connect(app = new FakeApp(), queued: string[] = []) {
     reveal: async () => true,
     readReply: async () => '',
     startChat: async () => {},
+    approval: async () => null,
+    press: async () => {},
   };
   const server = createServer({ app, page, version: '0.0.0', timeoutMs: 1000 });
   const client = new Client({ name: 'test', version: '0' });
@@ -33,6 +35,8 @@ const text = (result: Awaited<ReturnType<Client['callTool']>>) =>
 test('the server offers one tool per operation, with read-only ones marked', async () => {
   const { tools } = await (await connect()).listTools();
   assert.deepEqual(tools.map((tool) => tool.name).sort(), [
+    'acb_codex_approval',
+    'acb_codex_approval_answer',
     'acb_codex_create',
     'acb_codex_list',
     'acb_codex_read',
@@ -48,6 +52,7 @@ test('the server offers one tool per operation, with read-only ones marked', asy
   ]);
   const readOnly = tools.filter((tool) => tool.annotations?.readOnlyHint).map((tool) => tool.name);
   assert.deepEqual(readOnly.sort(), [
+    'acb_codex_approval',
     'acb_codex_list',
     'acb_codex_read',
     'acb_gpt_history',

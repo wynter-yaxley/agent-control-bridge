@@ -20,7 +20,11 @@ export type ErrorCode =
   /** The ChatGPT window could not be found, read or used. */
   | 'WINDOW'
   /** The app answered in an unexpected way, usually after an app update. */
-  | 'PROTOCOL';
+  | 'PROTOCOL'
+  /** Answering an approval needs confirm: true: the user's choice, or the default allow they agreed to. */
+  | 'UNCONFIRMED'
+  /** The conversation shows no approval card with this question and button. Read it again. */
+  | 'NO_APPROVAL';
 
 export class AcbError extends Error {
   readonly code: ErrorCode;

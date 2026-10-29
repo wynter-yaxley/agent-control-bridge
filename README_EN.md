@@ -40,6 +40,8 @@ flowchart LR
 | `acb_codex_read` | Read the prompts and replies of a Codex conversation's newest turns |
 | `acb_codex_create` | Start a Codex conversation (in a project or a new folder) with a first message |
 | `acb_codex_send` | Message a Codex conversation, wait until it is done and return the reply |
+| `acb_codex_approval` | Read what Codex waits for you to approve: the approval card's title, question, buttons and default button |
+| `acb_codex_approval_answer` | Press one button of the approval card: by default the allow button, or the one you chose (needs `confirm: true`) |
 | `acb_gpt_list` | List recent ChatGPT conversations |
 | `acb_gpt_read` | Read the prompts and replies of a ChatGPT conversation's newest turns |
 | `acb_gpt_history` | Read earlier turns of a ChatGPT conversation, with their whole replies, from its page, back to its start |
@@ -53,7 +55,8 @@ flowchart LR
 
 | Operation | Takes the foreground and keyboard focus | Switches the page the app shows |
 |---|---|---|
-| All Codex tools; listing and reading; `acb_projects`, `acb_status` | No | No |
+| Other Codex tools; listing and reading; `acb_projects`, `acb_status` | No | No |
+| `acb_codex_approval`, `acb_codex_approval_answer` | Usually no, as for `acb_gpt_history`: a window closed in the tray is opened and the foreground given back; a fully covered window is brought above the others for the read (without activating it) and put back; if the app takes the foreground when the button is pressed, ACB gives it back at once | While Codex waits for your approval, yes: the conversation is shown to read the card; otherwise neither the page nor the window is touched |
 | `acb_gpt_send` | No: the message is sent in the background | Yes: before sending, the conversation is shown to read the reply text |
 | `acb_gpt_read` with `page: true` | No | Yes: the conversation is shown to read the reply text |
 | `acb_open` | No | Yes |
@@ -113,7 +116,7 @@ A send waits up to 240 seconds by default. Set the client's tool timeout to 300 
 
 **Codex conversations**
 
-- Messages run in the app with the permissions the app has for that conversation or project. When Codex needs your approval, the tool returns `NEEDS_USER`: handle it in the app, then check the result with `acb_codex_read`.
+- Messages run in the app with the permissions the app has for that conversation or project. When Codex needs your approval, the tool returns `NEEDS_USER`. **The default is to allow**: the agent reads the approval card with `acb_codex_approval`, presses the button that allows the least (允许一次 when the card has it, else its primary allow button; never 始终允许 by default), then tells you which conversation, what it asked and what was pressed. To look first or to deny, tell the agent; it follows what you say. ACB never presses on its own: only a call with `confirm: true`, a question matching the card and a button really on it presses; otherwise it refuses (`UNCONFIRMED`, `NO_APPROVAL`). As for history, a covered window is brought up, or a window closed in the tray opened, for the read and put back afterwards; the screen must be unlocked.
 - The app shows messages sent through its tools as delegated messages: a message to an existing conversation as delegated by that conversation itself; the first message of a new conversation as delegated by the caller conversation (see below).
 - Without a project, a new conversation is created under `Documents\Codex\<date>\<folder>`.
 - Archived conversations are restored when you message them.
@@ -153,6 +156,8 @@ Ask the agent to call `acb_status` first. The `error` field of a failed result i
 | `WINDOW` | The ChatGPT window is missing, fully covered or cannot be used | Make the window visible and retry |
 | `INPUT` | An argument is invalid | Fix the argument as described |
 | `PROTOCOL` | The app answered unexpectedly, usually after an app update | Update ACB; open an issue if it persists |
+| `UNCONFIRMED` | An approval answer without `confirm: true` | Call again with `confirm: true` for the default allow or your choice |
+| `NO_APPROVAL` | The conversation shows no approval card with this question, or the card has no such button | Read it again with `acb_codex_approval` |
 
 ## Configuration
 

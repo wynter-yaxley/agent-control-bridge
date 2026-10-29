@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
+  approvalOf,
   atEnd,
   type PageNode,
   readMessages,
@@ -130,4 +131,19 @@ test('a page counts as at its end only within a small part of a screen from it',
   // 200,000 pixels of history, 800 showing, 1,500 above the end: 99.25 percent down.
   assert.ok(!atEnd({ percent: 99.25, view: 0.4 }));
   assert.ok(!atEnd({ percent: 50, view: 50 }));
+});
+
+test('the default answer to an approval is the button that allows the least', () => {
+  const button = (name: string, primary = false) => ({
+    name,
+    className: `border ${primary ? 'bg-primary-solid' : 'bg-primary-soft-alpha'} @max-md/approval-card:w-full`,
+    usable: true,
+  });
+  const card = { text: '请求权限\nRun it?', buttons: [button('拒绝'), button('始终允许'), button('允许一次', true)] };
+  assert.equal(approvalOf(card).defaultButton, '允许一次');
+  const broad = { ...card, buttons: [button('拒绝'), button('允许此对话', true), button('允许一次')] };
+  assert.equal(approvalOf(broad).defaultButton, '允许一次');
+  assert.equal(approvalOf({ ...card, buttons: [button('拒绝')] }).defaultButton, null);
+  const always = { ...card, buttons: [button('拒绝'), button('始终允许', true)] };
+  assert.equal(approvalOf(always).defaultButton, null, 'never 始终允许, even as the primary button');
 });

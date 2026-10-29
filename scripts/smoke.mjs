@@ -26,6 +26,9 @@ async function call(step, tool, args = {}) {
   return value;
 }
 
+// The model may escape Markdown characters in a reply (ACB\_GPT\_OK).
+const plain = (text) => text?.replace(/\\([\\`*_{}[\]()#+.!-])/g, '$1').trim();
+
 async function expect(step, condition) {
   if (condition) return;
   console.log(`FAIL ${step}`);
@@ -66,7 +69,7 @@ if (values.scope !== 'codex') {
     prompt: `${name}: reply with exactly ACB_GPT_READY`,
     title: name,
   });
-  await expect('gpt-create reply', created.turn.reply?.includes('ACB_GPT_READY') && created.title === name);
+  await expect('gpt-create reply', plain(created.turn.reply)?.includes('ACB_GPT_READY') && created.title === name);
   const listed = await call('gpt-list', 'acb_gpt_list', { limit: 50 });
   await expect(
     'gpt-list contains it',
@@ -74,13 +77,13 @@ if (values.scope !== 'codex') {
   );
   const prompt = `${name}\n\nThis message has blank lines.\n\nReply with exactly ACB_GPT_OK`;
   const sent = await call('gpt-send', 'acb_gpt_send', { conversationId: created.conversationId, prompt });
-  await expect('gpt-send reply', sent.turn.reply?.trim() === 'ACB_GPT_OK');
+  await expect('gpt-send reply', plain(sent.turn.reply) === 'ACB_GPT_OK');
   const read = await call('gpt-read', 'acb_gpt_read', { conversationId: created.conversationId, turns: 2, page: true });
-  await expect('gpt-read shows the reply', read.turns.at(-1).reply?.trim() === 'ACB_GPT_OK');
+  await expect('gpt-read shows the reply', plain(read.turns.at(-1).reply) === 'ACB_GPT_OK');
   const history = await call('gpt-history', 'acb_gpt_history', { conversationId: created.conversationId, turns: 5 });
   await expect(
     'gpt-history reads both turns from the page',
-    history.more === false && history.turns.map((turn) => turn.reply?.trim()).join() === 'ACB_GPT_READY,ACB_GPT_OK',
+    history.more === false && history.turns.map((turn) => plain(turn.reply)).join() === 'ACB_GPT_READY,ACB_GPT_OK',
   );
 }
 

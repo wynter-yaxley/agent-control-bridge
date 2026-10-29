@@ -21,7 +21,17 @@ export const PLACING = 3;
 /** The page operations of WindowsHelper; tests substitute them. */
 export type Page = Pick<
   WindowsHelper,
-  'run' | 'holdForeground' | 'pageState' | 'readReply' | 'startChat' | 'launch' | 'raise' | 'scroll' | 'reveal'
+  | 'run'
+  | 'holdForeground'
+  | 'pageState'
+  | 'readReply'
+  | 'startChat'
+  | 'launch'
+  | 'raise'
+  | 'scroll'
+  | 'reveal'
+  | 'approval'
+  | 'press'
 >;
 
 /** A finished turn whose reply could not be read from the page keeps `replyOnPage` and says why. */
@@ -177,7 +187,7 @@ function pageTurn(prompt: string, reply: string): Turn {
 }
 
 /** Shows the conversation and gives the foreground back if the app took it. */
-async function show(app: App, page: Page, conversationId: string): Promise<void> {
+export async function show(app: App, page: Page, conversationId: string): Promise<void> {
   const giveBack = await page.holdForeground();
   try {
     await app.show(conversationId);
@@ -187,8 +197,19 @@ async function show(app: App, page: Page, conversationId: string): Promise<void>
 }
 
 /** Whether another ChatGPT conversation the app lists has this title, so the page cannot tell them apart. */
-export function hasNamesake(inventory: Inventory, conversationId: string, title: string): boolean {
+function hasNamesake(inventory: Inventory, conversationId: string, title: string): boolean {
   return chatgptThreads(inventory).some((thread) => thread.title === title && thread.id !== conversationId);
+}
+
+/** Refuses to read the page of a conversation that another one shares its title with. */
+export function refuseNamesake(inventory: Inventory, conversationId: string, title: string): void {
+  if (hasNamesake(inventory, conversationId, title)) {
+    throw new AcbError(
+      'WINDOW',
+      'Another ChatGPT conversation has the same title; rename one to read replies from the page',
+      { conversationId },
+    );
+  }
 }
 
 /**
@@ -303,13 +324,7 @@ async function pageReply(app: App, page: Page, conversationId: string, turn: Tur
     app.readThread(conversationId, { turns: 10 }),
     app.listThreads(),
   ]);
-  if (hasNamesake(inventory, conversationId, title)) {
-    throw new AcbError(
-      'WINDOW',
-      'Another ChatGPT conversation has the same title; rename one to read replies from the page',
-      { conversationId },
-    );
-  }
+  refuseNamesake(inventory, conversationId, title);
   if (turns[0]?.id !== turn.turnId) {
     throw new AcbError('BUSY', 'The conversation has moved on; read it again', { conversationId });
   }

@@ -1,7 +1,9 @@
+import { type Page, SHOW_MS } from './chatgpt.ts';
 import { type Sent, sendPrompt, type WaitOptions, waitForTurn } from './conversation.ts';
-import type { App, CreateTarget, ThreadSummary } from './desktop.ts';
+import type { App, CreateTarget, ThreadPage, ThreadSummary } from './desktop.ts';
 import { AcbError } from './errors.ts';
-import { type Conversation, normalize, type Turn, toConversation } from './turns.ts';
+import { type Approval, type ApprovalCard, approvalOf } from './helper.ts';
+import { type Conversation, normalize, statusOf, type Turn, toConversation } from './turns.ts';
 
 /**
  * The app returns at most 20,000 characters of a delegated message: the prompt, XML-escaped,
@@ -80,6 +82,111 @@ export async function createCodex(
     : null;
   const page = await app.readThread(threadId, { outputs: false });
   return { threadId, title: page.title, cwd: page.cwd, turn };
+}
+
+/** What a Codex conversation waits for the user to approve, if anything. */
+export type Pending = { threadId: string; status: 'none' } | ({ threadId: string; status: 'pending' } & Approval);
+
+/**
+ * The approval card Codex shows while it waits for the user. The app's tools only tell that it
+ * waits, so the card is read from the page: the conversation is shown (the window is not
+ * activated, but opened from the tray or raised above covering windows for the read). Without
+ * a wait, the page is not touched.
+ */
+export async function readApproval(app: App, page: Page, threadId: string): Promise<Pending> {
+  const read = await waiting(app, threadId);
+  if (!read) return { threadId, status: 'none' };
+  const card = await withCard(app, page, read, async (card) => card);
+  return card ? { threadId, status: 'pending', ...approvalOf(card) } : { threadId, status: 'none' };
+}
+
+/**
+ * Presses `button` on the approval card that asks `question`: the user's choice, or the default
+ * allow they agreed to. ACB does not press on its own: without `confirm`, nothing is read or
+ * pressed. The result names the card, for the agent to report to the user.
+ */
+export async function answerApproval(
+  app: App,
+  page: Page,
+  threadId: string,
+  { question, button, confirm }: { question: string; button: string; confirm: boolean },
+): Promise<{ threadId: string; pressed: string; title: string; question: string }> {
+  if (confirm !== true) {
+    throw new AcbError(
+      'UNCONFIRMED',
+      'Answering an approval needs confirm: true (the user chose this, or it is the default allow they agreed to)',
+      { threadId },
+    );
+  }
+  const read = await waiting(app, threadId);
+  if (!read) throw new AcbError('NO_APPROVAL', 'Codex is not waiting for the user in this conversation', { threadId });
+  const title = await withCard(app, page, read, async (card) => {
+    const shown = card && approvalOf(card);
+    if (!card || !shown || normalize(shown.question) !== normalize(question)) {
+      throw new AcbError('NO_APPROVAL', 'The conversation shows no approval card with this question; read it again', {
+        threadId,
+      });
+    }
+    if (!shown.buttons.some((option) => option.name === button)) {
+      throw new AcbError('NO_APPROVAL', `The approval card has no button named ${button}`, {
+        threadId,
+        buttons: shown.buttons.map((option) => option.name),
+      });
+    }
+    await page.press(read.title, card.text, button);
+    return shown.title;
+  });
+  return { threadId, pressed: button, title, question };
+}
+
+/** The Codex conversation when it waits for the user; undefined when it does not. */
+async function waiting(app: App, threadId: string): Promise<ThreadPage | undefined> {
+  const read = await app.readThread(threadId, { outputs: false });
+  if (read.kind !== 'codex') throw new AcbError('INPUT', 'This is a ChatGPT conversation, which asks for no approvals');
+  return statusOf(read) === 'needsUser' ? read : undefined;
+}
+
+/**
+ * Shows the conversation and runs `use` with the approval card its page shows (null: none).
+ * The page shows no conversation ID, so it is told by its title, which no other listed
+ * conversation may have.
+ */
+async function withCard<T>(
+  app: App,
+  page: Page,
+  read: ThreadPage,
+  use: (card: ApprovalCard | null) => Promise<T>,
+): Promise<T> {
+  const { threads } = await app.listThreads();
+  if (threads.some((thread) => thread.title === read.title && thread.id !== read.id)) {
+    throw new AcbError('WINDOW', 'Another conversation has the same title; rename one to read its approval card', {
+      threadId: read.id,
+    });
+  }
+  return page.run(async () => {
+    const giveBack = await page.holdForeground();
+    try {
+      // As for history: the card must be read while the user is away, so a window closed in
+      // the tray is opened, and a covered one raised (it is shown before the page switches).
+      if (await page.launch()) await giveBack();
+      const lower = await page.raise();
+      try {
+        await app.show(read.id);
+        await giveBack();
+        const card = await page.approval(read.title, SHOW_MS);
+        if (card === undefined) {
+          throw new AcbError('WINDOW', 'The ChatGPT window does not show the conversation on screen', {
+            threadId: read.id,
+          });
+        }
+        return await use(card);
+      } finally {
+        await lower();
+      }
+    } finally {
+      await giveBack();
+    }
+  });
 }
 
 function samePath(path: string): string {

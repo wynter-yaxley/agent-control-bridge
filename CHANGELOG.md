@@ -2,6 +2,15 @@
 
 Versions follow Semantic Versioning. Desktop behavior is verified manually on Windows (`npm run smoke`); unit tests use mocks.
 
+## 0.8.0
+
+- New `acb_codex_approval { threadId }`: what Codex waits for the user to approve, read from the approval card on the page (title, question, buttons with `kind` deny / allow / other). Without a pending approval (`status` is not `needsUser`) it returns `status: none` and does not touch the page. So that it works while the user is away, it opens a window closed in the tray and raises a covered one for the read, as `acb_gpt_history` does, and puts it back.
+- The user's default is to allow: `acb_codex_approval` returns `defaultButton`, the button that allows the least (允许一次 when the card has it, else its primary allow button, never 始终允许), and the agent presses it and then reports to the user what was approved; the user can ask to be asked first, or to deny.
+- New `acb_codex_approval_answer { threadId, question, button, confirm }`: presses one button of that card for the user and returns the card's title and question for the report. It needs `confirm: true` (else `UNCONFIRMED`, before anything is read), the card must still ask `question`, and the button must be on it, found by the card's class marker and its exact name (else `NO_APPROVAL`). Pressing uses UI Automation (InvokePattern), with no input.
+- Focus: Chromium activates its window when UI Automation scrolls its page or presses a button in it, when ACB's process may set the foreground. `acb_gpt_history` used to leave the app in front for the whole read; scrolling and pressing now give the foreground back in the same helper call.
+- Faster: a give-back that finds nothing taken waits 300 ms instead of about 450 ms, and `acb_gpt_history` no longer waits for one when the window was already open.
+- `npm run smoke` accepts replies in which the model escaped Markdown characters (`ACB\_GPT\_OK`).
+
 ## 0.7.1
 
 - `acb_gpt_history` reopens the desktop window when the app is still running in the tray. It waits up to ten seconds for a window, gives the foreground back while waiting, then raises and reads the page as before. Opening failures no longer wait for the page-read timeout.

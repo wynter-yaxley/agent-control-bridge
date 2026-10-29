@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createGpt, listGpt, type Page, readGpt, sendGpt } from '../src/chatgpt.ts';
-import { createCodex, listCodex, sendCodex } from '../src/codex.ts';
+import { answerApproval, createCodex, listCodex, readApproval, sendCodex } from '../src/codex.ts';
 import { AcbError } from '../src/errors.ts';
-import { type PageState, WindowsHelper } from '../src/helper.ts';
+import { type ApprovalCard, type PageState, WindowsHelper } from '../src/helper.ts';
 import { CODEX, FakeApp, type FakeThread, GPT, userTurn } from './fake-app.ts';
 
 /** Options waiting up to two seconds from the moment they are used. */
@@ -21,6 +21,11 @@ interface FakePage extends Page {
   chats: string[];
   /** What the page shows; by default it shows no conversation, so only the app's list counts. */
   view: () => PageState | null;
+  card: ApprovalCard | null;
+  /** The buttons pressed, with the text of the card they were pressed on. */
+  pressed: string[];
+  /** Times the window was raised and not yet put back. */
+  raised: number;
 }
 
 /**
@@ -34,10 +39,18 @@ function fakePage(app: FakeApp, reply = 'reply from the page'): FakePage {
     reads: [],
     chats: [],
     view: () => null,
+    card: null,
+    pressed: [],
+    raised: 0,
     run: (task) => queue.run(task),
     holdForeground: async () => async () => {},
     launch: async () => false,
-    raise: async () => async () => {},
+    async raise() {
+      this.raised++;
+      return async () => {
+        this.raised--;
+      };
+    },
     scroll: async () => true,
     reveal: async () => true,
     async pageState() {
@@ -47,6 +60,12 @@ function fakePage(app: FakeApp, reply = 'reply from the page'): FakePage {
       this.reads.push({ title, prompts });
       if (!app.shown.length) throw new AcbError('WINDOW', 'nothing shown');
       return reply;
+    },
+    async approval() {
+      return app.shown.length ? this.card : undefined;
+    },
+    async press(_title, text, name) {
+      this.pressed.push(`${text}: ${name}`);
     },
     async startChat(prompt) {
       this.chats.push(prompt);
@@ -483,4 +502,79 @@ test('a page scrolled up to older messages is not taken for the reply', async ()
   app.answer = 'reply to E';
   const sent = await sendGpt(app, page, GPT, 'E', { ...fast, wait: true });
   assert.equal(sent.turn?.reply, 'reply to E');
+});
+
+/** A computer-use approval card as the page shows it. */
+const CARD: ApprovalCard = {
+  text: 'Computer Use\n允许 ChatGPT 使用 Calculator？',
+  buttons: [
+    { name: '始终允许', className: 'border bg-primary-soft-alpha @max-md/approval-card:justify-center', usable: true },
+    { name: '拒绝', className: 'border bg-primary-soft-alpha @max-md/approval-card:justify-center', usable: true },
+    { name: '允许此对话', className: 'border bg-primary-solid @max-md/approval-card:justify-center', usable: true },
+  ],
+};
+const QUESTION = '允许 ChatGPT 使用 Calculator？';
+
+function waitingForApproval(app: FakeApp) {
+  return app.add({
+    id: CODEX,
+    kind: 'codex',
+    title: 'Task',
+    status: 'active',
+    activeFlags: ['waitingOnApproval'],
+    turns: [userTurn('t1', 'Use the calculator', null, 'inProgress')],
+  });
+}
+
+test('an approval card is read from the page only while Codex waits for the user', async () => {
+  const app = new FakeApp();
+  const thread = app.add({ id: CODEX, kind: 'codex', title: 'Task' });
+  const page = fakePage(app);
+  page.card = CARD;
+  assert.deepEqual(await readApproval(app, page, CODEX), { threadId: CODEX, status: 'none' });
+  assert.deepEqual(app.shown, [], 'the page is not touched');
+  Object.assign(thread, { status: 'active', activeFlags: ['waitingOnApproval'] });
+  const pending = await readApproval(app, page, CODEX);
+  assert.deepEqual(app.shown, [CODEX]);
+  assert.ok(pending.status === 'pending');
+  assert.equal(pending.title, 'Computer Use');
+  assert.equal(pending.question, QUESTION);
+  assert.deepEqual(
+    pending.buttons.map((button) => [button.name, button.kind]),
+    [
+      ['始终允许', 'other'],
+      ['拒绝', 'deny'],
+      ['允许此对话', 'allow'],
+    ],
+  );
+  assert.equal(pending.defaultButton, '允许此对话', 'without 允许一次, the primary allow button, never 始终允许');
+});
+
+test('an approval is answered only with confirm: true, on the card that asks the question', async () => {
+  const app = new FakeApp();
+  waitingForApproval(app);
+  const page = fakePage(app);
+  page.card = CARD;
+  await assert.rejects(
+    answerApproval(app, page, CODEX, { question: QUESTION, button: '拒绝', confirm: false }),
+    code('UNCONFIRMED'),
+  );
+  assert.deepEqual(app.shown, [], 'an unconfirmed answer touches nothing');
+  await assert.rejects(
+    answerApproval(app, page, CODEX, { question: '允许 ChatGPT 使用 Paint？', button: '拒绝', confirm: true }),
+    code('NO_APPROVAL'),
+  );
+  await assert.rejects(
+    answerApproval(app, page, CODEX, { question: QUESTION, button: '允许一次', confirm: true }),
+    code('NO_APPROVAL'),
+  );
+  assert.deepEqual(page.pressed, []);
+  assert.deepEqual(await answerApproval(app, page, CODEX, { question: QUESTION, button: '拒绝', confirm: true }), {
+    threadId: CODEX,
+    pressed: '拒绝',
+    title: 'Computer Use',
+    question: QUESTION,
+  });
+  assert.deepEqual(page.pressed, [`${CARD.text}: 拒绝`]);
+  assert.equal(page.raised, 0, 'a raised window is put back');
 });
