@@ -2,7 +2,15 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { type Live, type Sent, sendPrompt, unlistedAnswers, type WaitOptions, waitForTurn } from './conversation.ts';
 import type { App, AppTurn, Inventory, ThreadSummary } from './desktop.ts';
 import { AcbError } from './errors.ts';
-import { READ_TIMEOUT_MS, replyTo, samePrompt, shownAfter, showsPrompts, type WindowsHelper } from './helper.ts';
+import {
+  READ_TIMEOUT_MS,
+  replyTo,
+  retryPageRead,
+  samePrompt,
+  shownAfter,
+  showsPrompts,
+  type WindowsHelper,
+} from './helper.ts';
 import { type Conversation, normalize, opensWith, promptOf, type Turn, toConversation } from './turns.ts';
 
 /** How long the page may take to show a conversation it was asked to show. */
@@ -324,17 +332,23 @@ async function pageReply(app: App, page: Page, conversationId: string, turn: Tur
   };
   return page.run(async () => {
     const giveBack = await page.holdForeground();
+    let first = true;
     try {
-      await app.show(conversationId);
-      await giveBack();
-      await newest();
-      const left = Math.min(READ_TIMEOUT_MS, deadline - Date.now());
-      if (left < 1000) {
-        throw new AcbError('TIMEOUT', 'No time was left to read the reply from the page', { conversationId });
-      }
-      const reply = await page.readReply(title, prompts, left);
-      await newest();
-      return reply;
+      return await retryPageRead(async () => {
+        await app.show(conversationId);
+        await giveBack();
+        await newest();
+        // Leave time for one retry even when this is a read with a twenty-second budget.
+        const remaining = deadline - Date.now();
+        const left = Math.min(READ_TIMEOUT_MS, remaining, first ? Math.max(1000, remaining / 2) : remaining);
+        first = false;
+        if (left < 1000) {
+          throw new AcbError('TIMEOUT', 'No time was left to read the reply from the page', { conversationId });
+        }
+        const reply = await page.readReply(title, prompts, left);
+        await newest();
+        return reply;
+      }, deadline);
     } finally {
       // The app can take the foreground late; check once more.
       await giveBack();

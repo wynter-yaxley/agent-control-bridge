@@ -435,14 +435,26 @@ function Reveal($request) {
   return @{ ok = $true; found = $false }
 }
 
-# Starts the ChatGPT desktop app unless it runs. It is a packaged app, started the way the
-# Start menu does: through the shell, by its application user model ID.
+# Opens the ChatGPT desktop window, also when its processes keep running in the tray.
+# It is a packaged app, opened through the shell by its application user model ID.
 function Launch {
-  if (AppIds) { return @{ ok = $true; started = $false } }
+  $ids = AppIds
+  if ($ids -and [Acb.Screen]::Windows([int[]]$ids).Length) { return @{ ok = $true; started = $false } }
   $package = @(Get-AppxPackage -Name 'OpenAI.Codex')[0]
   if (-not $package) { Fail 'UNAVAILABLE' 'The ChatGPT desktop app is not installed' }
   $application = @((Get-AppxPackageManifest $package).Package.Applications.Application)[0]
-  Start-Process -FilePath (Join-Path $env:SystemRoot 'explorer.exe') -ArgumentList "shell:AppsFolder\$($package.PackageFamilyName)!$($application.Id)"
+  $foreground = Foreground
+  try {
+    Start-Process -FilePath (Join-Path $env:SystemRoot 'explorer.exe') -ArgumentList "shell:AppsFolder\$($package.PackageFamilyName)!$($application.Id)"
+    $opened = Until 10000 {
+      $null = GiveBack $foreground
+      $ids = AppIds
+      $ids -and [Acb.Screen]::Windows([int[]]$ids).Length -gt 0
+    }
+    if (-not $opened) { Fail 'WINDOW' 'The ChatGPT desktop app did not open a window in time' }
+  } finally {
+    $null = GiveBack $foreground
+  }
   return @{ ok = $true; started = $true }
 }
 

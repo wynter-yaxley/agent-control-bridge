@@ -2,7 +2,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { hasNamesake, listedPrompts, type Page, PLACING, SHOW_MS } from './chatgpt.ts';
 import type { App } from './desktop.ts';
 import { AcbError } from './errors.ts';
-import { type PageMessage, type PageState, READ_TIMEOUT_MS } from './helper.ts';
+import { type PageMessage, type PageState, READ_TIMEOUT_MS, retryPageRead } from './helper.ts';
 
 /** A turn read from the page, which shows no turn IDs. */
 export interface PageTurn {
@@ -69,15 +69,23 @@ export async function readHistory(
   }
   const scanned = await page.run(async () => {
     const giveBack = await page.holdForeground();
-    const lower = await page.raise();
     try {
-      await app.show(conversationId);
+      // The app can answer its tools while its window is closed in the tray.
+      await page.launch();
       await giveBack();
-      const end = await pageEnd(page, title, listedPrompts(read.turns), deadline);
-      return await scanUp(page, title, end, skip + turns + 1, deadline);
+      const lower = await page.raise();
+      try {
+        return await retryPageRead(async () => {
+          await app.show(conversationId);
+          await giveBack();
+          const end = await pageEnd(page, title, listedPrompts(read.turns), deadline);
+          return scanUp(page, title, end, skip + turns + 1, deadline);
+        }, deadline);
+      } finally {
+        await page.scroll(title, 100).catch(() => false);
+        await lower();
+      }
     } finally {
-      await page.scroll(title, 100).catch(() => false);
-      await lower();
       // The app can take the foreground late; check once more.
       await giveBack();
     }

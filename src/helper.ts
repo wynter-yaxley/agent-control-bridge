@@ -75,6 +75,17 @@ const REQUEST_TIMEOUT_MS = 30_000;
 /** How long a reply may take to show on the page. */
 export const READ_TIMEOUT_MS = 20_000;
 
+/** A page can be between UI updates; repeat a failed read once without changing its checks. */
+export async function retryPageRead<T>(read: () => Promise<T>, deadline: number): Promise<T> {
+  try {
+    return await read();
+  } catch (error) {
+    if (!(error instanceof AcbError && error.code === 'WINDOW') || Date.now() + 500 >= deadline) throw error;
+    await delay(500);
+    return read();
+  }
+}
+
 /**
  * The messages on the page, oldest first. A user message runs to the next heading; a reply
  * runs to its action buttons, which show once it is finished, or to the next role heading.
@@ -267,7 +278,7 @@ export class WindowsHelper {
     }
   }
 
-  /** Starts the desktop app unless it runs; whether it was started. */
+  /** Opens the desktop window if absent, including the tray state; whether it was opened. */
   async launch(): Promise<boolean> {
     return (await this.#request({ op: 'launch' })).started === true;
   }

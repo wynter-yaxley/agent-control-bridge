@@ -189,7 +189,7 @@ export function createServer({ app, page, version, timeoutMs }: Services): McpSe
     {
       title: 'Read ChatGPT history',
       description:
-        'Read earlier turns of a ChatGPT conversation with their whole reply text, from its page: the newest `turns` after skipping the newest `skip`, oldest first, and whether older ones exist (more). For what acb_gpt_read cannot show: the app lists only the newest five turns and keeps most replies only on the page. Starts the desktop app if it does not run, brings its window above the others while reading (without activating it), scrolls the page and restores both. Turns read from the page carry no IDs.',
+        'Read earlier turns of a ChatGPT conversation with their whole reply text, from its page: the newest `turns` after skipping the newest `skip`, oldest first, and whether older ones exist (more). For what acb_gpt_read cannot show: the app lists only the newest five turns and keeps most replies only on the page. Opens the desktop window if closed (also while the app runs in the tray), brings it above the others while reading (without activating it), scrolls the page and restores both. Turns read from the page carry no IDs.',
       inputSchema: {
         conversationId: id('ChatGPT conversation'),
         turns: z.number().int().min(1).max(50).optional().describe('Turns to return (1-50, default 10)'),
