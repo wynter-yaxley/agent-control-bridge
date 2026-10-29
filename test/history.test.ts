@@ -26,6 +26,7 @@ interface FakeHistoryPage extends Page {
   load(): void;
   percent: number;
   launched: number;
+  windowOpen: boolean;
   lowered: number;
   /** Times the foreground was given back. */
   givenBack: number;
@@ -69,6 +70,7 @@ function virtualPage(messages: PageMessage[], held = 8, chunk = messages.length)
       top = Math.round((percent / 100) * range());
     },
     launched: 0,
+    windowOpen: true,
     lowered: 0,
     givenBack: 0,
     loads: true,
@@ -81,6 +83,8 @@ function virtualPage(messages: PageMessage[], held = 8, chunk = messages.length)
       };
     },
     async launch() {
+      if (this.windowOpen) return false;
+      this.windowOpen = true;
       this.launched++;
       return true;
     },
@@ -309,6 +313,7 @@ test('the app is started when it cannot be reached', async () => {
   const app = new FakeApp();
   listed(app, twelve);
   const page = virtualPage(conversation(twelve));
+  page.windowOpen = false;
   const read = app.readThread.bind(app);
   app.readThread = async (...args) => {
     if (!page.launched) throw new AcbError('UNAVAILABLE', 'The ChatGPT desktop app is not running');
@@ -318,6 +323,64 @@ test('the app is started when it cannot be reached', async () => {
   assert.equal(page.launched, 1);
   assert.ok(page.givenBack >= 2, 'the foreground is given back while the app starts, not only after');
   assert.deepEqual(history.turns, [{ prompt: 'Question 11', reply: 'Answer 11' }]);
+});
+
+test('history opens the tray window even when the app tools already answer', async () => {
+  const app = new FakeApp();
+  listed(app, twelve);
+  const page = virtualPage(conversation(twelve));
+  page.windowOpen = false;
+  const show = app.show.bind(app);
+  app.show = async (id) => {
+    assert.equal(page.windowOpen, true, 'navigation waits for the window to open');
+    await show(id);
+  };
+  const history = await readHistory(app, page, GPT, { turns: 1, skip: 0 }, soon());
+  assert.equal(page.launched, 1);
+  assert.deepEqual(history.turns, [{ prompt: 'Question 11', reply: 'Answer 11' }]);
+});
+
+test('history returns a window opening failure before trying to read its page', async () => {
+  const app = new FakeApp();
+  listed(app, twelve);
+  const page = virtualPage(conversation(twelve));
+  page.launch = async () => {
+    throw new AcbError('WINDOW', 'The ChatGPT desktop app did not open a window in time');
+  };
+  await assert.rejects(readHistory(app, page, GPT, { turns: 1, skip: 0 }, soon()), code('WINDOW'));
+  assert.deepEqual(app.shown, []);
+  assert.equal(page.givenBack, 1, 'the foreground is checked even when opening fails');
+});
+
+test('history restarts a transient page read once and still restores the window', async () => {
+  const app = new FakeApp();
+  listed(app, twelve);
+  const page = virtualPage(conversation(twelve));
+  const reveal = page.reveal.bind(page);
+  let first = true;
+  page.reveal = async (...args) => {
+    if (first) {
+      first = false;
+      return false;
+    }
+    return reveal(...args);
+  };
+  const history = await readHistory(app, page, GPT, { turns: 50, skip: 0 }, soon());
+  assert.equal(history.turns.length, 12);
+  assert.deepEqual(app.shown, [GPT, GPT]);
+  assert.equal(page.lowered, 1);
+  assert.equal(page.percent, 100);
+  assert.deepEqual(app.sent, []);
+});
+
+test('history stops after a second page failure', async () => {
+  const app = new FakeApp();
+  listed(app, twelve);
+  const page = virtualPage(conversation(twelve));
+  page.reveal = async () => false;
+  await assert.rejects(readHistory(app, page, GPT, { turns: 50, skip: 0 }, soon()), code('WINDOW'));
+  assert.deepEqual(app.shown, [GPT, GPT]);
+  assert.equal(page.lowered, 1);
 });
 
 test('a page whose end does not show the turns the app lists is not read', async () => {

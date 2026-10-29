@@ -2,6 +2,12 @@
 
 Versions follow Semantic Versioning. Desktop behavior is verified manually on Windows (`npm run smoke`); unit tests use mocks.
 
+## 0.7.1
+
+- `acb_gpt_history` reopens the desktop window when the app is still running in the tray. It waits up to ten seconds for a window, gives the foreground back while waiting, then raises and reads the page as before. Opening failures no longer wait for the page-read timeout.
+- ChatGPT history and latest-reply page reads retry a `WINDOW` failure once after a short pause, within the original deadline. The retry navigates to the same conversation and keeps the existing title, prompt and turn checks; it never sends a message.
+- `acb_gpt_read` with `page: true` still needs the window visible and the page at its end; only `acb_gpt_history` opens a closed window, raises it and scrolls it.
+
 ## 0.7.0
 
 - New `acb_gpt_history { conversationId, turns?, skip? }`: earlier turns of a ChatGPT conversation with their whole reply text, read from its page, back to its start; `more` tells whether older turns exist. The app returns only the newest five ChatGPT turns, mostly with placeholders for the replies. The page holds only the messages near what it shows and loads older ones at its top, so ACB scrolls it up step by step (UI Automation ScrollPattern, no input) and joins the steps by the runtime IDs of the messages' headings, so equal turns are not confused; it waits for the page to load older messages before taking its top for the start. For when the user is away, it starts the app if it does not run (through the shell, by the app's user model ID; the foreground it takes is given back), and brings a window that does not show on screen above the others without activating it, putting it back afterwards. About 20 seconds for 50 turns. The page puts a message it renders anew on the page a moment before its reply's text, so a step is read only once every reply in it shows its text; a reply that never does (an image) is returned as `null`, never as empty text.

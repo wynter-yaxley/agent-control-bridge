@@ -157,6 +157,36 @@ test('reading from the page only touches the newest finished reply', async () =>
   assert.equal(read.turns[0].reply, 'reply from the page');
 });
 
+test('reading a page reply retries one transient window error without sending', async () => {
+  const app = new FakeApp();
+  app.add({ id: GPT, kind: 'chatgpt', turns: [userTurn('t1', 'Q', PAGE_REPLY)] });
+  const page = fakePage(app);
+  const readReply = page.readReply.bind(page);
+  let attempts = 0;
+  page.readReply = async (...args) => {
+    if (++attempts === 1) throw new AcbError('WINDOW', 'The page is updating');
+    return readReply(...args);
+  };
+  const read = await readGpt(app, page, GPT, { fromPage: true });
+  assert.equal(read.turns[0].reply, 'reply from the page');
+  assert.equal(attempts, 2);
+  assert.deepEqual(app.sent, []);
+});
+
+test('reading a page reply stops after a second window error', async () => {
+  const app = new FakeApp();
+  app.add({ id: GPT, kind: 'chatgpt', turns: [userTurn('t1', 'Q', PAGE_REPLY)] });
+  const page = fakePage(app);
+  let attempts = 0;
+  page.readReply = async () => {
+    attempts++;
+    throw new AcbError('WINDOW', 'The window stays covered');
+  };
+  await assert.rejects(readGpt(app, page, GPT, { fromPage: true }), code('WINDOW'));
+  assert.equal(attempts, 2);
+  assert.deepEqual(app.sent, []);
+});
+
 test('a new ChatGPT conversation is found by its first message and titled after its reply', async () => {
   const app = new FakeApp();
   app.add({ id: GPT, kind: 'chatgpt', title: 'Existing' });
