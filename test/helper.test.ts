@@ -144,4 +144,6 @@ test('the default answer to an approval is the button that allows the least', ()
   const broad = { ...card, buttons: [button('拒绝'), button('允许此对话', true), button('允许一次')] };
   assert.equal(approvalOf(broad).defaultButton, '允许一次');
   assert.equal(approvalOf({ ...card, buttons: [button('拒绝')] }).defaultButton, null);
+  const always = { ...card, buttons: [button('拒绝'), button('始终允许', true)] };
+  assert.equal(approvalOf(always).defaultButton, null, 'never 始终允许, even as the primary button');
 });

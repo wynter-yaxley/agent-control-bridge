@@ -82,7 +82,8 @@ export function approvalOf(card: ApprovalCard): Approval {
       className,
     }));
   const allow =
-    buttons.find((button) => button.name === LABELS.allowOnce) ?? buttons.find((button) => button.kind === 'allow');
+    buttons.find((button) => button.name === LABELS.allowOnce) ??
+    buttons.find((button) => button.kind === 'allow' && button.name !== LABELS.allowAlways);
   return { title, question: question.join('\n'), buttons, defaultButton: allow?.name ?? null };
 }
 
@@ -113,6 +114,7 @@ const LABELS = {
   finished: '更多操作',
   deny: '拒绝',
   allowOnce: '允许一次',
+  allowAlways: '始终允许',
 };
 const REQUEST_TIMEOUT_MS = 30_000;
 /** How long a reply may take to show on the page. */
