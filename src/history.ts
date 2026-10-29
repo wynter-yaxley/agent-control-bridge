@@ -1,5 +1,5 @@
 import { setTimeout as delay } from 'node:timers/promises';
-import { hasNamesake, listedPrompts, type Page, PLACING, SHOW_MS } from './chatgpt.ts';
+import { listedPrompts, type Page, PLACING, refuseNamesake, SHOW_MS } from './chatgpt.ts';
 import type { App } from './desktop.ts';
 import { AcbError } from './errors.ts';
 import { type PageMessage, type PageState, READ_TIMEOUT_MS, retryPageRead } from './helper.ts';
@@ -60,19 +60,12 @@ export async function readHistory(
   );
   if (read.kind !== 'chatgpt') throw new AcbError('INPUT', 'This is a Codex conversation: use acb_codex_read');
   const { title } = read;
-  if (hasNamesake(inventory, conversationId, title)) {
-    throw new AcbError(
-      'WINDOW',
-      'Another ChatGPT conversation has the same title; rename one to read replies from the page',
-      { conversationId },
-    );
-  }
+  refuseNamesake(inventory, conversationId, title);
   const scanned = await page.run(async () => {
     const giveBack = await page.holdForeground();
     try {
       // The app can answer its tools while its window is closed in the tray.
-      await page.launch();
-      await giveBack();
+      if (await page.launch()) await giveBack();
       const lower = await page.raise();
       try {
         return await retryPageRead(async () => {

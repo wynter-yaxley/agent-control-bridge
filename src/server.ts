@@ -1,8 +1,8 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import * as z from 'zod/v4';
-import { createGpt, listGpt, type Page, readGpt, sendGpt } from './chatgpt.ts';
-import { createCodex, listCodex, readCodex, sendCodex } from './codex.ts';
+import { createGpt, listGpt, type Page, readGpt, sendGpt, show } from './chatgpt.ts';
+import { answerApproval, createCodex, listCodex, readApproval, readCodex, sendCodex } from './codex.ts';
 import { type App, UUID } from './desktop.ts';
 import { toAcbError } from './errors.ts';
 import { readHistory } from './history.ts';
@@ -19,7 +19,8 @@ const INSTRUCTIONS = `Tools for the ChatGPT desktop app on this computer: list, 
 Messages run inside the app, so the user sees them live. Listing and reading never send anything.
 Sending a prompt that is already the newest message of the conversation does not send it again: repeat a timed-out send to collect its reply.
 Only acb_gpt_create brings the ChatGPT window to the front; reading a ChatGPT reply from the page and acb_open switch the page the app shows.
-acb_gpt_history reads older ChatGPT turns from the page: it may start the app and brings its window above the others (without activating it) while it reads.`;
+acb_gpt_history reads older ChatGPT turns from the page: it may start the app and brings its window above the others (without activating it) while it reads.
+acb_codex_approval shows what Codex waits for the user to approve. Never decide it yourself: acb_codex_approval_answer presses a button only for a choice the user has explicitly confirmed (confirm: true).`;
 
 const id = (what: string) => z.string().regex(UUID, `Expected a ${what} ID`).describe(`${what} ID`);
 // The app reads back at most 20,000 characters of a message; ACB must read its own prompts back whole.
@@ -82,14 +83,7 @@ export function createServer({ app, page, version, timeoutMs }: Services): McpSe
     },
     (args) =>
       answer(async () => {
-        await page.run(async () => {
-          const giveBack = await page.holdForeground();
-          try {
-            await app.show(args.id);
-          } finally {
-            await giveBack();
-          }
-        });
+        await page.run(() => show(app, page, args.id));
         return { shown: args.id };
       }),
   );
@@ -153,6 +147,35 @@ export function createServer({ app, page, version, timeoutMs }: Services): McpSe
       annotations: SEND,
     },
     (args) => answer(() => sendCodex(app, args.threadId, args.prompt, waiting(args.wait))),
+  );
+
+  server.registerTool(
+    'acb_codex_approval',
+    {
+      title: 'Read Codex approval',
+      description:
+        "What a Codex conversation waits for the user to approve (status needsUser): the approval card's title, question and buttons (kind deny, allow or other). status none when it waits for nothing. Reads the card from the page, so the app shows this conversation (the window is not activated); without a pending approval the page is not touched.",
+      inputSchema: { threadId: id('Codex conversation') },
+      annotations: READ,
+    },
+    (args) => answer(() => readApproval(app, page, args.threadId)),
+  );
+
+  server.registerTool(
+    'acb_codex_approval_answer',
+    {
+      title: 'Answer Codex approval',
+      description:
+        'Press a button of the approval card read with acb_codex_approval, for the user. Only after the user has explicitly chosen this button for this question: pass confirm: true then, never on your own judgment (UNCONFIRMED otherwise). The card must still ask `question` and have the button; nothing else is pressed (NO_APPROVAL).',
+      inputSchema: {
+        threadId: id('Codex conversation'),
+        question: z.string().min(1).max(20_000).describe('The question of the card, as acb_codex_approval returned it'),
+        button: z.string().min(1).max(100).describe('Exact name of the button the user chose'),
+        confirm: z.boolean().describe('true only when the user has explicitly confirmed this choice'),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+    },
+    (args) => answer(() => answerApproval(app, page, args.threadId, args)),
   );
 
   server.registerTool(

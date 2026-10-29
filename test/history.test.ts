@@ -135,6 +135,8 @@ function virtualPage(messages: PageMessage[], held = 8, chunk = messages.length)
     },
     readReply: async () => '',
     startChat: async () => {},
+    approval: async () => null,
+    press: async () => {},
   };
 }
 

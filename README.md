@@ -40,6 +40,8 @@ flowchart LR
 | `acb_codex_read` | 读取 Codex 对话最近几轮的提问和回复 |
 | `acb_codex_create` | 新建 Codex 对话（在某个项目里，或在新文件夹里），发出第一条消息 |
 | `acb_codex_send` | 给 Codex 对话发消息，等它做完并返回回复 |
+| `acb_codex_approval` | 读取 Codex 正在等你批准的内容：审批卡片的标题、问题和按钮 |
+| `acb_codex_approval_answer` | 按你明确确认的选择，点审批卡片上的一个按钮（必须带 `confirm: true`） |
 | `acb_gpt_list` | 列出最近的 ChatGPT 对话 |
 | `acb_gpt_read` | 读取 ChatGPT 对话最近几轮的提问和回复 |
 | `acb_gpt_history` | 从页面读取 ChatGPT 对话更早的轮次和完整回复正文，可以一直读到对话开头 |
@@ -53,7 +55,8 @@ flowchart LR
 
 | 操作 | 抢占前台和键盘焦点 | 切换应用显示的页面 |
 |---|---|---|
-| 所有 Codex 工具；列出、读取对话；`acb_projects`、`acb_status` | 否 | 否 |
+| 其余 Codex 工具；列出、读取对话；`acb_projects`、`acb_status` | 否 | 否 |
+| `acb_codex_approval`、`acb_codex_approval_answer` | 否：点按钮时应用若抢走前台，ACB 立即交还 | Codex 在等你批准时是：打开该对话读取审批卡片；没有待批准的内容时不碰页面 |
 | `acb_gpt_send` | 否：消息在后台发出 | 是：发送前打开该对话，从页面读取回复正文 |
 | `acb_gpt_read` 带 `page: true` | 否 | 是：打开该对话读取回复正文 |
 | `acb_open` | 否 | 是 |
@@ -113,7 +116,7 @@ hermes mcp add acb --command "C:\Program Files\nodejs\node.exe" --args "D:\agent
 
 **Codex 对话**
 
-- 消息在应用里执行，使用的是应用里为该对话或项目设置的权限。Codex 需要你批准命令时，工具会返回 `NEEDS_USER`：请到应用里处理，之后用 `acb_codex_read` 查看结果。
+- 消息在应用里执行，使用的是应用里为该对话或项目设置的权限。Codex 需要你批准时，工具会返回 `NEEDS_USER`。`acb_codex_approval` 可以读出审批卡片上的标题、问题和按钮，让 agent 转告你，你不用自己切窗口找。你可以到应用里处理，也可以明确告诉 agent 选哪个按钮：只有调用带上 `confirm: true`、问题与卡片一致、按钮名在卡片上真实存在时，ACB 才会点它，否则拒绝（`UNCONFIRMED`、`NO_APPROVAL`）。ACB 不替你做决定。读取卡片需要 ChatGPT 窗口在屏幕上可见。
 - 应用把通过工具发来的消息显示为「转交」消息：发给已有对话的消息，显示为由这个对话自己转交；新建对话的第一条消息，显示为由「调用身份」对话转交（见下文）。
 - 不指定项目时，新对话会建在 `文档\Codex\<日期>\<文件夹名>` 下。
 - 已归档的对话，发消息时会自动取消归档。
@@ -153,6 +156,8 @@ hermes mcp add acb --command "C:\Program Files\nodejs\node.exe" --args "D:\agent
 | `WINDOW` | ChatGPT 窗口找不到、被完全挡住或无法操作 | 让窗口可见后重试 |
 | `INPUT` | 参数不对 | 按提示修改参数 |
 | `PROTOCOL` | 应用的回应不符合预期，通常是应用更新了 | 更新 ACB；问题仍在请提 Issue |
+| `UNCONFIRMED` | 回答审批的调用没有带上你的明确确认 | agent 先问你，你确认后再带 `confirm: true` 调用 |
+| `NO_APPROVAL` | 对话没有显示这个问题的审批卡片，或卡片上没有这个按钮 | 用 `acb_codex_approval` 重新读取 |
 
 ## 配置
 

@@ -14,7 +14,9 @@
 #   {"op":"lower","raised":[...]}              -> {"ok":true}
 #   {"op":"scroll","title":"...","percent":n}  -> {"ok":true,"found":bool}
 #   {"op":"reveal","title":"...","ids":["..."],"pages":n} -> {"ok":true,"found":bool}
-#   failure                                    -> {"ok":false,"code":"WINDOW|BUSY|UNAVAILABLE|INPUT","message":"..."}
+#   {"op":"approval","title":"..."}           -> {"ok":true,"found":bool,"card":{"text","buttons":[{"name","className","usable"}]}|null}
+#   {"op":"press","title":"...","text":"...","name":"..."} -> {"ok":true}
+#   failure                                    -> {"ok":false,"code":"WINDOW|BUSY|UNAVAILABLE|INPUT|NO_APPROVAL","message":"..."}
 # The ChatGPT window is used through UI Automation patterns only: no keystrokes, no mouse,
 # no clipboard. Control names are those of the Simplified Chinese app.
 $ErrorActionPreference = 'Stop'
@@ -165,6 +167,58 @@ namespace Acb {
       return page.nodes;
     }
 
+    // The approval card in a page's cached raw tree, or null: its text and its buttons, those
+    // that carry the card's class marker. The card is the nearest element above its first
+    // button that holds text besides buttons.
+    public static Hashtable Card(AutomationElement root) {
+      var path = new List<AutomationElement>();
+      if (!PathTo(root, path)) return null;
+      int at = path.Count - 2;
+      while (at >= 0 && !HasText(path[at])) at--;
+      if (at < 0) return null;
+      var card = path[at];
+      var text = new List<string>();
+      foreach (var node in Read(card)) if ((string)node["type"] == "Text") text.Add((string)node["name"]);
+      var buttons = new List<Hashtable>();
+      foreach (var button in CardButtons(card)) {
+        var cached = button.Cached;
+        buttons.Add(new Hashtable { { "name", cached.Name }, { "className", cached.ClassName }, { "usable", cached.IsEnabled && !cached.IsOffscreen } });
+      }
+      return new Hashtable { { "text", string.Join("\n", text) }, { "buttons", buttons } };
+    }
+
+    static bool IsCardButton(AutomationElement element) {
+      var cached = element.Cached;
+      return cached.ControlType == ControlType.Button && (cached.ClassName ?? "").Contains("approval-card");
+    }
+
+    // `path` from `element` down to the first card button below it.
+    static bool PathTo(AutomationElement element, List<AutomationElement> path) {
+      path.Add(element);
+      if (IsCardButton(element)) return true;
+      var children = element.CachedChildren;
+      if (children != null) foreach (AutomationElement child in children) if (PathTo(child, path)) return true;
+      path.RemoveAt(path.Count - 1);
+      return false;
+    }
+
+    static List<AutomationElement> CardButtons(AutomationElement element) {
+      var found = new List<AutomationElement>();
+      if (IsCardButton(element)) found.Add(element);
+      var children = element.CachedChildren;
+      if (children != null) foreach (AutomationElement child in children) found.AddRange(CardButtons(child));
+      return found;
+    }
+
+    static bool HasText(AutomationElement element) {
+      var cached = element.Cached;
+      if (cached.ControlType == ControlType.Button) return false;
+      if (cached.ControlType == ControlType.Text && !string.IsNullOrEmpty(cached.Name)) return true;
+      var children = element.CachedChildren;
+      if (children != null) foreach (AutomationElement child in children) if (HasText(child)) return true;
+      return false;
+    }
+
     void Visit(AutomationElement element) {
       var cached = element.Cached;
       var type = cached.ControlType;
@@ -263,12 +317,12 @@ function Invoke($element) { $element.GetCurrentPattern([Windows.Automation.Invok
 
 function Until([int]$ms, [scriptblock]$probe) {
   $deadline = [DateTime]::UtcNow.AddMilliseconds($ms)
-  do {
+  for (;;) {
     $value = & $probe
     if ($value) { return $value }
-    Start-Sleep -Milliseconds 200
-  } while ([DateTime]::UtcNow -lt $deadline)
-  return $null
+    if ([DateTime]::UtcNow -ge $deadline) { return $null }
+    Start-Sleep -Milliseconds 50
+  }
 }
 
 # Whether the server of a tool pipe is the ChatGPT desktop app: signed by OpenAI and running
@@ -303,11 +357,11 @@ function Foreground { return @{ ok = $true; window = [Acb.Win32]::GetForegroundW
 # to `window`, which had it before, but only when it is the app that has it now: a window
 # the user switched to meanwhile is left alone. Attaching to the input of the thread that
 # holds the foreground lets this helper set it without any synthetic input.
-function GiveBack($request) {
+function GiveBack($request, [int]$waitMs = 300) {
   $target = [IntPtr][long]$request.window
   if ($target -eq [IntPtr]::Zero -or -not [Acb.Win32]::IsWindow($target)) { return @{ ok = $true; taken = $false; restored = $false } }
   $app = AppIds
-  $taken = Until 300 {
+  $taken = Until $waitMs {
     $current = [Acb.Win32]::GetForegroundWindow()
     [uint32]$owner = 0
     $thread = [Acb.Win32]::GetWindowThreadProcessId($current, [ref]$owner)
@@ -318,6 +372,13 @@ function GiveBack($request) {
   [void][Acb.Win32]::AttachThreadInput($self, $taken, $true)
   try { [void][Acb.Win32]::SetForegroundWindow($target) } finally { [void][Acb.Win32]::AttachThreadInput($self, $taken, $false) }
   return @{ ok = $true; taken = $true; restored = ([Acb.Win32]::GetForegroundWindow() -eq $target) }
+}
+
+# Chromium makes its window the foreground one, synchronously, when UI Automation scrolls or
+# presses something in its page; the foreground is given back at once.
+function KeepForeground([scriptblock]$action) {
+  $foreground = [Acb.Win32]::GetForegroundWindow().ToInt64()
+  try { & $action } finally { $null = GiveBack @{ window = $foreground } 0 }
 }
 
 # The app's top-level windows. A minimized window exposes no UI tree, so it is restored
@@ -370,16 +431,47 @@ function Transcript($request) {
   # Above its first message, the page shows a status while it has older messages to load.
   $older = [bool]($scope -and (Find $scope 'Text' $Names.Older))
   if (-not $scope) { $scope = $document }
+  $nodes = [Acb.Page]::Read((RawTree $scope))
+  return @{ ok = $true; found = $true; busy = [bool](Find $document 'Button' $Names.Stop); older = $older; framed = $framed; scroll = $position; nodes = $nodes }
+}
+
+# The raw tree below `scope`, fetched as one cached batch.
+function RawTree($scope) {
   $cache = [Windows.Automation.CacheRequest]::new()
-  foreach ($property in $Element::NameProperty, $Element::ControlTypeProperty, $Element::ClassNameProperty, $Element::IsControlElementProperty, $Element::RuntimeIdProperty) {
+  foreach ($property in $Element::NameProperty, $Element::ControlTypeProperty, $Element::ClassNameProperty, $Element::IsControlElementProperty, $Element::RuntimeIdProperty, $Element::IsEnabledProperty, $Element::IsOffscreenProperty) {
     $cache.Add($property)
   }
   $cache.TreeScope = [Windows.Automation.TreeScope]::Subtree
   $cache.TreeFilter = [Windows.Automation.Automation]::RawViewCondition
   $active = $cache.Activate()
-  try { $tree = $scope.GetUpdatedCache($cache) } finally { $active.Dispose() }
-  $nodes = [Acb.Page]::Read($tree)
-  return @{ ok = $true; found = $true; busy = [bool](Find $document 'Button' $Names.Stop); older = $older; framed = $framed; scroll = $position; nodes = $nodes }
+  try { return $scope.GetUpdatedCache($cache) } finally { $active.Dispose() }
+}
+
+# The approval card Codex shows in the conversation shown under `title` while it waits for the
+# user (see Acb.Page.Card): {found, card: {text, buttons: [{name, className, usable}]} | null}.
+function Approval($request) {
+  $document = Shown $request.title
+  if (-not $document) { return @{ ok = $true; found = $false } }
+  $scope = Find $document 'Group' $Names.Conversation
+  if (-not $scope) { return @{ ok = $true; found = $true; card = $null } }
+  return @{ ok = $true; found = $true; card = [Acb.Page]::Card((RawTree $scope)) }
+}
+
+# Presses the button named `name` on the approval card of the conversation shown under `title`,
+# after checking that the card still reads `text`: a card that changed asks something else.
+# The button is found by the card's class marker and its exact name, and must be the only one.
+function Press($request) {
+  $document = Shown $request.title
+  if (-not $document) { Fail 'WINDOW' 'The ChatGPT window does not show the conversation on screen' }
+  $scope = Find $document 'Group' $Names.Conversation
+  $card = if ($scope) { [Acb.Page]::Card((RawTree $scope)) }
+  if (-not $card) { Fail 'NO_APPROVAL' 'The conversation shows no approval card' }
+  if ($card.text -cne $request.text) { Fail 'NO_APPROVAL' 'The approval card asks something else now; read it again' }
+  $condition = [Windows.Automation.AndCondition]::new((Condition 'Button' $request.name), [Windows.Automation.PropertyCondition]::new($Element::IsEnabledProperty, $true))
+  $buttons = @($scope.FindAll($Descendants, $condition) | Where-Object { -not $_.Current.IsOffscreen -and $_.Current.ClassName -like '*approval-card*' })
+  if ($buttons.Count -ne 1) { Fail 'NO_APPROVAL' "The approval card has no single usable button named $($request.name)" }
+  KeepForeground { Invoke $buttons[0] }
+  return @{ ok = $true }
 }
 
 # Where the conversation `scope` is scrolled to: null when it fits, so it does not scroll.
@@ -555,8 +647,10 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
       'launch' { Launch }
       'raise' { Raise }
       'lower' { Lower $request }
-      'scroll' { Scroll $request }
-      'reveal' { Reveal $request }
+      'scroll' { KeepForeground { Scroll $request } }
+      'reveal' { KeepForeground { Reveal $request } }
+      'approval' { Approval $request }
+      'press' { Press $request }
       default { Fail 'INPUT' "Unknown operation: $($request.op)" }
     }
   } catch {
@@ -564,5 +658,5 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
     if (-not $message) { $code, $message = 'WINDOW', $_.Exception.Message }
     $response = @{ ok = $false; code = $code; message = $message }
   }
-  [Console]::Out.WriteLine(($response | ConvertTo-Json -Depth 4 -Compress))
+  [Console]::Out.WriteLine(($response | ConvertTo-Json -Depth 5 -Compress))
 }
