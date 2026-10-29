@@ -171,20 +171,46 @@ namespace Acb {
     // that carry the card's class marker. The card is the nearest element above its first
     // button that holds text besides buttons.
     public static Hashtable Card(AutomationElement root) {
+      var card = CardOf(root);
+      if (card == null) return null;
+      var buttons = new List<Hashtable>();
+      foreach (var button in CardButtons(card)) {
+        var cached = button.Cached;
+        buttons.Add(new Hashtable { { "name", cached.Name }, { "className", cached.ClassName }, { "usable", Usable(button) } });
+      }
+      return new Hashtable { { "text", CardText(card) }, { "buttons", buttons } };
+    }
+
+    // The one usable button `name` of the approval card under `root`, taken from the card
+    // itself and only while it reads `text`; null otherwise.
+    public static AutomationElement CardButton(AutomationElement root, string text, string name) {
+      var card = CardOf(root);
+      if (card == null || CardText(card) != text) return null;
+      AutomationElement found = null;
+      foreach (var button in CardButtons(card)) {
+        if (button.Cached.Name != name || !Usable(button)) continue;
+        if (found != null) return null;
+        found = button;
+      }
+      return found;
+    }
+
+    static AutomationElement CardOf(AutomationElement root) {
       var path = new List<AutomationElement>();
       if (!PathTo(root, path)) return null;
       int at = path.Count - 2;
       while (at >= 0 && !HasText(path[at])) at--;
-      if (at < 0) return null;
-      var card = path[at];
+      return at < 0 ? null : path[at];
+    }
+
+    static string CardText(AutomationElement card) {
       var text = new List<string>();
       foreach (var node in Read(card)) if ((string)node["type"] == "Text") text.Add((string)node["name"]);
-      var buttons = new List<Hashtable>();
-      foreach (var button in CardButtons(card)) {
-        var cached = button.Cached;
-        buttons.Add(new Hashtable { { "name", cached.Name }, { "className", cached.ClassName }, { "usable", cached.IsEnabled && !cached.IsOffscreen } });
-      }
-      return new Hashtable { { "text", string.Join("\n", text) }, { "buttons", buttons } };
+      return string.Join("\n", text);
+    }
+
+    static bool Usable(AutomationElement button) {
+      return button.Cached.IsEnabled && !button.Cached.IsOffscreen;
     }
 
     static bool IsCardButton(AutomationElement element) {
@@ -457,20 +483,16 @@ function Approval($request) {
   return @{ ok = $true; found = $true; card = [Acb.Page]::Card((RawTree $scope)) }
 }
 
-# Presses the button named `name` on the approval card of the conversation shown under `title`,
-# after checking that the card still reads `text`: a card that changed asks something else.
-# The button is found by the card's class marker and its exact name, and must be the only one.
+# Presses the button named `name` on the approval card of the conversation shown under `title`
+# while the card reads `text`: a card that changed asks something else. The button is taken
+# from that card (see Acb.Page.CardButton), so no other card's button is pressed.
 function Press($request) {
   $document = Shown $request.title
   if (-not $document) { Fail 'WINDOW' 'The ChatGPT window does not show the conversation on screen' }
   $scope = Find $document 'Group' $Names.Conversation
-  $card = if ($scope) { [Acb.Page]::Card((RawTree $scope)) }
-  if (-not $card) { Fail 'NO_APPROVAL' 'The conversation shows no approval card' }
-  if ($card.text -cne $request.text) { Fail 'NO_APPROVAL' 'The approval card asks something else now; read it again' }
-  $condition = [Windows.Automation.AndCondition]::new((Condition 'Button' $request.name), [Windows.Automation.PropertyCondition]::new($Element::IsEnabledProperty, $true))
-  $buttons = @($scope.FindAll($Descendants, $condition) | Where-Object { -not $_.Current.IsOffscreen -and $_.Current.ClassName -like '*approval-card*' })
-  if ($buttons.Count -ne 1) { Fail 'NO_APPROVAL' "The approval card has no single usable button named $($request.name)" }
-  KeepForeground { Invoke $buttons[0] }
+  $button = if ($scope) { [Acb.Page]::CardButton((RawTree $scope), $request.text, $request.name) }
+  if (-not $button) { Fail 'NO_APPROVAL' "The approval card changed, or has no single usable button named $($request.name); read it again" }
+  KeepForeground { Invoke $button }
   return @{ ok = $true }
 }
 
