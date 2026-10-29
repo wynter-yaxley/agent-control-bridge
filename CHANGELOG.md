@@ -4,7 +4,7 @@ Versions follow Semantic Versioning. Desktop behavior is verified manually on Wi
 
 ## 0.8.0
 
-- New `acb_codex_approval { threadId }`: what Codex waits for the user to approve, read from the approval card on the page (title, question, buttons with `kind` deny / allow / other). Without a pending approval (`status` is not `needsUser`) it returns `status: none` and does not touch the page.
+- New `acb_codex_approval { threadId }`: what Codex waits for the user to approve, read from the approval card on the page (title, question, buttons with `kind` deny / allow / other). Without a pending approval (`status` is not `needsUser`) it returns `status: none` and does not touch the page. So that it works while the user is away, it opens a window closed in the tray and raises a covered one for the read, as `acb_gpt_history` does, and puts it back.
 - New `acb_codex_approval_answer { threadId, question, button, confirm }`: presses one button of that card for the user. It needs `confirm: true` (else `UNCONFIRMED`, before anything is read), the card must still ask `question`, and the button must be on it, found by the card's class marker and its exact name (else `NO_APPROVAL`). Pressing uses UI Automation (InvokePattern), with no input.
 - Focus: Chromium activates its window when UI Automation scrolls its page or presses a button in it, when ACB's process may set the foreground. `acb_gpt_history` used to leave the app in front for the whole read; scrolling and pressing now give the foreground back in the same helper call.
 - Faster: a give-back that finds nothing taken waits 300 ms instead of about 450 ms, and `acb_gpt_history` no longer waits for one when the window was already open.

@@ -90,7 +90,8 @@ export type Pending = { threadId: string; status: 'none' } | ({ threadId: string
 /**
  * The approval card Codex shows while it waits for the user. The app's tools only tell that it
  * waits, so the card is read from the page: the conversation is shown (the window is not
- * activated). Without a wait, the page is not touched.
+ * activated, but opened from the tray or raised above covering windows for the read). Without
+ * a wait, the page is not touched.
  */
 export async function readApproval(app: App, page: Page, threadId: string): Promise<Pending> {
   const read = await waiting(app, threadId);
@@ -165,17 +166,23 @@ async function withCard<T>(
   return page.run(async () => {
     const giveBack = await page.holdForeground();
     try {
-      await app.show(read.id);
-      await giveBack();
-      const card = await page.approval(read.title, SHOW_MS);
-      if (card === undefined) {
-        throw new AcbError(
-          'WINDOW',
-          'The ChatGPT window does not show the conversation; the app does not update a window that is fully covered, so keep part of it visible',
-          { threadId: read.id },
-        );
+      // As for history: the card must be read while the user is away, so a window closed in
+      // the tray is opened, and a covered one raised (it is shown before the page switches).
+      if (await page.launch()) await giveBack();
+      const lower = await page.raise();
+      try {
+        await app.show(read.id);
+        await giveBack();
+        const card = await page.approval(read.title, SHOW_MS);
+        if (card === undefined) {
+          throw new AcbError('WINDOW', 'The ChatGPT window does not show the conversation on screen', {
+            threadId: read.id,
+          });
+        }
+        return await use(card);
+      } finally {
+        await lower();
       }
-      return await use(card);
     } finally {
       await giveBack();
     }

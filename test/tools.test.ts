@@ -24,6 +24,8 @@ interface FakePage extends Page {
   card: ApprovalCard | null;
   /** The buttons pressed, with the text of the card they were pressed on. */
   pressed: string[];
+  /** Times the window was raised and not yet put back. */
+  raised: number;
 }
 
 /**
@@ -39,10 +41,16 @@ function fakePage(app: FakeApp, reply = 'reply from the page'): FakePage {
     view: () => null,
     card: null,
     pressed: [],
+    raised: 0,
     run: (task) => queue.run(task),
     holdForeground: async () => async () => {},
     launch: async () => false,
-    raise: async () => async () => {},
+    async raise() {
+      this.raised++;
+      return async () => {
+        this.raised--;
+      };
+    },
     scroll: async () => true,
     reveal: async () => true,
     async pageState() {
@@ -565,4 +573,5 @@ test("an approval is answered only with the user's confirmation, on the card tha
     pressed: '拒绝',
   });
   assert.deepEqual(page.pressed, [`${CARD.text}: 拒绝`]);
+  assert.equal(page.raised, 0, 'a raised window is put back');
 });

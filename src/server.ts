@@ -154,7 +154,7 @@ export function createServer({ app, page, version, timeoutMs }: Services): McpSe
     {
       title: 'Read Codex approval',
       description:
-        "What a Codex conversation waits for the user to approve (status needsUser): the approval card's title, question and buttons (kind deny, allow or other). status none when it waits for nothing. Reads the card from the page, so the app shows this conversation (the window is not activated); without a pending approval the page is not touched.",
+        "What a Codex conversation waits for the user to approve (status needsUser): the approval card's title, question and buttons (kind deny, allow or other). status none when it waits for nothing. Reads the card from the page, so the app shows this conversation (the window is not activated; one closed in the tray is opened and a covered one raised for the read, then put back); without a pending approval neither page nor window is touched.",
       inputSchema: { threadId: id('Codex conversation') },
       annotations: READ,
     },

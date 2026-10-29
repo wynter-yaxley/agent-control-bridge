@@ -56,7 +56,7 @@ flowchart LR
 | Operation | Takes the foreground and keyboard focus | Switches the page the app shows |
 |---|---|---|
 | Other Codex tools; listing and reading; `acb_projects`, `acb_status` | No | No |
-| `acb_codex_approval`, `acb_codex_approval_answer` | No: if the app takes the foreground when the button is pressed, ACB gives it back at once | While Codex waits for your approval, yes: the conversation is shown to read the card; otherwise the page is not touched |
+| `acb_codex_approval`, `acb_codex_approval_answer` | Usually no, as for `acb_gpt_history`: a window closed in the tray is opened and the foreground given back; a fully covered window is brought above the others for the read (without activating it) and put back; if the app takes the foreground when the button is pressed, ACB gives it back at once | While Codex waits for your approval, yes: the conversation is shown to read the card; otherwise neither the page nor the window is touched |
 | `acb_gpt_send` | No: the message is sent in the background | Yes: before sending, the conversation is shown to read the reply text |
 | `acb_gpt_read` with `page: true` | No | Yes: the conversation is shown to read the reply text |
 | `acb_open` | No | Yes |
@@ -116,7 +116,7 @@ A send waits up to 240 seconds by default. Set the client's tool timeout to 300 
 
 **Codex conversations**
 
-- Messages run in the app with the permissions the app has for that conversation or project. When Codex needs your approval, the tool returns `NEEDS_USER`. `acb_codex_approval` reads the approval card's title, question and buttons, so the agent can tell you without you looking for the window. Handle it in the app, or tell the agent explicitly which button to press: ACB presses it only when the call carries `confirm: true`, the question matches the card and the button really is on it; otherwise it refuses (`UNCONFIRMED`, `NO_APPROVAL`). ACB never decides for you. Reading the card needs the ChatGPT window visible on screen.
+- Messages run in the app with the permissions the app has for that conversation or project. When Codex needs your approval, the tool returns `NEEDS_USER`. `acb_codex_approval` reads the approval card's title, question and buttons, so the agent can tell you without you looking for the window. Handle it in the app, or tell the agent explicitly which button to press: ACB presses it only when the call carries `confirm: true`, the question matches the card and the button really is on it; otherwise it refuses (`UNCONFIRMED`, `NO_APPROVAL`). ACB never decides for you. As for history, a covered window is brought up, or a window closed in the tray opened, for the read and put back afterwards; the screen must be unlocked.
 - The app shows messages sent through its tools as delegated messages: a message to an existing conversation as delegated by that conversation itself; the first message of a new conversation as delegated by the caller conversation (see below).
 - Without a project, a new conversation is created under `Documents\Codex\<date>\<folder>`.
 - Archived conversations are restored when you message them.
