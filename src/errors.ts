@@ -21,7 +21,7 @@ export type ErrorCode =
   | 'WINDOW'
   /** The app answered in an unexpected way, usually after an app update. */
   | 'PROTOCOL'
-  /** Answering an approval needs the user's explicit confirmation (confirm: true). Ask the user. */
+  /** Answering an approval needs confirm: true: the user's choice, or the default allow they agreed to. */
   | 'UNCONFIRMED'
   /** The conversation shows no approval card with this question and button. Read it again. */
   | 'NO_APPROVAL';

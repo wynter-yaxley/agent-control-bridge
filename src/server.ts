@@ -20,7 +20,7 @@ Messages run inside the app, so the user sees them live. Listing and reading nev
 Sending a prompt that is already the newest message of the conversation does not send it again: repeat a timed-out send to collect its reply.
 Only acb_gpt_create brings the ChatGPT window to the front; reading a ChatGPT reply from the page and acb_open switch the page the app shows.
 acb_gpt_history reads older ChatGPT turns from the page: it may start the app and brings its window above the others (without activating it) while it reads.
-acb_codex_approval shows what Codex waits for the user to approve. Never decide it yourself: acb_codex_approval_answer presses a button only for a choice the user has explicitly confirmed (confirm: true).`;
+When Codex waits for approval, the user's default is to allow: read the card with acb_codex_approval, press its defaultButton with acb_codex_approval_answer (confirm: true), then tell the user what was approved. Ask first or deny instead only when the user has said so.`;
 
 const id = (what: string) => z.string().regex(UUID, `Expected a ${what} ID`).describe(`${what} ID`);
 // The app reads back at most 20,000 characters of a message; ACB must read its own prompts back whole.
@@ -154,7 +154,7 @@ export function createServer({ app, page, version, timeoutMs }: Services): McpSe
     {
       title: 'Read Codex approval',
       description:
-        "What a Codex conversation waits for the user to approve (status needsUser): the approval card's title, question and buttons (kind deny, allow or other). status none when it waits for nothing. Reads the card from the page, so the app shows this conversation (the window is not activated; one closed in the tray is opened and a covered one raised for the read, then put back); without a pending approval neither page nor window is touched.",
+        "What a Codex conversation waits for the user to approve (status needsUser): the approval card's title, question and buttons (kind deny, allow or other), and defaultButton, the one that allows the least, to press by default. status none when it waits for nothing. Reads the card from the page, so the app shows this conversation (the window is not activated; one closed in the tray is opened and a covered one raised for the read, then put back); without a pending approval neither page nor window is touched.",
       inputSchema: { threadId: id('Codex conversation') },
       annotations: READ,
     },
@@ -166,12 +166,14 @@ export function createServer({ app, page, version, timeoutMs }: Services): McpSe
     {
       title: 'Answer Codex approval',
       description:
-        'Press a button of the approval card read with acb_codex_approval, for the user. Only after the user has explicitly chosen this button for this question: pass confirm: true then, never on your own judgment (UNCONFIRMED otherwise). The card must still ask `question` and have the button; nothing else is pressed (NO_APPROVAL).',
+        "Press a button of the approval card read with acb_codex_approval, for the user: by default its defaultButton (the user's default is to allow, with the least: 允许一次, never 始终允许 unless they ask), or the button the user chose. Pass confirm: true (UNCONFIRMED otherwise). The card must still ask `question` and have the button; nothing else is pressed (NO_APPROVAL). Then tell the user what was pressed (the result names the card).",
       inputSchema: {
         threadId: id('Codex conversation'),
         question: z.string().min(1).max(20_000).describe('The question of the card, as acb_codex_approval returned it'),
-        button: z.string().min(1).max(100).describe('Exact name of the button the user chose'),
-        confirm: z.boolean().describe('true only when the user has explicitly confirmed this choice'),
+        button: z.string().min(1).max(100).describe('Exact button name: defaultButton, or the one the user chose'),
+        confirm: z
+          .boolean()
+          .describe("true when this is the user's choice or the default allow they agreed to; false presses nothing"),
       },
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     },

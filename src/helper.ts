@@ -61,6 +61,11 @@ export interface Approval {
   title: string;
   question: string;
   buttons: { name: string; kind: 'deny' | 'allow' | 'other'; className: string }[];
+  /**
+   * The button that allows the least, for the user's default of allowing: 允许一次 when the
+   * card has it, else its primary allow button; never a broader one such as 始终允许.
+   */
+  defaultButton: string | null;
 }
 
 /**
@@ -69,17 +74,16 @@ export interface Approval {
  */
 export function approvalOf(card: ApprovalCard): Approval {
   const [title, ...question] = card.text.split('\n');
-  return {
-    title,
-    question: question.join('\n'),
-    buttons: card.buttons
-      .filter((button) => button.usable)
-      .map(({ name, className }) => ({
-        name,
-        kind: name === LABELS.deny ? 'deny' : /(^| )bg-primary-solid( |$)/.test(className) ? 'allow' : 'other',
-        className,
-      })),
-  };
+  const buttons = card.buttons
+    .filter((button) => button.usable)
+    .map(({ name, className }): Approval['buttons'][number] => ({
+      name,
+      kind: name === LABELS.deny ? 'deny' : /(^| )bg-primary-solid( |$)/.test(className) ? 'allow' : 'other',
+      className,
+    }));
+  const allow =
+    buttons.find((button) => button.name === LABELS.allowOnce) ?? buttons.find((button) => button.kind === 'allow');
+  return { title, question: question.join('\n'), buttons, defaultButton: allow?.name ?? null };
 }
 
 /** A vertical scroll position: how far down, and how much of the height shows (percent). */
@@ -103,7 +107,13 @@ export function atEnd(scroll: Scroll | null): boolean {
 }
 
 /** Page labels of the Simplified Chinese app. */
-const LABELS = { you: ['你说：', '您说：'], assistant: ['ChatGPT 说：'], finished: '更多操作', deny: '拒绝' };
+const LABELS = {
+  you: ['你说：', '您说：'],
+  assistant: ['ChatGPT 说：'],
+  finished: '更多操作',
+  deny: '拒绝',
+  allowOnce: '允许一次',
+};
 const REQUEST_TIMEOUT_MS = 30_000;
 /** How long a reply may take to show on the page. */
 export const READ_TIMEOUT_MS = 20_000;

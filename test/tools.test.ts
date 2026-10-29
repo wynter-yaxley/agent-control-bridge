@@ -547,9 +547,10 @@ test('an approval card is read from the page only while Codex waits for the user
       ['允许此对话', 'allow'],
     ],
   );
+  assert.equal(pending.defaultButton, '允许此对话', 'without 允许一次, the primary allow button, never 始终允许');
 });
 
-test("an approval is answered only with the user's confirmation, on the card that asks the question", async () => {
+test('an approval is answered only with confirm: true, on the card that asks the question', async () => {
   const app = new FakeApp();
   waitingForApproval(app);
   const page = fakePage(app);
@@ -571,6 +572,8 @@ test("an approval is answered only with the user's confirmation, on the card tha
   assert.deepEqual(await answerApproval(app, page, CODEX, { question: QUESTION, button: '拒绝', confirm: true }), {
     threadId: CODEX,
     pressed: '拒绝',
+    title: 'Computer Use',
+    question: QUESTION,
   });
   assert.deepEqual(page.pressed, [`${CARD.text}: 拒绝`]);
   assert.equal(page.raised, 0, 'a raised window is put back');

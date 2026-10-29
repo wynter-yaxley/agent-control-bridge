@@ -101,27 +101,26 @@ export async function readApproval(app: App, page: Page, threadId: string): Prom
 }
 
 /**
- * Presses `button` on the approval card that asks `question`, which the user has confirmed.
- * ACB does not decide: without `confirm`, nothing is read or pressed.
+ * Presses `button` on the approval card that asks `question`: the user's choice, or the default
+ * allow they agreed to. ACB does not press on its own: without `confirm`, nothing is read or
+ * pressed. The result names the card, for the agent to report to the user.
  */
 export async function answerApproval(
   app: App,
   page: Page,
   threadId: string,
   { question, button, confirm }: { question: string; button: string; confirm: boolean },
-): Promise<{ threadId: string; pressed: string }> {
+): Promise<{ threadId: string; pressed: string; title: string; question: string }> {
   if (confirm !== true) {
     throw new AcbError(
       'UNCONFIRMED',
-      'Answering an approval needs the user to confirm it: ask them, then pass confirm: true',
-      {
-        threadId,
-      },
+      'Answering an approval needs confirm: true (the user chose this, or it is the default allow they agreed to)',
+      { threadId },
     );
   }
   const read = await waiting(app, threadId);
   if (!read) throw new AcbError('NO_APPROVAL', 'Codex is not waiting for the user in this conversation', { threadId });
-  await withCard(app, page, read, async (card) => {
+  const title = await withCard(app, page, read, async (card) => {
     const shown = card && approvalOf(card);
     if (!card || !shown || normalize(shown.question) !== normalize(question)) {
       throw new AcbError('NO_APPROVAL', 'The conversation shows no approval card with this question; read it again', {
@@ -135,8 +134,9 @@ export async function answerApproval(
       });
     }
     await page.press(read.title, card.text, button);
+    return shown.title;
   });
-  return { threadId, pressed: button };
+  return { threadId, pressed: button, title, question };
 }
 
 /** The Codex conversation when it waits for the user; undefined when it does not. */
